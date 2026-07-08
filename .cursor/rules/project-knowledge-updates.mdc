@@ -1,0 +1,21 @@
+---
+description: 用户要求记住或更新的项目约定，写入 .cursor/rules/
+alwaysApply: true
+---
+
+# 项目知识更新方式
+
+当用户说「更新到规则」「记住」「以后都这样」等，将约定持久化到 `.cursor/rules/*.mdc`，不要只留在对话里。
+
+## 操作步骤
+
+1. 在 `.cursor/rules/` 新建或更新 `.mdc` 文件
+2. frontmatter 含 `description`；全局约定设 `alwaysApply: true`，文件级约定用 `globs`
+3. 内容简洁、可执行：表格/清单/代码片段，一条规则一个主题
+4. 与现有规则重复时合并，不拆成多条重复规则
+
+## 本仓库已有规则
+
+- `schematic-readonly.mdc` — 原理图禁止修改
+- `easyeda-schematic-read.mdc` — 原理图精准读取与审查流程
+- `project-knowledge-updates.mdc` — 本文件，知识沉淀方式

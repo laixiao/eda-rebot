@@ -1,0 +1,105 @@
+---
+description: EasyEDA 原理图精准读取与审查；涉及原理图/审查/器件编号等任务前先读规则并核对参数
+alwaysApply: true
+---
+
+# 原理图精准读取与审查
+
+## 触发场景（先读本规则）
+
+用户消息或任务中出现以下字眼时，**先读取并遵守**本规则及关联规则，再执行操作：
+
+| 类别 | 触发词（含同义表述） |
+|------|---------------------|
+| 原理图 | 原理图、schematic、图页、器件、引脚、网络、连线、BOM、网表、接法 |
+| 审查 | 审查、检查、核对、audit、review、DRC、有没有问题、是否合理、逐个审查 |
+| 查看 | 帮我看看、看看、看一下、帮我查、查一下、帮忙看、帮我确认、确认一下 |
+| 器件编号 | C 编号（如 C474892）、位号（如 U13/R1）、型号（如 ESP32-S3、XL9555） |
+| EDA | EasyEDA、嘉立创EDA、立创EDA、EDA 启动 |
+
+「查看」类口语在本项目默认指**看原理图/电路**；出现时应先读本规则，再经 Bridge 只读拉取原理图数据后回答，不单凭猜测。
+
+**关联规则（同轮须一并读取）：**
+
+- `schematic-readonly.mdc` — 禁止写原理图
+- `project-knowledge-updates.mdc` — 新约定写入规则
+
+**关联 skill：** `easyeda-api-skill`（Bridge 执行、API 参考）
+
+## 知识先更新
+
+审查或读取中发现**可复用的流程、约束、项目约定**时：
+
+1. **先**更新 `.cursor/rules/*.mdc`（合并到本规则或新建主题规则）
+2. **再**在对话中给出结论或继续执行
+
+用户说「更新到规则」「记住」「以后都这样」时，按 `project-knowledge-updates` 执行。不要只留在对话里。
+
+## 器件编号先核对参数
+
+消息中出现**具体器件编号**时，**先查询核对参数**，再回答接法、选型或审查结论；禁止凭记忆猜测型号与规格。
+
+| 编号类型 | 示例 | 优先查询方式 | 须核对的关键参数 |
+|----------|------|--------------|------------------|
+| 立创 C 编号 | C474892、C20917 | Bridge：`eda.lib_Device.search("C474892")`；必要时查 [立创商城](https://www.szlcsc.com/) | 型号全称、封装、额定电压/电流、引脚定义 |
+| 原理图位号 | U13、R1、Q2 | Bridge：`sch_PrimitiveComponent.getAll()` + `getAllPinsByPrimitiveId` + 网表 | 实际器件名、封装、当前网络连接 |
+| 芯片/模块型号 | ESP32-S3、XL9555 | 原理图位号反查 → 数据手册 / `docs/` 本地资料 | 供电、IO 能力、I2C 地址、特殊引脚要求 |
+| 外购模块 | DC5V 白光模块 | `docs/` 图片或文档 → 必要时网搜 | 工作电压、功耗、线色定义 |
+
+查询顺序：**本工程原理图/网表 → EasyEDA 器件库 → 本地 docs → 立创商城/数据手册**。核对完成后再给接线建议或审查意见。
+
+## 读取前必须满足
+
+项目已打开；当前文档为 `EDMT_EditorDocumentType.SCHEMATIC_PAGE`；目标图页已通过 `dmt_EditorControl.openDocument(pageUuid)` 激活。
+
+## 按需求选 API
+
+| 需求 | API | 说明 |
+|------|-----|------|
+| 完整原始数据 | `sys_FileManager.getDocumentSource()` | JSON Lines 源码，最完整；参考 skill `format/schematic/` |
+| 器件/导线/坐标 | `sch_Primitive*.getAll()` + `getState_*()` | 结构化读取，按图元类型分别调用 |
+| 引脚 | `sch_PrimitiveComponent.getAllPinsByPrimitiveId(id)` | 器件引脚需单独读 |
+| 网络连接 | `sch_ManufactureData.getNetlistFile()` | 无精确坐标 |
+| BOM | `sch_ManufactureData.getBomFile()` | 物料清单 |
+| 多页枚举 | `dmt_Schematic.getAllSchematicPagesInfo()` | 先 `openDocument` 再读当前页 |
+| DRC | `sch_Drc` 相关只读接口 | 审查时优先跑原理图 DRC |
+| 器件库搜索 | `lib_Device.search(key)` | 按 C 编号或型号查立创器件参数 |
+
+## 原理图审查流程
+
+1. 确认 Bridge 已连接（`easyeda-api-skill`）
+2. `getAllSchematicPagesInfo()` 枚举全部图页
+3. 逐页 `openDocument(pageUuid)` 后读取
+4. 每页至少拉取：器件列表、网表、BOM；需要坐标时再读 `sch_Primitive*`
+5. 有 DRC 接口则跑原理图 DRC，记录警告/错误
+6. 需要时与 PCB 网表、BOM 交叉比对（器件位号、网络名一致性）
+7. 输出按严重程度分级：严重 → 中等 → 建议；改线方案以文字/表格给出，由用户手动改图
+
+审查结论中若总结出**本项目固定约定**（如器件地址、命名、模块划分），同步写入规则。
+
+## 常用只读代码模式
+
+```javascript
+const doc = await eda.dmt_SelectControl.getCurrentDocumentInfo();
+if (doc?.documentType !== EDMT_EditorDocumentType.SCHEMATIC_PAGE) {
+  return { error: "请先打开原理图图页" };
+}
+const components = await eda.sch_PrimitiveComponent.getAll(undefined, false);
+const wires = await eda.sch_PrimitiveWire.getAll();
+const source = await eda.sys_FileManager.getDocumentSource();
+```
+
+多页器件：`getAll(undefined, true)`；按网络过滤导线：`getAll("GND")`。
+
+网表读取（实测）：`getNetlistFile()` 返回浏览器 `File` 对象，需 `await file.text()` 后 `JSON.parse`；顶层键为 `components/designRule/...`，**没有 nets 键**，网络表需遍历 `components[*].pinInfoMap[*].net` 重建；引脚无 `net` 字段即 NC。器件数量按 `props.Designator` 统计（`sch_PrimitiveComponent.getAll` 计数含图形符号，会偏大）。
+
+## 关键约束
+
+- 原理图坐标单位是 **0.01 inch**（≠ PCB 的 1 mil）
+- 图元属性用 `getState_*()` 读取，不能直接访问字段
+- 所有 API 返回 Promise，必须 `await`
+- 大项目分页读：先 `openDocument` 再读，避免一次拉全工程
+
+## 与只读规则的关系
+
+遵守 `schematic-readonly`：仅使用 `get` / `getAll` / `getDocumentSource` 等只读接口，禁止任何写操作。

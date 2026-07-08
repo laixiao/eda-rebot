@@ -1,0 +1,26 @@
+---
+description: 本项目原理图只读，禁止通过 API 或任何方式修改原理图
+alwaysApply: true
+---
+
+# 原理图只读
+
+本项目（AI 机器人头部板 / EasyEDA）**禁止改动原理图**，仅允许读取与查询。
+
+## 禁止
+
+- 通过 EasyEDA API 创建、删除、移动、连线、改网络名、改位号、放置器件等任何**写操作**
+- 使用 `sch_PrimitiveWire.create` / `delete`、`sch_PrimitiveComponent.create` / `setDesignator`、`createNetFlag`、`createNetPort` 等修改类接口
+- 建议用户「我来帮你改原理图」并实际执行修改
+
+## 允许
+
+- 打开、查看原理图（`openDocument`、`get`、`getAll` 等只读接口）
+- 按 `easyeda-schematic-read` 规则精准读取（`getDocumentSource`、`sch_Primitive*`、`getNetlistFile` 等）
+- 查询器件、引脚、网络、连线状态
+- 在对话中以文字/表格说明接法、引脚定义、设计建议
+- 由用户本人在 EasyEDA 中手动修改原理图
+
+## 工作方式
+
+需要改原理图时：给出接线说明或步骤，由用户自行在 EasyEDA 中操作，不代为实现。
