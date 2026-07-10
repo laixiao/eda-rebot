@@ -93,6 +93,8 @@ const source = await eda.sys_FileManager.getDocumentSource();
 
 网表读取（实测）：`getNetlistFile()` 返回浏览器 `File` 对象，需 `await file.text()` 后 `JSON.parse`；顶层键为 `components/designRule/...`，**没有 nets 键**，网络表需遍历 `components[*].pinInfoMap[*].net` 重建；引脚无 `net` 字段即 NC。器件数量按 `props.Designator` 统计（`sch_PrimitiveComponent.getAll` 计数含图形符号，会偏大）。
 
+其他实测：`sch_Drc.check(true, false, true)` 只返回 `[{type:'warn',count:N}]` 汇总，不含逐条详情，且**当前文档非原理图页时直接抛错**；`getNetlistFile`/`getBomFile` 在非原理图页下返回 undefined——多文档工程务必先 `openDocument(pageUuid)` 且等 ~1s 再取数（可在同一段执行代码里 open + sleep + 取数一次完成）。`getBomFile(undefined,'csv')` 返回 File，`text()` 为 TSV（制表符分隔）；`pinInfoMap` 各引脚含 `pinNumber/net` 字段，引脚名读取需 `pinName ?? name` 兜底（两字段其一）。Windows 下向 Bridge `/execute` 发 JSON 须写入临时文件后 `curl.exe --data-binary "@file"`，PowerShell 内联 JSON 引号会被破坏；执行代码里不能用 `EDMT_EditorDocumentType` 等枚举全局名（未定义），判断文档类型用数值（原理图页=1）。
+
 ## 关键约束
 
 - 原理图坐标单位是 **0.01 inch**（≠ PCB 的 1 mil）

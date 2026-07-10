@@ -9,12 +9,14 @@
 
 上电电平影响 Boot / JTAG / 供电配置，不能像普通 IO 随意接。
 
-| GPIO | 作用 | 本板现状 |
+| GPIO | 作用 | 本板现状（v2） |
 |------|------|----------|
-| IO0 | Boot 模式 | NC，合理 |
-| IO3 | JTAG 源选择 | NC，合理 |
-| IO45 | VDD_SPI 电压 strap | NC，合理 |
-| IO46 | ROM 日志 strap | NC，合理 |
+| IO0 | Boot 模式 | R1 10k 上拉，接 T1 下载排针 |
+| IO3 | JTAG 源选择 | 复用 LCD_MISO，R9 10k 下拉 |
+| IO45 | VDD_SPI 电压 strap | 复用 LCD_SCK，R7 10k 下拉（保持 3.3V） |
+| IO46 | ROM 日志 strap | 复用 LCD_MOSI，R20 10k 下拉（下载模式有效） |
+
+> R7/R9/R20 三个下拉是 strap 安全的前提，改版时**不可删除**。
 
 ## 规则目录
 

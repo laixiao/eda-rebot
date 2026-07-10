@@ -1,0 +1,53 @@
+---
+description: 本板（AI智能机器狗_lx_改版_v2 / eda-robotpro_6）电路固定事实，审查与固件建议时直接引用
+alwaysApply: true
+---
+
+# 本板电路事实（2026-07-09 v2 网表核实）
+
+## 电源树（v2 改版）
+
+电池(U9 KF350) → VIN → **Q5 AO4407C 高边 P-MOS 载流开关**（SW1 SK-12D07 小拨动开关经 R6 1k 把栅极拉地导通；R5 100k 栅源关断上拉；C26 100nF 软启动）→ VBAT → D1(SS56 防反) → net"8V" → U11 TMI3255 降压(FB 39k/7.5k ≈ 4.96V) → **5V** → U5 **LD1117S33**(替换原 AMS1117) → **3.3V**；5V 另经 U7 XC6206-2.8V → CAM_2V8、U8 XC6206-1.2V → CAM_1V2（摄像头专用）。
+
+## I2C 总线（网名 OLED_SDA / OLED_SCL）
+
+- 引脚:U1 IO12=SDA、IO13=SCL，R11/R12 **4.7k** 上拉到 3.3V（v2 由 10k 改小）
+- 地址:**XL9555(U13)=0x20**、**PCA9685(U16)=0x40**、**OLED(U10)=0x3C**，无冲突
+- XL9555 INT# → IO2（R4 10k 上拉）；注意 ENC3/4 边沿也会触发 INT
+
+## 外设分配（v2）
+
+| 功能 | 引脚/通道 |
+|---|---|
+| 摄像头 DVP(U6 24P FPC) | XCLK=IO15, PCLK=IO1, VSYNC=IO6, HREF=IO7, D0-D7=IO11/14/8/20/41/42/48/19, SCCB=CAM_SDA(IO4)/CAM_SCL(IO5) 10k 上拉到 3.3V |
+| I2S 麦克风 INMP441(U2) | SCK=IO16, WS=IO17, SD=IO18, L/R 接地 |
+| I2S 功放 MAX98357(U3) | LRC=IO38, BCLK=IO39, DIN=IO40；**SD_MODE → XL9555 IO1_6**（v2 从 IO10 移出） |
+| UART0 下载(T2) | RXD0/TXD0；本板无 USB |
+| 编码器 ENC1/ENC2 | **ESP32 直连**:ENC1_A=IO9, ENC1_B=IO10, ENC2_A=IO21, ENC2_B=IO47（可用 PCNT） |
+| 编码器 ENC3/ENC4 | XL9555 IO0_0~IO0_3（I2C 读取，仅低速可靠） |
+| SPI LCD(U4 14P) | SCK=**IO45**, MOSI=**IO46**, MISO=**IO3**（三脚经 R7/R20/R9 10k 下拉，strap 兼容，**不可删**）；CS=XL9555 IO1_4, DC=IO1_2, RST=IO1_3, 背光=IO1_1 |
+| LCD 触摸（**电阻 XPT2046，SPI 共总线**） | **已按实物接对（2026-07-09 晚网表核实）**：U4.10=T_CLK→LCD_SCK、11=T_CS→XL9555 IO1_0、12=T_SDI→LCD_MOSI、13=T_SDO→LCD_MISO、14=T_IRQ→XL9555 IO1_5 |
+| 白光 LED ×3+总开关 | PCA9685 LED0-2 → Q2/Q1/Q4(AO3400)；XL9555 IO1_7 → Q3 总开关；栅极 1k 上拉 |
+| 电机 TB6612 ×2(U19/U22) | VM=5V, VCC=3.3V, PWMA/PWMB/STBY 拉高，PCA9685 LED3-10 打 IN 脚 |
+| 舵机 ×5(T3-T7) | PCA9685 LED11-15，5V 供电 |
+
+## Strapping 现状（v2）
+
+| GPIO | 复用 | 保障措施 |
+|---|---|---|
+| IO0 | BOOT 按键/T1 排针 | R1 10k 上拉 |
+| IO3 | LCD_MISO | R9 10k 下拉（JTAG strap 默认无效） |
+| IO45 | LCD_SCK | R7 10k 下拉 → VDD_SPI=3.3V 维持 |
+| IO46 | LCD_MOSI | R20 10k 下拉 → 下载模式组合有效 |
+
+## 显示模组实物（2026-07-09 确认，电阻触摸版）
+
+- 屏：**3.5 寸 HSD 320x480，ST7796 + 电阻触摸**（用户确认 SKU；固件读 RDDID 兜底，ST7796 支持 RGB565）
+- 触摸：**电阻式，转接板 U1 = XPT2046 型 SPI 触摸 ADC**，与屏共 SPI；读触摸时钟须 ≤2MHz 分时；PENIRQ 开漏输出
+- 转接板：4.0 寸 40PIN SPI 转接板 V1.3（料号 40002），J1 引脚 1=VCC…9=SDO，**10=T_CLK、11=T_CS、12=T_SDI、13=T_SDO、14=T_IRQ**（若换电容款则映射 SCL/RST/SDA/NC/INT）
+- 供电：VCC=2.8~3.3V（本板 3.3V 直供正确），整机 0.33W，背光 6 LED 共 90mA（转接板有 Q1 驱动管，LED 脚为逻辑输入）
+
+## 资源占用
+
+- ESP32:**无空闲 IO**（仅 IO35/36/37 因 PSRAM 禁用而 NC）
+- XL9555:空闲 IO0_4~IO0_7 共 4 路
