@@ -17,6 +17,7 @@ class ST7796 {
  private:
   XL9555 *xl_ = nullptr;
   bool ok_ = false;
+  bool io_ok_ = false;
   uint16_t w_ = 320;
   uint16_t h_ = 480;
   uint8_t rot_ = 0;

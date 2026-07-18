@@ -6,28 +6,28 @@
 
 static const uint32_t SPI_HZ = 40000000;
 
-void ST7796::cs(bool level) { xl_->setPin(XL_LCD_CS, level); }
-void ST7796::dc(bool level) { xl_->setPin(XL_LCD_DC, level); }
-void ST7796::rst(bool level) { xl_->setPin(XL_LCD_RST, level); }
+void ST7796::cs(bool level) { if (!xl_ || !xl_->setPin(XL_LCD_CS, level)) io_ok_ = false; }
+void ST7796::dc(bool level) { if (!xl_ || !xl_->setPin(XL_LCD_DC, level)) io_ok_ = false; }
+void ST7796::rst(bool level) { if (!xl_ || !xl_->setPin(XL_LCD_RST, level)) io_ok_ = false; }
 
 void ST7796::writeCmd(uint8_t cmd) {
   dc(false);
   cs(false);
-  board_spi_tx(&cmd, 1, SPI_HZ);
+  if (!board_spi_tx(&cmd, 1, SPI_HZ)) io_ok_ = false;
   cs(true);
 }
 
 void ST7796::writeData(uint8_t data) {
   dc(true);
   cs(false);
-  board_spi_tx(&data, 1, SPI_HZ);
+  if (!board_spi_tx(&data, 1, SPI_HZ)) io_ok_ = false;
   cs(true);
 }
 
 void ST7796::writeData16(uint16_t data) {
   dc(true);
   cs(false);
-  board_spi_write16(data, SPI_HZ);
+  if (!board_spi_write16(data, SPI_HZ)) io_ok_ = false;
   cs(true);
 }
 
@@ -40,7 +40,12 @@ void ST7796::hardReset() {
   vTaskDelay(pdMS_TO_TICKS(120));
 }
 
-void ST7796::backlight(bool on) { xl_->setPin(XL_LCD_LED, on); }
+void ST7796::backlight(bool on) {
+  if (!xl_ || !xl_->setPin(XL_LCD_LED, on)) {
+    io_ok_ = false;
+    ok_ = false;
+  }
+}
 
 void ST7796::setWindow(uint16_t x0, uint16_t y0, uint16_t x1, uint16_t y1) {
   writeCmd(0x2A);
@@ -58,7 +63,9 @@ void ST7796::setWindow(uint16_t x0, uint16_t y0, uint16_t x1, uint16_t y1) {
 
 bool ST7796::begin(XL9555 &xl) {
   xl_ = &xl;
-  if (!board_spi_init()) return false;
+  ok_ = false;
+  io_ok_ = xl.present();
+  if (!io_ok_ || !board_spi_init()) return false;
   hardReset();
 
   writeCmd(0x01);
@@ -97,10 +104,11 @@ bool ST7796::begin(XL9555 &xl) {
   w_ = LCD_WIDTH;
   h_ = LCD_HEIGHT;
   rot_ = 0;
+  ok_ = true;
   backlight(true);
   fillScreen(0x0000);
-  ok_ = true;
-  return true;
+  ok_ = io_ok_;
+  return ok_;
 }
 
 void ST7796::setRotation(uint8_t r) {
@@ -114,6 +122,7 @@ void ST7796::setRotation(uint8_t r) {
   }
   writeCmd(0x36);
   writeData(madctl);
+  if (!io_ok_) ok_ = false;
 }
 
 void ST7796::fillRect(int16_t x, int16_t y, int16_t w, int16_t h, uint16_t color) {
@@ -128,8 +137,22 @@ void ST7796::fillRect(int16_t x, int16_t y, int16_t w, int16_t h, uint16_t color
   dc(true);
   cs(false);
   const uint32_t n = (uint32_t)w * (uint32_t)h;
-  for (uint32_t i = 0; i < n; i++) board_spi_write16(color, SPI_HZ);
+  uint8_t pixels[512];
+  for (size_t i = 0; i < sizeof(pixels); i += 2) {
+    pixels[i] = (uint8_t)(color >> 8);
+    pixels[i + 1] = (uint8_t)color;
+  }
+  uint32_t left = n;
+  while (left) {
+    const uint32_t chunk = left > 256 ? 256 : left;
+    if (!board_spi_tx(pixels, chunk * 2, SPI_HZ)) {
+      io_ok_ = false;
+      break;
+    }
+    left -= chunk;
+  }
   cs(true);
+  if (!io_ok_) ok_ = false;
 }
 
 void ST7796::fillScreen(uint16_t color) { fillRect(0, 0, w_, h_, color); }

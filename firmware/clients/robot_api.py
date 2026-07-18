@@ -50,28 +50,30 @@ class RobotApi:
         return self._call("/api/status")
 
     def estop(self) -> dict:
-        return self._call("/api/estop")
+        return self._call("/api/estop", method="POST")
 
     def pwm(self, on: bool = True) -> dict:
-        return self._call("/api/pwm", {"on": on})
+        return self._call("/api/pwm", {"on": on}, method="POST")
 
     def stby(self, on: bool = True) -> dict:
-        return self._call("/api/stby", {"on": on})
+        return self._call("/api/stby", {"on": on}, method="POST")
 
     def amp(self, on: bool = True) -> dict:
-        return self._call("/api/amp", {"on": on})
+        return self._call("/api/amp", {"on": on}, method="POST")
 
     def servo(self, servo_id: int, angle: int) -> dict:
-        return self._call("/api/servo", {"id": servo_id, "angle": angle})
+        return self._call("/api/servo", {"id": servo_id, "angle": angle}, method="POST")
 
     def servos(self, angles: list[int]) -> dict:
         return self._call("/api/servos", {"angles": angles}, method="POST")
 
     def motor(self, motor_id: int, direction: int, duty: int = 40) -> dict:
-        return self._call("/api/motor", {"id": motor_id, "dir": direction, "duty": duty})
+        return self._call(
+            "/api/motor", {"id": motor_id, "dir": direction, "duty": duty}, method="POST"
+        )
 
     def motor_stop_all(self) -> dict:
-        return self._call("/api/motor/stop_all")
+        return self._call("/api/motor/stop_all", method="POST")
 
     def encoders(self) -> dict:
         return self._call("/api/encoders")
@@ -80,13 +82,13 @@ class RobotApi:
         return self._call("/api/mic")
 
     def beep(self, ms: int = 250) -> dict:
-        return self._call("/api/beep", {"ms": ms})
+        return self._call("/api/beep", {"ms": ms}, method="POST")
 
     def oled(self, text: str = "", cmd: str = "text") -> dict:
-        return self._call("/api/oled", {"cmd": cmd, "text": text})
+        return self._call("/api/oled", {"cmd": cmd, "text": text}, method="POST")
 
     def led(self, led_id: int, duty: int = 100) -> dict:
-        return self._call("/api/led", {"id": led_id, "duty": duty})
+        return self._call("/api/led", {"id": led_id, "duty": duty}, method="POST")
 
     def camera(self, on: bool | None = None) -> dict:
         if on is None:

@@ -13,16 +13,20 @@ static const uint8_t MODE1_RESTART = 0x80;
 
 bool PCA9685::write8(uint8_t reg, uint8_t val) {
   uint8_t buf[2] = {reg, val};
-  return board_i2c_write(dev_, buf, 2);
+  const bool ok = board_i2c_write(dev_, buf, 2);
+  ok_ = ok;
+  return ok;
 }
 
 bool PCA9685::read8(uint8_t reg, uint8_t &val) {
-  return board_i2c_write_read(dev_, &reg, 1, &val, 1);
+  const bool ok = board_i2c_write_read(dev_, &reg, 1, &val, 1);
+  ok_ = ok;
+  return ok;
 }
 
 bool PCA9685::begin(uint8_t addr, float freqHz) {
+  ok_ = false;
   if (!board_i2c_add_device(addr, &dev_)) {
-    ok_ = false;
     return false;
   }
   uint8_t mode = 0;
@@ -32,7 +36,8 @@ bool PCA9685::begin(uint8_t addr, float freqHz) {
   if (!write8(MODE1, MODE1_AI)) return false;
   vTaskDelay(pdMS_TO_TICKS(1));
   if (!allOff()) return false;
-  return setPWMFreq(freqHz);
+  ok_ = setPWMFreq(freqHz);
+  return ok_;
 }
 
 bool PCA9685::setPWMFreq(float freqHz) {
@@ -63,7 +68,9 @@ bool PCA9685::setPWM(uint8_t channel, uint16_t on, uint16_t off) {
       (uint8_t)(off & 0xFF),
       (uint8_t)(off >> 8),
   };
-  return board_i2c_write(dev_, buf, 5);
+  const bool ok = board_i2c_write(dev_, buf, 5);
+  ok_ = ok;
+  return ok;
 }
 
 bool PCA9685::setDuty(uint8_t channel, uint16_t duty12) {

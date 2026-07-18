@@ -77,9 +77,9 @@ img.cam{max-width:100%;background:#000;border-radius:6px;min-height:120px}
     <label>占空%</label><input id="motorDuty" type="number" min="0" max="100" value="40"/>
   </div>
   <div class="row">
-    <button onclick="setMotor(1)">正转</button>
-    <button onclick="setMotor(-1)">反转</button>
-    <button onclick="setMotor(0)">停止</button>
+    <button onpointerdown="startMotor(1)" onpointerup="stopMotorHold()" onpointerleave="stopMotorHold()">按住正转</button>
+    <button onpointerdown="startMotor(-1)" onpointerup="stopMotorHold()" onpointerleave="stopMotorHold()">按住反转</button>
+    <button onclick="stopMotorHold()">停止</button>
     <button class="danger" onclick="stopAllMotors()">全停</button>
   </div>
 </section>
@@ -153,7 +153,8 @@ async function api(method,url,body){
 }
 function renderFlags(s){
   document.getElementById('flags').textContent=
-    `pwmEnable(OE low)=${s.pwmEnable}\nstby=${s.motorStby}\namp=${s.ampEnable}\ncam=${s.camera}\nlcd=${s.lcd}`;
+    `pwmEnable(OE low)=${s.pwmEnable}\nstby=${s.motorStby}\nmotorMask=${s.motorActiveMask||0}\n`+
+    `motorFailsafe=${s.motorFailsafeMs||0}ms\namp=${s.ampEnable}\ncam=${s.camera}\nstream=${s.streaming}\nlcd=${s.lcd}`;
   document.getElementById('btnPwm').textContent=s.pwmEnable?'PWM 已开 (点关闭)':'使能 PWM (OE#)';
   document.getElementById('btnMtr').textContent=s.motorStby?'STBY 已开 (点关闭)':'使能电机 STBY';
   document.getElementById('btnAmp').textContent=s.ampEnable?'功放 已开 (点关闭)':'功放 SD_MODE';
@@ -190,6 +191,15 @@ async function setAllServo(a){
 async function setMotor(dir){
   await api('POST','/api/motor',{id:+motorId.value,dir,duty:+motorDuty.value});
 }
+let motorTimer=0,motorGeneration=0;
+async function startMotor(dir){
+  const generation=++motorGeneration;
+  stopMotorTimer();
+  await setMotor(dir);
+  if(generation===motorGeneration) motorTimer=setInterval(()=>setMotor(dir),500);
+}
+function stopMotorTimer(){if(motorTimer){clearInterval(motorTimer);motorTimer=0}}
+async function stopMotorHold(){motorGeneration++;stopMotorTimer();await setMotor(0)}
 async function stopAllMotors(){await api('POST','/api/motor/stop_all')}
 async function setLed(id,duty){await api('POST','/api/led',{id,duty:+duty})}
 async function readMic(){const m=await api('GET','/api/mic');if(m)mic.textContent=`RMS ${m.rms}  peak ${m.peak}`;}

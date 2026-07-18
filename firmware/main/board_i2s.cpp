@@ -10,6 +10,20 @@ static i2s_chan_handle_t s_mic_rx = nullptr;
 static i2s_chan_handle_t s_amp_tx = nullptr;
 static bool s_ok = false;
 
+static void cleanup_channels() {
+  if (s_mic_rx) {
+    i2s_channel_disable(s_mic_rx);
+    i2s_del_channel(s_mic_rx);
+    s_mic_rx = nullptr;
+  }
+  if (s_amp_tx) {
+    i2s_channel_disable(s_amp_tx);
+    i2s_del_channel(s_amp_tx);
+    s_amp_tx = nullptr;
+  }
+  s_ok = false;
+}
+
 bool board_i2s_ready() { return s_ok; }
 
 bool board_i2s_init() {
@@ -39,6 +53,7 @@ bool board_i2s_init() {
   if (i2s_channel_init_std_mode(s_mic_rx, &mic_std) != ESP_OK ||
       i2s_channel_enable(s_mic_rx) != ESP_OK) {
     ESP_LOGE(TAG, "mic init failed");
+    cleanup_channels();
     return false;
   }
 
@@ -46,6 +61,7 @@ bool board_i2s_init() {
   amp_chan.auto_clear = true;
   if (i2s_new_channel(&amp_chan, &s_amp_tx, nullptr) != ESP_OK) {
     ESP_LOGE(TAG, "amp channel failed");
+    cleanup_channels();
     return false;
   }
 
@@ -65,6 +81,7 @@ bool board_i2s_init() {
   if (i2s_channel_init_std_mode(s_amp_tx, &amp_std) != ESP_OK ||
       i2s_channel_enable(s_amp_tx) != ESP_OK) {
     ESP_LOGE(TAG, "amp init failed");
+    cleanup_channels();
     return false;
   }
 
@@ -84,10 +101,10 @@ bool board_i2s_mic_rms(int32_t &rms, int32_t &peak) {
   for (size_t i = 0; i < n; i++) {
     int32_t v = samples[i] >> 14;
     if (v < 0) v = -v;
-    acc += v;
+    acc += (int64_t)v * v;
     if (v > peak) peak = v;
   }
-  rms = (int32_t)(acc / (int64_t)n);
+  rms = (int32_t)sqrt((double)acc / (double)n);
   return true;
 }
 
@@ -96,19 +113,23 @@ bool board_i2s_beep(uint16_t ms) {
   const int rate = 16000;
   const int freq = 1000;
   const size_t n = (size_t)rate * ms / 1000;
-  int16_t frame[2];
-  for (size_t i = 0; i < n; i++) {
-    float t = (float)i / rate;
-    int16_t s = (int16_t)(8000.0f * sinf(2.0f * (float)M_PI * freq * t));
-    frame[0] = s;
-    frame[1] = s;
+  int16_t frames[256 * 2];
+  size_t done = 0;
+  while (done < n) {
+    const size_t count = (n - done) > 256 ? 256 : (n - done);
+    for (size_t i = 0; i < count; i++) {
+      float t = (float)(done + i) / rate;
+      int16_t s = (int16_t)(8000.0f * sinf(2.0f * (float)M_PI * freq * t));
+      frames[i * 2] = s;
+      frames[i * 2 + 1] = s;
+    }
     size_t written = 0;
-    if (i2s_channel_write(s_amp_tx, frame, sizeof(frame), &written, 100) != ESP_OK) return false;
+    const size_t bytes = count * 2 * sizeof(int16_t);
+    if (i2s_channel_write(s_amp_tx, frames, bytes, &written, 250) != ESP_OK || written != bytes)
+      return false;
+    done += count;
   }
-  frame[0] = frame[1] = 0;
-  for (int i = 0; i < 200; i++) {
-    size_t written = 0;
-    i2s_channel_write(s_amp_tx, frame, sizeof(frame), &written, 50);
-  }
-  return true;
+  memset(frames, 0, sizeof(frames));
+  size_t written = 0;
+  return i2s_channel_write(s_amp_tx, frames, sizeof(frames), &written, 250) == ESP_OK;
 }

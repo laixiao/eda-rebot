@@ -46,10 +46,10 @@ static bool xfer(const uint8_t *tx, uint8_t *rx, size_t len, uint32_t hz) {
   if (!s_dev || !len) return false;
   spi_transaction_t t = {};
   t.length = len * 8;
+  t.override_freq_hz = hz;
   t.tx_buffer = tx;
   t.rx_buffer = rx;
-  // 运行时改时钟：通过临时重配较麻烦，固定用设备时钟；高速填充时依赖默认
-  (void)hz;
+  // LCD uses 40 MHz while XPT2046 overrides the same bus device to 2 MHz.
   return spi_device_polling_transmit(s_dev, &t) == ESP_OK;
 }
 

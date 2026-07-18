@@ -1,6 +1,8 @@
 #pragma once
 
 #include "driver/i2c_master.h"
+#include "freertos/FreeRTOS.h"
+#include "freertos/semphr.h"
 #include <stdint.h>
 
 class XL9555 {
@@ -20,6 +22,7 @@ class XL9555 {
   uint8_t addr_ = 0;
   bool ok_ = false;
   uint8_t out_[2] = {0x40, 0x00};
+  SemaphoreHandle_t mutex_ = nullptr;
 
   bool writeReg(uint8_t reg, uint8_t val);
   bool readReg(uint8_t reg, uint8_t &val);

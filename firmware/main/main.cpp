@@ -6,6 +6,7 @@
 #include <math.h>
 
 #include "freertos/FreeRTOS.h"
+#include "freertos/semphr.h"
 #include "freertos/task.h"
 #include "esp_log.h"
 #include "esp_event.h"
@@ -30,7 +31,8 @@
 #include "esp_psram.h"
 
 static const char *TAG = "eda_robot";
-static const char *FW_VERSION = "2.0.1";
+static const char *FW_VERSION = "2.1.0";
+static const int64_t MOTOR_FAILSAFE_US = 1500000;
 
 static XL9555 xl;
 static PCA9685 pcaServo;
@@ -41,36 +43,65 @@ static XPT2046 touch;
 
 static volatile int32_t enc1 = 0;
 static volatile int32_t enc2 = 0;
-static int32_t enc3 = 0;
-static int32_t enc4 = 0;
+static volatile int32_t enc3 = 0;
+static volatile int32_t enc4 = 0;
 static uint8_t prevXlA = 0;
+static bool enc34Initialized = false;
+static portMUX_TYPE encMux = portMUX_INITIALIZER_UNLOCKED;
 
 static bool flagPwm = false;
 static bool flagStby = false;
 static bool flagAmp = false;
 static bool i2sReady = false;
 static bool lcdOk = false;
+static bool touchOk = false;
 static bool wifiOk = false;
 static char ipStr[16] = {0};
+static volatile uint8_t motorActiveMask = 0;
+static int64_t lastMotorCommandUs = 0;
 
 static httpd_handle_t server = nullptr;
+static SemaphoreHandle_t actuatorMutex = nullptr;
+static SemaphoreHandle_t cameraMutex = nullptr;
+static SemaphoreHandle_t oledMutex = nullptr;
+static SemaphoreHandle_t streamSlot = nullptr;
+static bool httpRegistrationOk = true;
+
+static bool actuatorLock() {
+  return actuatorMutex && xSemaphoreTakeRecursive(actuatorMutex, portMAX_DELAY) == pdTRUE;
+}
+
+static void actuatorUnlock() {
+  if (actuatorMutex) xSemaphoreGiveRecursive(actuatorMutex);
+}
 
 // ---- encoders ----
 static void IRAM_ATTR onEnc1(void *) {
   const int a = gpio_get_level((gpio_num_t)PIN_ENC1_A);
   const int b = gpio_get_level((gpio_num_t)PIN_ENC1_B);
+  portENTER_CRITICAL_ISR(&encMux);
   enc1 += (a == b) ? 1 : -1;
+  portEXIT_CRITICAL_ISR(&encMux);
 }
 
 static void IRAM_ATTR onEnc2(void *) {
   const int a = gpio_get_level((gpio_num_t)PIN_ENC2_A);
   const int b = gpio_get_level((gpio_num_t)PIN_ENC2_B);
+  portENTER_CRITICAL_ISR(&encMux);
   enc2 += (a == b) ? 1 : -1;
+  portEXIT_CRITICAL_ISR(&encMux);
 }
 
 static void updateEnc34() {
   uint8_t p0 = 0;
   if (!xl.readPort(0, p0)) return;
+  portENTER_CRITICAL(&encMux);
+  if (!enc34Initialized) {
+    prevXlA = p0;
+    enc34Initialized = true;
+    portEXIT_CRITICAL(&encMux);
+    return;
+  }
   const uint8_t changed = p0 ^ prevXlA;
   if (changed & (1u << XL_ENC3_A)) {
     const bool a = (p0 >> XL_ENC3_A) & 1;
@@ -83,6 +114,7 @@ static void updateEnc34() {
     enc4 += (a == b) ? 1 : -1;
   }
   prevXlA = p0;
+  portEXIT_CRITICAL(&encMux);
 }
 
 // ---- HTTP helpers ----
@@ -99,8 +131,10 @@ static esp_err_t sendJson(httpd_req_t *req, int code, const std::string &body) {
   httpd_resp_set_status(req, code == 200   ? "200 OK"
                              : code == 204 ? "204 No Content"
                              : code == 400 ? "400 Bad Request"
+                             : code == 409 ? "409 Conflict"
                              : code == 404 ? "404 Not Found"
-                                           : "500 Internal Server Error");
+                             : code == 503 ? "503 Service Unavailable"
+                                            : "500 Internal Server Error");
   return httpd_resp_send(req, body.c_str(), body.size());
 }
 
@@ -232,26 +266,83 @@ static std::string i2cScanJson() {
 
 // ---- actuators ----
 static bool setPwmEnable(bool on) {
-  if (!xl.setPin(XL_OE, !on)) return false;
-  flagPwm = on;
-  return true;
+  if (!actuatorLock()) return false;
+  bool ok = true;
+  if (on) {
+    const bool motorsOff = pcaMotor.allOff();
+    const bool servosOff = pcaServo.allOff();
+    ok = motorsOff && servosOff;
+    if (ok) ok = xl.setPin(XL_OE, false);
+  } else {
+    const bool motorsOff = pcaMotor.allOff();
+    const bool servosOff = pcaServo.allOff();
+    ok = xl.setPin(XL_OE, true) && motorsOff && servosOff;
+    if (ok || motorsOff) motorActiveMask = 0;
+  }
+  if (on) {
+    if (ok) flagPwm = true;
+  } else if (xl.present()) {
+    flagPwm = false;
+  }
+  actuatorUnlock();
+  return ok;
 }
 
 static bool setStby(bool on) {
-  if (!xl.setPin(XL_STBY, on)) return false;
-  flagStby = on;
-  return true;
+  if (!actuatorLock()) return false;
+  bool ok = true;
+  if (on) {
+    ok = pcaMotor.allOff();
+    if (ok) {
+      motorActiveMask = 0;
+      ok = xl.setPin(XL_STBY, true);
+    }
+  } else {
+    const bool stbyOk = xl.setPin(XL_STBY, false);
+    const bool pwmOk = pcaMotor.allOff();
+    if (stbyOk || pwmOk) motorActiveMask = 0;
+    ok = stbyOk && pwmOk;
+  }
+  if (on) {
+    if (ok) flagStby = true;
+  } else if (xl.present()) {
+    flagStby = false;
+  }
+  actuatorUnlock();
+  return ok;
 }
 
 static bool setAmp(bool on) {
-  if (!xl.setPin(XL_AMP_SD, on)) return false;
-  flagAmp = on;
-  return true;
+  if (!actuatorLock()) return false;
+  const bool ok = xl.setPin(XL_AMP_SD, on);
+  if (ok) flagAmp = on;
+  actuatorUnlock();
+  return ok;
 }
 
 static bool motorStop(uint8_t id) {
   if (id > 3) return false;
-  return pcaMotor.setDuty(MOTOR_IN1[id], 0) && pcaMotor.setDuty(MOTOR_IN2[id], 0);
+  if (!actuatorLock()) return false;
+  const bool a = pcaMotor.setDuty(MOTOR_IN1[id], 0);
+  const bool b = pcaMotor.setDuty(MOTOR_IN2[id], 0);
+  if (a && b) motorActiveMask &= ~(1u << id);
+  else lastMotorCommandUs = 0;
+  actuatorUnlock();
+  return a && b;
+}
+
+static bool motorStopAll() {
+  if (!actuatorLock()) return false;
+  bool ok = true;
+  for (uint8_t i = 0; i < 4; i++) {
+    const bool a = pcaMotor.setDuty(MOTOR_IN1[i], 0);
+    const bool b = pcaMotor.setDuty(MOTOR_IN2[i], 0);
+    ok = a && b && ok;
+  }
+  if (ok) motorActiveMask = 0;
+  else lastMotorCommandUs = 0;
+  actuatorUnlock();
+  return ok;
 }
 
 static bool motorDrive(uint8_t id, int dir, int dutyPct) {
@@ -260,10 +351,24 @@ static bool motorDrive(uint8_t id, int dir, int dutyPct) {
   if (dutyPct > 100) dutyPct = 100;
   uint16_t duty = (uint16_t)((dutyPct * 4095L) / 100);
   if (dir == 0 || duty == 0) return motorStop(id);
-  if (dir > 0) {
-    return pcaMotor.setDuty(MOTOR_IN1[id], duty) && pcaMotor.setDuty(MOTOR_IN2[id], 0);
+  if (!actuatorLock()) return false;
+  const bool clearedA = pcaMotor.setDuty(MOTOR_IN1[id], 0);
+  const bool clearedB = pcaMotor.setDuty(MOTOR_IN2[id], 0);
+  bool driven = false;
+  if (clearedA && clearedB) {
+    driven = dir > 0 ? pcaMotor.setDuty(MOTOR_IN1[id], duty)
+                     : pcaMotor.setDuty(MOTOR_IN2[id], duty);
   }
-  return pcaMotor.setDuty(MOTOR_IN1[id], 0) && pcaMotor.setDuty(MOTOR_IN2[id], duty);
+  if (driven) {
+    motorActiveMask |= (1u << id);
+    lastMotorCommandUs = esp_timer_get_time();
+  } else {
+    const bool stoppedA = pcaMotor.setDuty(MOTOR_IN1[id], 0);
+    const bool stoppedB = pcaMotor.setDuty(MOTOR_IN2[id], 0);
+    if (stoppedA && stoppedB) motorActiveMask &= ~(1u << id);
+  }
+  actuatorUnlock();
+  return driven;
 }
 
 static bool servoAngle(uint8_t id, int angle) {
@@ -275,12 +380,19 @@ static bool servoAngle(uint8_t id, int angle) {
   return pcaServo.setPulseUs(SERVO_CH[id], us);
 }
 
-static void emergencyStop() {
-  setStby(false);
-  setPwmEnable(false);
-  setAmp(false);
-  pcaMotor.allOff();
-  pcaServo.allOff();
+static bool emergencyStop() {
+  if (!actuatorLock()) return false;
+  const bool stbyOk = xl.setPin(XL_STBY, false);
+  const bool oeOk = xl.setPin(XL_OE, true);
+  const bool ampOk = xl.setPin(XL_AMP_SD, false);
+  const bool motorOk = pcaMotor.allOff();
+  const bool servoOk = pcaServo.allOff();
+  if (stbyOk) flagStby = false;
+  if (oeOk) flagPwm = false;
+  if (ampOk) flagAmp = false;
+  if (stbyOk || motorOk) motorActiveMask = 0;
+  actuatorUnlock();
+  return stbyOk && oeOk && ampOk && motorOk && servoOk;
 }
 
 // ---- handlers ----
@@ -317,32 +429,39 @@ static esp_err_t handleApiIndex(httpd_req_t *req) {
 }
 
 static esp_err_t handleStatus(httpd_req_t *req) {
-  updateEnc34();
   wifi_ap_record_t ap = {};
   int rssi = 0;
   if (esp_wifi_sta_get_ap_info(&ap) == ESP_OK) rssi = ap.rssi;
 
   const bool psramOk = esp_psram_is_initialized();
   const size_t psramBytes = psramOk ? esp_psram_get_size() : 0;
+  const bool streaming = streamSlot && uxSemaphoreGetCount(streamSlot) == 0;
+  const bool lcdReady = lcd.present();
+  const bool touchReady = touch.present();
   char buf[896];
   snprintf(buf, sizeof(buf),
            "{\"ok\":true,\"fw\":\"%s\",\"ip\":\"%s\",\"rssi\":%d,"
            "\"psram\":%s,\"psramBytes\":%u,"
            "\"xl9555\":%s,\"oled\":%s,\"pcaServo\":%s,\"pcaMotor\":%s,"
-           "\"lcd\":%s,\"camera\":%s,\"i2s\":%s,"
-           "\"pwmEnable\":%s,\"motorStby\":%s,\"ampEnable\":%s,\"i2c\":%s}",
+           "\"lcd\":%s,\"touch\":%s,\"camera\":%s,\"streaming\":%s,\"i2s\":%s,"
+           "\"pwmEnable\":%s,\"motorStby\":%s,\"motorActiveMask\":%u,"
+           "\"motorFailsafeMs\":%u,\"ampEnable\":%s,\"i2c\":%s}",
            FW_VERSION, ipStr, rssi, psramOk ? "true" : "false", (unsigned)psramBytes,
            xl.present() ? "true" : "false", oled.present() ? "true" : "false",
            pcaServo.present() ? "true" : "false", pcaMotor.present() ? "true" : "false",
-           lcdOk ? "true" : "false", cameraOk() ? "true" : "false",
+           lcdReady ? "true" : "false", touchReady ? "true" : "false",
+           cameraOk() ? "true" : "false", streaming ? "true" : "false",
            i2sReady ? "true" : "false", flagPwm ? "true" : "false",
-           flagStby ? "true" : "false", flagAmp ? "true" : "false", i2cScanJson().c_str());
+           flagStby ? "true" : "false", (unsigned)motorActiveMask,
+           (unsigned)(MOTOR_FAILSAFE_US / 1000), flagAmp ? "true" : "false",
+           i2cScanJson().c_str());
   return sendJson(req, 200, buf);
 }
 
 static esp_err_t handleEstop(httpd_req_t *req) {
   (void)loadArgs(req);
-  emergencyStop();
+  if (!emergencyStop())
+    return sendJson(req, 500, "{\"ok\":false,\"error\":\"estop hardware write failed\"}");
   return sendJson(req, 200, "{\"ok\":true,\"estop\":true}");
 }
 
@@ -378,7 +497,9 @@ static esp_err_t handleServo(httpd_req_t *req) {
   int id = argInt(a, "id", -1);
   int angle = argInt(a, "angle", 90);
   if (id < 0 || id > 4) return sendJson(req, 400, "{\"ok\":false,\"error\":\"id 0..4 (T3-T7)\"}");
-  if (!flagPwm) return sendJson(req, 400, "{\"ok\":false,\"error\":\"enable PWM first: /api/pwm?on=1\"}");
+  if (angle < 0) angle = 0;
+  if (angle > 180) angle = 180;
+  if (!flagPwm) return sendJson(req, 400, "{\"ok\":false,\"error\":\"enable PWM first with POST /api/pwm\"}");
   if (!servoAngle((uint8_t)id, angle))
     return sendJson(req, 500, "{\"ok\":false,\"error\":\"pca9685 servo write failed\"}");
   char b[80];
@@ -388,9 +509,9 @@ static esp_err_t handleServo(httpd_req_t *req) {
 
 static esp_err_t handleServos(httpd_req_t *req) {
   auto a = loadArgs(req);
-  if (!flagPwm) return sendJson(req, 400, "{\"ok\":false,\"error\":\"enable PWM first: /api/pwm?on=1\"}");
+  if (!flagPwm) return sendJson(req, 400, "{\"ok\":false,\"error\":\"enable PWM first with POST /api/pwm\"}");
   int angles[5] = {90, 90, 90, 90, 90};
-  bool any = false;
+  bool provided[5] = {false, false, false, false, false};
   size_t arr = a.body.find("\"angles\"");
   if (arr != std::string::npos) {
     size_t lb = a.body.find('[', arr);
@@ -405,7 +526,7 @@ static esp_err_t handleServos(httpd_req_t *req) {
         while (!tok.empty() && (tok.front() == ' ' || tok.front() == '\t')) tok.erase(tok.begin());
         if (!tok.empty()) {
           angles[i] = atoi(tok.c_str());
-          any = true;
+          provided[i] = true;
         }
         if (comma == std::string::npos) break;
         start = comma + 1;
@@ -417,11 +538,16 @@ static esp_err_t handleServos(httpd_req_t *req) {
     char v[16];
     if (queryGet(a.q, key, v, sizeof(v))) {
       angles[i] = atoi(v);
-      any = true;
+      provided[i] = true;
     }
   }
-  (void)any;
+  for (bool valueProvided : provided) {
+    if (!valueProvided)
+      return sendJson(req, 400, "{\"ok\":false,\"error\":\"all five servo angles are required\"}");
+  }
   for (int i = 0; i < 5; i++) {
+    if (angles[i] < 0) angles[i] = 0;
+    if (angles[i] > 180) angles[i] = 180;
     if (!servoAngle((uint8_t)i, angles[i])) {
       char b[80];
       snprintf(b, sizeof(b), "{\"ok\":false,\"error\":\"servo write failed\",\"id\":%d}", i);
@@ -440,18 +566,22 @@ static esp_err_t handleMotor(httpd_req_t *req) {
   int dir = argInt(a, "dir", 0);
   int duty = argInt(a, "duty", 40);
   if (id < 0 || id > 3) return sendJson(req, 400, "{\"ok\":false,\"error\":\"id 0..3\"}");
+  if (duty < 0) duty = 0;
+  if (duty > 100) duty = 100;
   if (!flagPwm || !flagStby)
     return sendJson(req, 400, "{\"ok\":false,\"error\":\"enable PWM and STBY first\"}");
   if (!motorDrive((uint8_t)id, dir, duty))
     return sendJson(req, 500, "{\"ok\":false,\"error\":\"motor write failed\"}");
   char b[96];
-  snprintf(b, sizeof(b), "{\"ok\":true,\"id\":%d,\"dir\":%d,\"duty\":%d}", id, dir, duty);
+  snprintf(b, sizeof(b),
+           "{\"ok\":true,\"id\":%d,\"dir\":%d,\"duty\":%d,\"failsafeMs\":%u}",
+           id, dir, duty, (unsigned)(MOTOR_FAILSAFE_US / 1000));
   return sendJson(req, 200, b);
 }
 
 static esp_err_t handleMotorStopAll(httpd_req_t *req) {
   (void)loadArgs(req);
-  for (uint8_t i = 0; i < 4; i++) motorStop(i);
+  if (!motorStopAll()) return sendJson(req, 500, "{\"ok\":false,\"error\":\"motor stop failed\"}");
   return sendJson(req, 200, "{\"ok\":true}");
 }
 
@@ -461,11 +591,15 @@ static esp_err_t handleLed(httpd_req_t *req) {
   int duty = argInt(a, "duty", 100);
   if (id < 0 || id > 2)
     return sendJson(req, 400, "{\"ok\":false,\"error\":\"id 0=LED_1 1=LED_2 2=LED_ALL\"}");
-  if (!flagPwm) return sendJson(req, 400, "{\"ok\":false,\"error\":\"enable PWM first: /api/pwm?on=1\"}");
+  if (!flagPwm) return sendJson(req, 400, "{\"ok\":false,\"error\":\"enable PWM first with POST /api/pwm\"}");
   if (duty < 0) duty = 0;
   if (duty > 100) duty = 100;
   uint16_t d = (uint16_t)((duty * 4095L) / 100);
-  if (!pcaMotor.setDuty(SPOT_CH[id], d))
+  if (!actuatorLock())
+    return sendJson(req, 500, "{\"ok\":false,\"error\":\"actuator lock failed\"}");
+  const bool ledOk = pcaMotor.setDuty(SPOT_CH[id], d);
+  actuatorUnlock();
+  if (!ledOk)
     return sendJson(req, 500, "{\"ok\":false,\"error\":\"led write failed\"}");
   char b[80];
   snprintf(b, sizeof(b), "{\"ok\":true,\"id\":%d,\"duty\":%d}", id, duty);
@@ -473,23 +607,26 @@ static esp_err_t handleLed(httpd_req_t *req) {
 }
 
 static esp_err_t handleEncoders(httpd_req_t *req) {
-  updateEnc34();
   uint8_t p0 = 0;
   xl.readPort(0, p0);
-  int32_t e1 = enc1, e2 = enc2;
+  portENTER_CRITICAL(&encMux);
+  int32_t e1 = enc1, e2 = enc2, e3 = enc3, e4 = enc4;
+  portEXIT_CRITICAL(&encMux);
   char b[160];
   snprintf(b, sizeof(b),
            "{\"ok\":true,\"enc1\":%ld,\"enc2\":%ld,\"enc3\":%ld,\"enc4\":%ld,\"xlPort0\":%u}",
-           (long)e1, (long)e2, (long)enc3, (long)enc4, p0);
+           (long)e1, (long)e2, (long)e3, (long)e4, p0);
   return sendJson(req, 200, b);
 }
 
 static esp_err_t handleEncReset(httpd_req_t *req) {
   (void)loadArgs(req);
+  portENTER_CRITICAL(&encMux);
   enc1 = 0;
   enc2 = 0;
   enc3 = 0;
   enc4 = 0;
+  portEXIT_CRITICAL(&encMux);
   return sendJson(req, 200, "{\"ok\":true}");
 }
 
@@ -507,33 +644,44 @@ static esp_err_t handleBeep(httpd_req_t *req) {
   int ms = argInt(a, "ms", 250);
   if (ms < 50) ms = 50;
   if (ms > 2000) ms = 2000;
-  if (!flagAmp) setAmp(true);
-  if (!board_i2s_beep((uint16_t)ms)) return sendJson(req, 500, "{\"ok\":false,\"error\":\"beep failed\"}");
+  const bool wasOn = flagAmp;
+  if (!wasOn && !setAmp(true))
+    return sendJson(req, 500, "{\"ok\":false,\"error\":\"amp enable failed\"}");
+  if (!wasOn) vTaskDelay(pdMS_TO_TICKS(5));
+  const bool beepOk = board_i2s_beep((uint16_t)ms);
+  const bool restoreOk = wasOn || setAmp(false);
+  if (!beepOk || !restoreOk)
+    return sendJson(req, 500, "{\"ok\":false,\"error\":\"beep or amp restore failed\"}");
   char b[48];
   snprintf(b, sizeof(b), "{\"ok\":true,\"ms\":%d}", ms);
   return sendJson(req, 200, b);
 }
 
 static esp_err_t handleOled(httpd_req_t *req) {
+  if (!oled.present()) return sendJson(req, 500, "{\"ok\":false,\"error\":\"oled not ready\"}");
+  if (!oledMutex || xSemaphoreTake(oledMutex, pdMS_TO_TICKS(500)) != pdTRUE)
+    return sendJson(req, 503, "{\"ok\":false,\"error\":\"oled busy\"}");
   auto a = loadArgs(req);
   std::string cmd = argStr(a, "cmd", "text");
+  bool ok = false;
   if (cmd == "clear") {
     oled.clear();
-    oled.show();
+    ok = oled.show();
   } else if (cmd == "fill") {
     oled.fill();
-    oled.show();
+    ok = oled.show();
   } else {
     std::string text = argStr(a, "text", "EDA Robot");
-    oled.printfLines(text.c_str(), ipStr, FW_VERSION, "LAN API");
+    ok = oled.printfLines(text.c_str(), ipStr, FW_VERSION, "LAN API");
   }
+  xSemaphoreGive(oledMutex);
+  if (!ok) return sendJson(req, 500, "{\"ok\":false,\"error\":\"oled write failed\"}");
   return sendJson(req, 200, "{\"ok\":true}");
 }
 
 static esp_err_t handleCamera(httpd_req_t *req) {
   auto a = loadArgs(req);
-  bool hasOn = a.q.find("on=") != std::string::npos || a.body.find("\"on\"") != std::string::npos;
-  if (req->method == HTTP_GET && !hasOn) {
+  if (req->method == HTTP_GET) {
     char b[160];
     snprintf(b, sizeof(b),
              "{\"ok\":true,\"camera\":%s,\"capture\":\"/api/camera/capture\",\"stream\":\"/stream\"}",
@@ -541,34 +689,52 @@ static esp_err_t handleCamera(httpd_req_t *req) {
     return sendJson(req, 200, b);
   }
   bool on = argBool(a, "on", true);
+  if (!on && streamSlot && uxSemaphoreGetCount(streamSlot) == 0)
+    return sendJson(req, 409, "{\"ok\":false,\"error\":\"stop the active stream before powering camera off\"}");
+  if (!cameraMutex || xSemaphoreTake(cameraMutex, pdMS_TO_TICKS(1000)) != pdTRUE)
+    return sendJson(req, 503, "{\"ok\":false,\"error\":\"camera busy\"}");
+  bool ok = true;
   if (on) {
-    if (!cameraBegin(xl))
+    ok = cameraBegin(xl);
+    xSemaphoreGive(cameraMutex);
+    if (!ok)
       return sendJson(req, 500,
                       "{\"ok\":false,\"error\":\"camera init failed\",\"hint\":\"need working Octal PSRAM "
                       "(N16R8); check module / IO35-37 NC / FPC\"}");
     return sendJson(req, 200, "{\"ok\":true,\"camera\":true}");
   }
   cameraEnd(xl);
+  xSemaphoreGive(cameraMutex);
   return sendJson(req, 200, "{\"ok\":true,\"camera\":false}");
 }
 
 static esp_err_t handleCameraCapture(httpd_req_t *req) {
-  if (!cameraOk() && !cameraBegin(xl))
+  if (!cameraMutex || xSemaphoreTake(cameraMutex, pdMS_TO_TICKS(1000)) != pdTRUE)
+    return sendJson(req, 503, "{\"ok\":false,\"error\":\"camera busy\"}");
+  if (!cameraOk() && !cameraBegin(xl)) {
+    xSemaphoreGive(cameraMutex);
     return sendJson(req, 500, "{\"ok\":false,\"error\":\"camera not ready\"}");
+  }
   uint8_t *buf = nullptr;
   size_t len = 0;
-  if (!cameraCaptureJpeg(buf, len) || !buf || len == 0)
+  if (!cameraCaptureJpeg(buf, len) || !buf || len == 0) {
+    xSemaphoreGive(cameraMutex);
     return sendJson(req, 500, "{\"ok\":false,\"error\":\"capture failed\"}");
+  }
   addCors(req);
   httpd_resp_set_type(req, "image/jpeg");
   esp_err_t err = httpd_resp_send(req, (const char *)buf, len);
   cameraReleaseFrame();
+  xSemaphoreGive(cameraMutex);
   return err;
 }
 
-static esp_err_t handleStream(httpd_req_t *req) {
-  if (!cameraOk() && !cameraBegin(xl))
-    return sendJson(req, 500, "{\"ok\":false,\"error\":\"camera not ready\"}");
+static esp_err_t streamAsync(httpd_req_t *req) {
+  if (!cameraMutex || xSemaphoreTake(cameraMutex, pdMS_TO_TICKS(1000)) != pdTRUE)
+    return sendJson(req, 503, "{\"ok\":false,\"error\":\"camera busy\"}");
+  const bool cameraReady = cameraOk() || cameraBegin(xl);
+  xSemaphoreGive(cameraMutex);
+  if (!cameraReady) return sendJson(req, 500, "{\"ok\":false,\"error\":\"camera not ready\"}");
 
   addCors(req);
   httpd_resp_set_type(req, "multipart/x-mixed-replace; boundary=frame");
@@ -576,9 +742,16 @@ static esp_err_t handleStream(httpd_req_t *req) {
 
   int64_t t0 = esp_timer_get_time();
   while ((esp_timer_get_time() - t0) < 120000000LL) {
+    if (xSemaphoreTake(cameraMutex, pdMS_TO_TICKS(1000)) != pdTRUE) continue;
+    if (!cameraOk() && !cameraBegin(xl)) {
+      xSemaphoreGive(cameraMutex);
+      vTaskDelay(pdMS_TO_TICKS(50));
+      continue;
+    }
     uint8_t *buf = nullptr;
     size_t len = 0;
     if (!cameraCaptureJpeg(buf, len)) {
+      xSemaphoreGive(cameraMutex);
       vTaskDelay(pdMS_TO_TICKS(10));
       continue;
     }
@@ -590,12 +763,38 @@ static esp_err_t handleStream(httpd_req_t *req) {
         httpd_resp_send_chunk(req, (const char *)buf, len) != ESP_OK ||
         httpd_resp_send_chunk(req, "\r\n", 2) != ESP_OK) {
       cameraReleaseFrame();
+      xSemaphoreGive(cameraMutex);
       break;
     }
     cameraReleaseFrame();
+    xSemaphoreGive(cameraMutex);
     vTaskDelay(pdMS_TO_TICKS(30));
   }
   httpd_resp_send_chunk(req, nullptr, 0);
+  return ESP_OK;
+}
+
+static void streamTask(void *arg) {
+  httpd_req_t *req = static_cast<httpd_req_t *>(arg);
+  streamAsync(req);
+  httpd_req_async_handler_complete(req);
+  xSemaphoreGive(streamSlot);
+  vTaskDelete(nullptr);
+}
+
+static esp_err_t handleStream(httpd_req_t *req) {
+  if (!streamSlot || xSemaphoreTake(streamSlot, 0) != pdTRUE)
+    return sendJson(req, 503, "{\"ok\":false,\"error\":\"stream already active\"}");
+  httpd_req_t *copy = nullptr;
+  if (httpd_req_async_handler_begin(req, &copy) != ESP_OK) {
+    xSemaphoreGive(streamSlot);
+    return sendJson(req, 500, "{\"ok\":false,\"error\":\"stream async setup failed\"}");
+  }
+  if (xTaskCreate(streamTask, "camera_stream", 6144, copy, 4, nullptr) != pdPASS) {
+    sendJson(copy, 500, "{\"ok\":false,\"error\":\"stream task start failed\"}");
+    httpd_req_async_handler_complete(copy);
+    xSemaphoreGive(streamSlot);
+  }
   return ESP_OK;
 }
 
@@ -614,7 +813,7 @@ static esp_err_t handleLcd(httpd_req_t *req) {
   std::string cmd = argStr(a, "cmd", "status");
   if (cmd == "init" || (cmd == "status" && !lcdOk && argBool(a, "on", false))) {
     lcdOk = lcd.begin(xl);
-    touch.begin(xl);
+    touchOk = touch.begin(xl);
     if (!lcdOk) return sendJson(req, 500, "{\"ok\":false,\"error\":\"lcd init failed\"}");
     return sendJson(req, 200, "{\"ok\":true,\"lcd\":true,\"w\":320,\"h\":480}");
   }
@@ -625,20 +824,26 @@ static esp_err_t handleLcd(httpd_req_t *req) {
   }
   if (!lcdOk) {
     lcdOk = lcd.begin(xl);
-    touch.begin(xl);
+    touchOk = touch.begin(xl);
   }
   if (!lcdOk) return sendJson(req, 500, "{\"ok\":false,\"error\":\"lcd not ready\"}");
   if (cmd == "on") {
     lcd.backlight(true);
+    lcdOk = lcd.present();
+    if (!lcdOk) return sendJson(req, 500, "{\"ok\":false,\"error\":\"lcd backlight write failed\"}");
     return sendJson(req, 200, "{\"ok\":true,\"backlight\":true}");
   }
   if (cmd == "off") {
     lcd.backlight(false);
+    lcdOk = lcd.present();
+    if (!lcdOk) return sendJson(req, 500, "{\"ok\":false,\"error\":\"lcd backlight write failed\"}");
     return sendJson(req, 200, "{\"ok\":true,\"backlight\":false}");
   }
   if (cmd == "fill" || cmd == "color") {
     uint16_t c = parseColor(argStr(a, "color", "001F"), 0x001F);
     lcd.fillScreen(c);
+    lcdOk = lcd.present();
+    if (!lcdOk) return sendJson(req, 500, "{\"ok\":false,\"error\":\"lcd fill failed\"}");
     char b[64];
     snprintf(b, sizeof(b), "{\"ok\":true,\"color\":%u}", c);
     return sendJson(req, 200, b);
@@ -646,6 +851,8 @@ static esp_err_t handleLcd(httpd_req_t *req) {
   if (cmd == "rotate") {
     int r = argInt(a, "r", 0);
     lcd.setRotation((uint8_t)r);
+    lcdOk = lcd.present();
+    if (!lcdOk) return sendJson(req, 500, "{\"ok\":false,\"error\":\"lcd rotation failed\"}");
     char b[96];
     snprintf(b, sizeof(b), "{\"ok\":true,\"rotation\":%d,\"w\":%u,\"h\":%u}", r, lcd.width(),
              lcd.height());
@@ -655,6 +862,9 @@ static esp_err_t handleLcd(httpd_req_t *req) {
 }
 
 static esp_err_t handleTouch(httpd_req_t *req) {
+  if ((!touchOk || !touch.present()) && xl.present()) touchOk = touch.begin(xl);
+  if (!touchOk || !touch.present())
+    return sendJson(req, 503, "{\"ok\":false,\"error\":\"touch not ready\"}");
   uint16_t x = 0, y = 0, z = 0;
   bool pressed = touch.touched();
   bool ok = touch.read(x, y, z);
@@ -674,17 +884,25 @@ static esp_err_t handleNotFound(httpd_req_t *req, httpd_err_code_t err) {
 #define URI(path, method, handler) \
   { .uri = path, .method = method, .handler = handler, .user_ctx = nullptr }
 
-static void registerUri(httpd_handle_t s, const char *path, httpd_method_t method,
+static bool registerUri(httpd_handle_t s, const char *path, httpd_method_t method,
                         esp_err_t (*handler)(httpd_req_t *)) {
   httpd_uri_t u = URI(path, method, handler);
-  httpd_register_uri_handler(s, &u);
+  const esp_err_t err = httpd_register_uri_handler(s, &u);
+  if (err != ESP_OK) {
+    ESP_LOGE(TAG, "register %s method=%d failed: %s", path, (int)method, esp_err_to_name(err));
+    httpRegistrationOk = false;
+    return false;
+  }
+  return true;
 }
 
 static void setupHttp() {
+  httpRegistrationOk = true;
   httpd_config_t config = HTTPD_DEFAULT_CONFIG();
-  config.max_uri_handlers = 48;
+  config.max_uri_handlers = 64;
   config.stack_size = 8192;
   config.uri_match_fn = httpd_uri_match_wildcard;
+  config.lru_purge_enable = true;
 
   if (httpd_start(&server, &config) != ESP_OK) {
     ESP_LOGE(TAG, "httpd_start failed");
@@ -709,20 +927,30 @@ static void setupHttp() {
   registerUri(server, "/api/touch", HTTP_GET, handleTouch);
   registerUri(server, "/api/touch", HTTP_OPTIONS, handleOptions);
 
-  const char *both[] = {"/api/estop",         "/api/pwm",  "/api/stby", "/api/amp",
-                        "/api/servo",         "/api/servos", "/api/motor", "/api/motor/stop_all",
-                        "/api/led",           "/api/encoders/reset", "/api/beep", "/api/oled",
-                        "/api/lcd"};
+  const char *mutating[] = {"/api/estop",         "/api/pwm",  "/api/stby", "/api/amp",
+                            "/api/servo",         "/api/servos", "/api/motor", "/api/motor/stop_all",
+                            "/api/led",           "/api/encoders/reset", "/api/beep", "/api/oled",
+                            "/api/lcd"};
   esp_err_t (*fns[])(httpd_req_t *) = {
       handleEstop, handlePwm, handleStby, handleAmp, handleServo, handleServos, handleMotor,
       handleMotorStopAll, handleLed, handleEncReset, handleBeep, handleOled, handleLcd};
-  for (size_t i = 0; i < sizeof(both) / sizeof(both[0]); i++) {
-    registerUri(server, both[i], HTTP_GET, fns[i]);
-    registerUri(server, both[i], HTTP_POST, fns[i]);
-    registerUri(server, both[i], HTTP_OPTIONS, handleOptions);
+  static_assert(sizeof(mutating) / sizeof(mutating[0]) == sizeof(fns) / sizeof(fns[0]));
+  for (size_t i = 0; i < sizeof(mutating) / sizeof(mutating[0]); i++) {
+    registerUri(server, mutating[i], HTTP_POST, fns[i]);
+    registerUri(server, mutating[i], HTTP_OPTIONS, handleOptions);
   }
 
-  httpd_register_err_handler(server, HTTPD_404_NOT_FOUND, handleNotFound);
+  const esp_err_t err = httpd_register_err_handler(server, HTTPD_404_NOT_FOUND, handleNotFound);
+  if (err != ESP_OK) {
+    httpRegistrationOk = false;
+    ESP_LOGE(TAG, "register 404 handler failed: %s", esp_err_to_name(err));
+  }
+  if (!httpRegistrationOk) {
+    ESP_LOGE(TAG, "HTTP registration incomplete; stopping server");
+    httpd_stop(server);
+    server = nullptr;
+    return;
+  }
   ESP_LOGI(TAG, "HTTP :80 ready");
 }
 
@@ -739,7 +967,10 @@ static void wifi_event_handler(void *, esp_event_base_t base, int32_t id, void *
     snprintf(ipStr, sizeof(ipStr), IPSTR, IP2STR(&event->ip_info.ip));
     wifiOk = true;
     ESP_LOGI(TAG, "Got IP: %s", ipStr);
-    if (oled.present()) oled.printfLines("WiFi OK", ipStr, "open browser", FW_VERSION);
+    if (oled.present() && oledMutex && xSemaphoreTake(oledMutex, pdMS_TO_TICKS(100)) == pdTRUE) {
+      oled.printfLines("WiFi OK", ipStr, "open browser", FW_VERSION);
+      xSemaphoreGive(oledMutex);
+    }
   }
 }
 
@@ -782,6 +1013,16 @@ static void encoders_init() {
 static void background_task(void *) {
   while (true) {
     updateEnc34();
+    bool motorExpired = false;
+    if (actuatorLock()) {
+      motorExpired = flagStby && motorActiveMask != 0 &&
+                     esp_timer_get_time() - lastMotorCommandUs > MOTOR_FAILSAFE_US;
+      actuatorUnlock();
+    }
+    if (motorExpired) {
+      ESP_LOGW(TAG, "motor command timeout; entering standby");
+      if (!setStby(false)) ESP_LOGE(TAG, "motor failsafe stop failed");
+    }
     vTaskDelay(pdMS_TO_TICKS(20));
   }
 }
@@ -796,6 +1037,16 @@ extern "C" void app_main(void) {
   ESP_LOGI(TAG, "=== EDA Robot LAN API (ESP-IDF) ===");
   ESP_LOGI(TAG, "FW %s  board AI通用机器狗_v4", FW_VERSION);
 
+  actuatorMutex = xSemaphoreCreateRecursiveMutex();
+  cameraMutex = xSemaphoreCreateMutex();
+  oledMutex = xSemaphoreCreateMutex();
+  streamSlot = xSemaphoreCreateBinary();
+  if (!actuatorMutex || !cameraMutex || !oledMutex || !streamSlot) {
+    ESP_LOGE(TAG, "failed to create synchronization primitives");
+    return;
+  }
+  xSemaphoreGive(streamSlot);
+
   encoders_init();
   board_i2c_init();
 
@@ -806,14 +1057,16 @@ extern "C" void app_main(void) {
 
   if (okXl) {
     lcdOk = lcd.begin(xl);
-    touch.begin(xl);
+    touchOk = touch.begin(xl);
     if (lcdOk) {
       lcd.fillScreen(0x0000);
       lcd.fillRect(0, 0, 320, 40, 0x001F);
+      lcdOk = lcd.present();
     }
   }
 
-  ESP_LOGI(TAG, "XL9555=%d OLED=%d PCA16=%d PCA23=%d LCD=%d", okXl, okOled, okS, okM, lcdOk);
+  ESP_LOGI(TAG, "XL9555=%d OLED=%d PCA16=%d PCA23=%d LCD=%d TOUCH=%d", okXl, okOled, okS,
+           okM, lcdOk, touchOk);
   flagPwm = flagStby = flagAmp = false;
   if (okXl) cameraPower(xl, false);
 
@@ -824,8 +1077,15 @@ extern "C" void app_main(void) {
 
   // wait up to 20s for IP
   for (int i = 0; i < 80 && !wifiOk; i++) vTaskDelay(pdMS_TO_TICKS(250));
-  if (!wifiOk && okOled) oled.printfLines("WiFi FAIL", WIFI_SSID, "check AP", FW_VERSION);
+  if (!wifiOk && okOled && xSemaphoreTake(oledMutex, pdMS_TO_TICKS(100)) == pdTRUE) {
+    oled.printfLines("WiFi FAIL", WIFI_SSID, "check AP", FW_VERSION);
+    xSemaphoreGive(oledMutex);
+  }
 
+  if (xTaskCreate(background_task, "bg", 4096, nullptr, 5, nullptr) != pdPASS) {
+    ESP_LOGE(TAG, "background task start failed");
+    emergencyStop();
+    return;
+  }
   setupHttp();
-  xTaskCreate(background_task, "bg", 4096, nullptr, 5, nullptr);
 }

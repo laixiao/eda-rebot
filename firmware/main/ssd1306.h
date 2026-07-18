@@ -11,9 +11,9 @@ class SSD1306 {
   void clear();
   void fill();
   void drawText(uint8_t col, uint8_t page, const char *text);
-  void show();
-  void printfLines(const char *l0, const char *l1 = "", const char *l2 = "",
-                    const char *l3 = "");
+  bool show();
+  bool printfLines(const char *l0, const char *l1 = "", const char *l2 = "",
+                   const char *l3 = "");
 
  private:
   i2c_master_dev_handle_t dev_ = nullptr;

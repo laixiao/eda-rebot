@@ -1,13 +1,15 @@
 #pragma once
 
 #include <stdint.h>
+#if __has_include("wifi_config.h")
+#include "wifi_config.h"
+#else
+#include "wifi_config.example.h"
+#endif
 
 // 引脚与地址来自 2026-07-18 Bridge 实时网表
 // 工程 AI通用机器狗_v4 / Board V1.0.0 / 图页 1d774ca900623155
 // U1 IO35/36/37 禁止使用（Octal PSRAM）。
-
-inline constexpr const char WIFI_SSID[] = "lx";
-inline constexpr const char WIFI_PASS[] = "13557857840";
 
 static const int PIN_I2C_SDA = 12;   // OLED_SDA
 static const int PIN_I2C_SCL = 13;   // OLED_SCL

@@ -13,14 +13,17 @@ bool XL9555::readReg(uint8_t reg, uint8_t &val) {
 
 bool XL9555::begin(uint8_t addr) {
   addr_ = addr;
+  ok_ = false;
+  if (!mutex_) mutex_ = xSemaphoreCreateMutex();
+  if (!mutex_) return false;
   if (!board_i2c_add_device(addr, &dev_)) {
-    ok_ = false;
     return false;
   }
   uint8_t dummy = 0;
   ok_ = readReg(0x00, dummy);
   if (!ok_) return false;
-  return applySafeDefaults();
+  ok_ = applySafeDefaults();
+  return ok_;
 }
 
 bool XL9555::applySafeDefaults() {
@@ -34,28 +37,44 @@ bool XL9555::applySafeDefaults() {
 }
 
 bool XL9555::writePort(uint8_t port, uint8_t value) {
-  if (port > 1) return false;
+  if (port > 1 || !mutex_) return false;
+  xSemaphoreTake(mutex_, portMAX_DELAY);
   out_[port] = value;
-  return writeReg(0x02 + port, value);
+  const bool ok = writeReg(0x02 + port, value);
+  ok_ = ok;
+  xSemaphoreGive(mutex_);
+  return ok;
 }
 
 bool XL9555::readPort(uint8_t port, uint8_t &value) {
-  if (port > 1) return false;
-  return readReg(0x00 + port, value);
+  if (port > 1 || !mutex_) return false;
+  xSemaphoreTake(mutex_, portMAX_DELAY);
+  const bool ok = readReg(0x00 + port, value);
+  ok_ = ok;
+  xSemaphoreGive(mutex_);
+  return ok;
 }
 
 bool XL9555::writeConfig(uint8_t port, uint8_t config) {
-  if (port > 1) return false;
-  return writeReg(0x06 + port, config);
+  if (port > 1 || !mutex_) return false;
+  xSemaphoreTake(mutex_, portMAX_DELAY);
+  const bool ok = writeReg(0x06 + port, config);
+  ok_ = ok;
+  xSemaphoreGive(mutex_);
+  return ok;
 }
 
 bool XL9555::setPin(uint8_t pin, bool level) {
-  if (pin > 15) return false;
+  if (pin > 15 || !mutex_) return false;
   uint8_t port = pin / 8;
   uint8_t bit = pin % 8;
+  xSemaphoreTake(mutex_, portMAX_DELAY);
   if (level) out_[port] |= (1u << bit);
   else out_[port] &= ~(1u << bit);
-  return writePort(port, out_[port]);
+  const bool ok = writeReg(0x02 + port, out_[port]);
+  ok_ = ok;
+  xSemaphoreGive(mutex_);
+  return ok;
 }
 
 bool XL9555::getPin(uint8_t pin, bool &level) {
