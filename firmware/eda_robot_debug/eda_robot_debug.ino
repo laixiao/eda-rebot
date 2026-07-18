@@ -2,20 +2,27 @@
 #include <WiFi.h>
 #include <WebServer.h>
 #include <Wire.h>
+#include <SPI.h>
 
 #include "board_config.h"
 #include "xl9555.h"
 #include "pca9685.h"
 #include "ssd1306.h"
+#include "camera_board.h"
+#include "st7796.h"
+#include "xpt2046.h"
 #include "web_ui.h"
 
-static const char *FW_VERSION = "1.1.1";
+static const char *FW_VERSION = "1.2.0";
 
 static WebServer server(80);
 static XL9555 xl;
 static PCA9685 pcaServo;
 static PCA9685 pcaMotor;
 static SSD1306 oled;
+static ST7796 lcd;
+static XPT2046 touch;
+static SPIClass lcdSpi(HSPI);
 
 static volatile int32_t enc1 = 0;
 static volatile int32_t enc2 = 0;
@@ -27,6 +34,7 @@ static bool flagPwm = false;
 static bool flagStby = false;
 static bool flagAmp = false;
 static bool i2sReady = false;
+static bool lcdOk = false;
 
 // ---- encoders ENC1/ENC2 (GPIO ISR) ----
 static void IRAM_ATTR onEnc1() {
@@ -45,7 +53,6 @@ static void updateEnc34() {
   uint8_t p0 = 0;
   if (!xl.readPort(0, p0)) return;
   const uint8_t changed = p0 ^ prevXlA;
-  // ENC3: A=bit0 B=bit1 — only count on A edge
   if (changed & (1u << XL_ENC3_A)) {
     const bool a = (p0 >> XL_ENC3_A) & 1;
     const bool b = (p0 >> XL_ENC3_B) & 1;
@@ -59,7 +66,7 @@ static void updateEnc34() {
   prevXlA = p0;
 }
 
-// ---- HTTP / JSON helpers (query 优先，其次 JSON body，方便局域网 curl/python) ----
+// ---- HTTP helpers ----
 static void addCors() {
   server.sendHeader("Access-Control-Allow-Origin", "*");
   server.sendHeader("Access-Control-Allow-Methods", "GET, POST, OPTIONS");
@@ -156,7 +163,6 @@ static String i2cScanJson() {
 
 // ---- actuator helpers ----
 static bool setPwmEnable(bool on) {
-  // OE# active low
   if (!xl.setPin(XL_OE, !on)) return false;
   flagPwm = on;
   return true;
@@ -218,7 +224,6 @@ static bool i2sMicOk = false;
 static bool i2sAmpOk = false;
 
 static bool initI2S() {
-  // setPins(bclk, ws, dout, din)
   i2sMic.setPins(PIN_I2S_MIC_SCK, PIN_I2S_MIC_WS, -1, PIN_I2S_MIC_SD);
   if (!i2sMic.begin(I2S_MODE_STD, 16000, I2S_DATA_BIT_WIDTH_32BIT, I2S_SLOT_MODE_MONO,
                     I2S_STD_SLOT_LEFT)) {
@@ -284,36 +289,28 @@ static void handleApiIndex() {
   body += "\"ok\":true,\"fw\":\"";
   body += FW_VERSION;
   body += "\",";
-  body += "\"note\":\"query or JSON body; GET/POST both OK for actuators\",";
-  body += "\"camera\":{\"available\":false,\"reason\":\"hardware present but stream API not "
-          "implemented; CAM_PWDN held high\"},";
+  body += "\"board\":\"AI通用机器狗_v4 / V1.0.0\",";
   body += "\"endpoints\":[";
-  body += "{\"path\":\"/api/status\",\"methods\":[\"GET\"]},";
-  body += "{\"path\":\"/api/estop\",\"methods\":[\"GET\",\"POST\"]},";
-  body += "{\"path\":\"/api/pwm\",\"methods\":[\"GET\",\"POST\"],\"params\":{\"on\":\"bool\"}},";
-  body += "{\"path\":\"/api/stby\",\"methods\":[\"GET\",\"POST\"],\"params\":{\"on\":\"bool\"}},";
-  body += "{\"path\":\"/api/amp\",\"methods\":[\"GET\",\"POST\"],\"params\":{\"on\":\"bool\"}},";
-  body +=
-      "{\"path\":\"/api/servo\",\"methods\":[\"GET\",\"POST\"],\"params\":{\"id\":\"0..4 "
-      "T3-T7\",\"angle\":\"0..180\"}},";
-  body +=
-      "{\"path\":\"/api/servos\",\"methods\":[\"GET\",\"POST\"],\"params\":{\"a0..a4\":\"angle "
-      "or angles[]\"}},";
-  body +=
-      "{\"path\":\"/api/motor\",\"methods\":[\"GET\",\"POST\"],\"params\":{\"id\":\"0..3="
-      "MOT1..4\",\"dir\":\"-1|0|1\",\"duty\":\"0..100\"}},";
-  body += "{\"path\":\"/api/motor/stop_all\",\"methods\":[\"GET\",\"POST\"]},";
-  body +=
-      "{\"path\":\"/api/led\",\"methods\":[\"GET\",\"POST\"],\"params\":{\"id\":\"0..2="
-      "LED_1|LED_2|LED_ALL\",\"duty\":\"0..100\"}},";
-  body += "{\"path\":\"/api/encoders\",\"methods\":[\"GET\"]},";
-  body += "{\"path\":\"/api/encoders/reset\",\"methods\":[\"GET\",\"POST\"]},";
-  body += "{\"path\":\"/api/mic\",\"methods\":[\"GET\"]},";
-  body += "{\"path\":\"/api/beep\",\"methods\":[\"GET\",\"POST\"],\"params\":{\"ms\":\"int\"}},";
-  body +=
-      "{\"path\":\"/api/oled\",\"methods\":[\"GET\",\"POST\"],\"params\":{\"cmd\":\"text|clear|"
-      "fill\",\"text\":\"string\"}},";
-  body += "{\"path\":\"/api/camera\",\"methods\":[\"GET\"],\"available\":false}";
+  body += "{\"path\":\"/api/status\"},";
+  body += "{\"path\":\"/api/estop\"},";
+  body += "{\"path\":\"/api/pwm\",\"params\":{\"on\":\"bool\"}},";
+  body += "{\"path\":\"/api/stby\",\"params\":{\"on\":\"bool\"}},";
+  body += "{\"path\":\"/api/amp\",\"params\":{\"on\":\"bool\"}},";
+  body += "{\"path\":\"/api/servo\",\"params\":{\"id\":\"0..4\",\"angle\":\"0..180\"}},";
+  body += "{\"path\":\"/api/servos\",\"params\":{\"a0..a4\":\"angle\"}},";
+  body += "{\"path\":\"/api/motor\",\"params\":{\"id\":\"0..3\",\"dir\":\"-1|0|1\",\"duty\":\"0..100\"}},";
+  body += "{\"path\":\"/api/motor/stop_all\"},";
+  body += "{\"path\":\"/api/led\",\"params\":{\"id\":\"0..2\",\"duty\":\"0..100\"}},";
+  body += "{\"path\":\"/api/encoders\"},";
+  body += "{\"path\":\"/api/encoders/reset\"},";
+  body += "{\"path\":\"/api/mic\"},";
+  body += "{\"path\":\"/api/beep\",\"params\":{\"ms\":\"int\"}},";
+  body += "{\"path\":\"/api/oled\",\"params\":{\"cmd\":\"text|clear|fill\",\"text\":\"string\"}},";
+  body += "{\"path\":\"/api/camera\",\"params\":{\"on\":\"bool\"}},";
+  body += "{\"path\":\"/api/camera/capture\"},";
+  body += "{\"path\":\"/stream\"},";
+  body += "{\"path\":\"/api/lcd\",\"params\":{\"cmd\":\"init|on|off|fill|color\",\"color\":\"RGB565 hex\"}},";
+  body += "{\"path\":\"/api/touch\"}";
   body += "]}";
   sendJson(200, body);
 }
@@ -327,8 +324,9 @@ static void handleStatus() {
   body += "\"oled\":" + String(oled.present() ? "true" : "false") + ",";
   body += "\"pcaServo\":" + String(pcaServo.present() ? "true" : "false") + ",";
   body += "\"pcaMotor\":" + String(pcaMotor.present() ? "true" : "false") + ",";
+  body += "\"lcd\":" + String(lcdOk ? "true" : "false") + ",";
+  body += "\"camera\":" + String(cameraOk() ? "true" : "false") + ",";
   body += "\"i2s\":" + String(i2sReady ? "true" : "false") + ",";
-  body += "\"cameraHw\":true,\"cameraApi\":false,";
   body += "\"pwmEnable\":" + String(flagPwm ? "true" : "false") + ",";
   body += "\"motorStby\":" + String(flagStby ? "true" : "false") + ",";
   body += "\"ampEnable\":" + String(flagAmp ? "true" : "false") + ",";
@@ -388,7 +386,6 @@ static void handleServo() {
 }
 
 static void handleServos() {
-  // 批量：?a0=90&a1=90... 或 JSON {"angles":[90,90,90,90,90]}
   if (!flagPwm) {
     sendJson(400, "{\"ok\":false,\"error\":\"enable PWM first: /api/pwm?on=1\"}");
     return;
@@ -427,7 +424,6 @@ static void handleServos() {
     }
   }
   if (!any) {
-    // 无参数则全部中位
     for (int i = 0; i < 5; i++) angles[i] = 90;
   }
   for (int i = 0; i < 5; i++) {
@@ -553,10 +549,139 @@ static void handleOled() {
 }
 
 static void handleCamera() {
-  sendJson(501,
-           "{\"ok\":false,\"available\":false,\"cameraHw\":true,\"error\":\"camera stream API "
-           "not implemented\",\"hint\":\"CAM_* wired; CAM_PWDN held high at boot; use "
-           "/api/servo /api/motor /api/led\"}");
+  // GET: 状态；POST/?on=1 开关摄像头
+  if (server.method() == HTTP_GET && !server.hasArg("on") && reqBody().length() == 0) {
+    sendJson(200, String("{\"ok\":true,\"camera\":") + (cameraOk() ? "true" : "false") +
+                       ",\"capture\":\"/api/camera/capture\",\"stream\":\"/stream\"}");
+    return;
+  }
+  bool on = argBool("on", true);
+  if (on) {
+    if (!cameraBegin(xl)) {
+      sendJson(500, "{\"ok\":false,\"error\":\"camera init failed (check FPC / PSRAM)\"}");
+      return;
+    }
+    sendJson(200, "{\"ok\":true,\"camera\":true}");
+  } else {
+    cameraEnd(xl);
+    sendJson(200, "{\"ok\":true,\"camera\":false}");
+  }
+}
+
+static void handleCameraCapture() {
+  if (!cameraOk() && !cameraBegin(xl)) {
+    sendJson(500, "{\"ok\":false,\"error\":\"camera not ready\"}");
+    return;
+  }
+  uint8_t *buf = nullptr;
+  size_t len = 0;
+  if (!cameraCaptureJpeg(buf, len) || !buf || len == 0) {
+    sendJson(500, "{\"ok\":false,\"error\":\"capture failed\"}");
+    return;
+  }
+  addCors();
+  server.setContentLength(len);
+  server.send(200, "image/jpeg", "");
+  WiFiClient client = server.client();
+  client.write(buf, len);
+  cameraReleaseFrame();
+}
+
+static void handleStream() {
+  if (!cameraOk() && !cameraBegin(xl)) {
+    sendJson(500, "{\"ok\":false,\"error\":\"camera not ready\"}");
+    return;
+  }
+  WiFiClient client = server.client();
+  client.println(F("HTTP/1.1 200 OK"));
+  client.println(F("Content-Type: multipart/x-mixed-replace; boundary=frame"));
+  client.println(F("Access-Control-Allow-Origin: *"));
+  client.println(F("Connection: close"));
+  client.println();
+
+  uint32_t t0 = millis();
+  while (client.connected() && millis() - t0 < 120000) {
+    uint8_t *buf = nullptr;
+    size_t len = 0;
+    if (!cameraCaptureJpeg(buf, len)) {
+      delay(10);
+      continue;
+    }
+    client.printf("--frame\r\nContent-Type: image/jpeg\r\nContent-Length: %u\r\n\r\n",
+                  (unsigned)len);
+    client.write(buf, len);
+    client.print("\r\n");
+    cameraReleaseFrame();
+    delay(30);
+    if (!client.connected()) break;
+  }
+}
+
+static uint16_t parseColor(const String &s, uint16_t defVal) {
+  if (!s.length()) return defVal;
+  String t = s;
+  if (t.startsWith("0x") || t.startsWith("0X")) t = t.substring(2);
+  char *end = nullptr;
+  unsigned long v = strtoul(t.c_str(), &end, 16);
+  if (end == t.c_str()) return defVal;
+  return (uint16_t)v;
+}
+
+static void handleLcd() {
+  String cmd = argStr("cmd", "status");
+  if (cmd == "init" || (cmd == "status" && !lcdOk && argBool("on", false))) {
+    lcdOk = lcd.begin(lcdSpi, xl);
+    touch.begin(lcdSpi, xl);
+    if (!lcdOk) {
+      sendJson(500, "{\"ok\":false,\"error\":\"lcd init failed\"}");
+      return;
+    }
+    sendJson(200, "{\"ok\":true,\"lcd\":true,\"w\":320,\"h\":480}");
+    return;
+  }
+  if (cmd == "status") {
+    sendJson(200, String("{\"ok\":true,\"lcd\":") + (lcdOk ? "true" : "false") + "}");
+    return;
+  }
+  if (!lcdOk) {
+    lcdOk = lcd.begin(lcdSpi, xl);
+    touch.begin(lcdSpi, xl);
+  }
+  if (!lcdOk) {
+    sendJson(500, "{\"ok\":false,\"error\":\"lcd not ready\"}");
+    return;
+  }
+  if (cmd == "on") {
+    lcd.backlight(true);
+    sendJson(200, "{\"ok\":true,\"backlight\":true}");
+  } else if (cmd == "off") {
+    lcd.backlight(false);
+    sendJson(200, "{\"ok\":true,\"backlight\":false}");
+  } else if (cmd == "fill" || cmd == "color") {
+    uint16_t c = parseColor(argStr("color", "001F"), 0x001F);
+    lcd.fillScreen(c);
+    sendJson(200, String("{\"ok\":true,\"color\":") + c + "}");
+  } else if (cmd == "rotate") {
+    int r = argInt("r", 0);
+    lcd.setRotation((uint8_t)r);
+    sendJson(200, String("{\"ok\":true,\"rotation\":") + r + ",\"w\":" + lcd.width() +
+                       ",\"h\":" + lcd.height() + "}");
+  } else {
+    sendJson(400, "{\"ok\":false,\"error\":\"cmd=init|on|off|fill|rotate\"}");
+  }
+}
+
+static void handleTouch() {
+  uint16_t x = 0, y = 0, z = 0;
+  bool pressed = touch.touched();
+  bool ok = touch.read(x, y, z);
+  String body = "{";
+  body += "\"ok\":true,";
+  body += "\"irq\":" + String(pressed ? "true" : "false") + ",";
+  body += "\"valid\":" + String(ok ? "true" : "false") + ",";
+  body += "\"x\":" + String(x) + ",\"y\":" + String(y) + ",\"z\":" + String(z);
+  body += "}";
+  sendJson(200, body);
 }
 
 static void handleNotFound() {
@@ -586,6 +711,11 @@ static void setupHttp() {
   server.on("/api/camera", HTTP_GET, handleCamera);
   server.on("/api/camera", HTTP_POST, handleCamera);
   server.on("/api/camera", HTTP_OPTIONS, handleOptions);
+  server.on("/api/camera/capture", HTTP_GET, handleCameraCapture);
+  server.on("/api/camera/capture", HTTP_OPTIONS, handleOptions);
+  server.on("/stream", HTTP_GET, handleStream);
+  server.on("/api/touch", HTTP_GET, handleTouch);
+  server.on("/api/touch", HTTP_OPTIONS, handleOptions);
 
   onBoth("/api/estop", handleEstop);
   onBoth("/api/pwm", handlePwm);
@@ -599,6 +729,7 @@ static void setupHttp() {
   onBoth("/api/encoders/reset", handleEncReset);
   onBoth("/api/beep", handleBeep);
   onBoth("/api/oled", handleOled);
+  onBoth("/api/lcd", handleLcd);
 
   server.onNotFound(handleNotFound);
   server.begin();
@@ -609,7 +740,7 @@ void setup() {
   delay(200);
   Serial.println();
   Serial.println(F("=== EDA Robot LAN API ==="));
-  Serial.printf("FW %s\n", FW_VERSION);
+  Serial.printf("FW %s  board AI通用机器狗_v4\n", FW_VERSION);
 
   pinMode(PIN_ENC1_A, INPUT_PULLUP);
   pinMode(PIN_ENC1_B, INPUT_PULLUP);
@@ -624,12 +755,26 @@ void setup() {
   bool okXl = xl.begin(Wire, ADDR_XL9555);
   bool okOled = oled.begin(Wire, ADDR_OLED);
   bool okS = pcaServo.begin(Wire, ADDR_PCA_SERVO, 50.0f);
-  bool okM = pcaMotor.begin(Wire, ADDR_PCA_MOTOR, 1000.0f);  // 电机 PWM 1kHz
+  bool okM = pcaMotor.begin(Wire, ADDR_PCA_MOTOR, 1000.0f);
 
-  Serial.printf("XL9555=%d OLED=%d PCA16=%d PCA23=%d\n", okXl, okOled, okS, okM);
+  // LCD/触摸 SPI（CS 等在 XL9555）
+  lcdSpi.begin(PIN_LCD_SCK, PIN_LCD_MISO, PIN_LCD_MOSI, -1);
+  if (okXl) {
+    lcdOk = lcd.begin(lcdSpi, xl);
+    touch.begin(lcdSpi, xl);
+    if (lcdOk) {
+      lcd.fillScreen(0x0000);
+      lcd.fillRect(0, 0, 320, 40, 0x001F);
+    }
+  }
+
+  Serial.printf("XL9555=%d OLED=%d PCA16=%d PCA23=%d LCD=%d\n", okXl, okOled, okS, okM, lcdOk);
   flagPwm = false;
   flagStby = false;
   flagAmp = false;
+
+  // 摄像头默认不上电；需要时 /api/camera?on=1
+  if (okXl) cameraPower(xl, false);
 
   i2sReady = initI2S();
   Serial.printf("I2S=%d\n", i2sReady);

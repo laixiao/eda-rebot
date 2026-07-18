@@ -1,16 +1,16 @@
 ---
-description: 本板电路事实（以 EasyEDA Bridge 实时网表为准，2026-07-15 复查）
+description: 本板电路事实（以 EasyEDA Bridge 实时网表为准，2026-07-18 复查）
 alwaysApply: true
 ---
 
-# 本板电路事实（2026-07-15 Bridge 实时网表）
+# 本板电路事实（2026-07-18 Bridge 实时网表）
 
-工程：`AI智能机器狗_lx_改版_v2` / 图页 UUID `1d774ca900623155`。  
-**审查以实时网表为准**；旧「已删除摄像头/显示」结论已过时——当前原理图仍含摄像头、SPI 显示、探照灯相关器件与网络。
+工程：`AI通用机器狗_v4` / Board `V1.0.0` / 原理图 `eda-robot` / 图页 UUID `1d774ca900623155`。  
+**审查以实时网表为准。**
 
-## 规模（2026-07-15）
+## 规模（2026-07-18）
 
-- 约 **102** 个位号器件、**41** 条网络；原理图 DRC API 返回空列表
+- 约 **102** 个位号器件、**90** 条网络；原理图 DRC API 空列表
 - U1 **IO35/36/37** 无外设网络（Octal PSRAM，禁止使用）
 
 ## 电源树
@@ -32,20 +32,20 @@ U1：IO12=SDA，IO13=SCL。
 
 | 功能 | 连接 |
 |---|---|
-| 麦克风 INMP441 U2 | SCK=IO16(`MIC_SCK`)，WS=IO17，SD=IO18 |
+| 麦克风 INMP441 U2 | SCK=IO16，WS=IO17，SD=IO18 |
 | 功放 MAX98357 U3 | LRC=IO38，BCLK=IO39，DIN=IO40；SD=`SPK_SD`→XL9555 IO1_6 |
 | ENC1/ENC2 | IO9/IO10，IO21/IO47 |
-| 摄像头相关 GPIO | 仍接 `CAM_*`（含 D0–D7、XCLK、PCLK、VSYNC、HREF、SDA/SCL 等） |
-| 显示 strap | IO3=`LCD_MISO`，IO45=`LCD_SCK`，IO46=`LCD_MOSI`（另有 XL9555 控 CS/DC/RST/LED） |
+| 摄像头 U6 OV2640 FPC | XCLK=IO15，PCLK=IO1，VSYNC=IO6，HREF=IO7，SDA=IO4，SCL=IO5，D0..D7=IO11/14/8/20/41/42/48/19；PWDN→XL9555 IO0_4；RESET 接 EN（固件 `pin_reset=-1`） |
+| SPI 显示 U4 | SCK=IO45，MOSI=IO46，MISO=IO3；CS/DC/RST/LED/T_CS/T_IRQ→XL9555 |
 
 ## XL9555（U13）
 
 | 脚 | 网络 |
 |---|---|
 | IO0_0..3 | ENC3_A/B，ENC4_A/B |
-| IO0_4 | CAM_PWDN |
-| IO0_5 | STBY（U19/U22 共接，默认下拉） |
-| IO0_6 | OE#（U16/U23 共接，默认上拉禁 PWM） |
+| IO0_4 | CAM_PWDN（高=掉电） |
+| IO0_5 | STBY（U19/U22 共接） |
+| IO0_6 | OE#（U16/U23 共接） |
 | IO1_0..5 | T_CS，LCD_LED，LCD_DC，LCD_RST，LCD_CS，T_IRQ |
 | IO1_6 | SPK_SD |
 
@@ -60,10 +60,11 @@ U1：IO12=SDA，IO13=SCL。
   - MOT4：BIN1=`MOTOR4_1`→**LED9**，BIN2=`MOTOR4_2`→**LED8**
 - 探照灯：U23 LED0=`LED_1`，LED1=`LED_2`，LED2=`LED_ALL`
 
-固件电机 API：`id 0..3` = MOT1..MOT4；`MOTOR_IN1/IN2` 必须按上表，勿再使用旧的 LED8/9 顺序假定。
+固件电机 API：`id 0..3` = MOT1..MOT4。
 
-## 固件约定（`firmware/`）
+## 固件约定（`firmware/`，FW ≥ 1.2.0）
 
-- 上电：OE# 高、STBY 低、CAM_PWDN 高、LCD/T_CS 高、功放关
-- 摄像头流媒体 API **未实现**（硬件在图中）
+- 上电：OE# 高、STBY 低、CAM_PWDN 高、LCD/T_CS 高、功放关；LCD 启动时初始化并开背光
+- `/api/camera?on=1` 上电摄像头；`/api/camera/capture` JPEG；`/stream` MJPEG
+- `/api/lcd` 控 ST7796；`/api/touch` 读 XPT2046
 - `/api/led?id=0..2` 控探照灯；须先 `/api/pwm?on=1`

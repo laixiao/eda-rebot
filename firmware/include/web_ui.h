@@ -31,6 +31,7 @@ input[type=number],input[type=text]{width:72px;background:#0d1117;color:var(--fg
 pre{margin:0;white-space:pre-wrap;word-break:break-all;font:12px/1.4 ui-monospace,Consolas,monospace;color:#c9d1d9;max-height:180px;overflow:auto}
 .ok{color:var(--acc)}.bad{color:var(--bad)}.warn{color:var(--warn)}
 label{color:var(--muted)}
+img.cam{max-width:100%;background:#000;border-radius:6px;min-height:120px}
 </style>
 </head>
 <body>
@@ -84,6 +85,18 @@ label{color:var(--muted)}
   </div>
 </section>
 <section>
+  <h2>探照灯 (U23 LED0-2)</h2>
+  <div class="row">
+    <button onclick="setLed(0,100)">LED_1</button>
+    <button onclick="setLed(1,100)">LED_2</button>
+    <button onclick="setLed(2,100)">LED_ALL</button>
+    <button onclick="setLed(0,0);setLed(1,0);setLed(2,0)">全关</button>
+  </div>
+  <div class="row"><label>占空%</label><input id="ledDuty" type="number" min="0" max="100" value="80"/>
+    <button onclick="setLed(2,+ledDuty.value)">ALL@%</button>
+  </div>
+</section>
+<section>
   <h2>编码器</h2>
   <pre id="enc">-</pre>
   <div class="row"><button onclick="api('POST','/api/encoders/reset')">清零</button></div>
@@ -102,6 +115,32 @@ label{color:var(--muted)}
     <button onclick="oled('fill')">全亮</button>
   </div>
 </section>
+<section>
+  <h2>摄像头 OV2640</h2>
+  <div class="row">
+    <button class="primary" onclick="camOn(true)">开启</button>
+    <button onclick="camOn(false)">关闭</button>
+    <button onclick="camSnap()">抓拍</button>
+    <a href="/stream" target="_blank" style="color:#58a6ff">MJPEG 流</a>
+  </div>
+  <img id="camImg" class="cam" alt="capture"/>
+</section>
+<section>
+  <h2>SPI 屏 ST7796 + 触摸</h2>
+  <div class="row">
+    <button onclick="api('POST','/api/lcd',{cmd:'init'})">初始化</button>
+    <button onclick="api('POST','/api/lcd',{cmd:'on'})">背光开</button>
+    <button onclick="api('POST','/api/lcd',{cmd:'off'})">背光关</button>
+  </div>
+  <div class="row">
+    <button onclick="api('POST','/api/lcd',{cmd:'fill',color:'F800'})">红</button>
+    <button onclick="api('POST','/api/lcd',{cmd:'fill',color:'07E0'})">绿</button>
+    <button onclick="api('POST','/api/lcd',{cmd:'fill',color:'001F'})">蓝</button>
+    <button onclick="api('POST','/api/lcd',{cmd:'fill',color:'0000'})">黑</button>
+  </div>
+  <pre id="touch">-</pre>
+  <div class="row"><button onclick="readTouch()">读触摸</button></div>
+</section>
 </main>
 <script>
 async function api(method,url,body){
@@ -115,7 +154,7 @@ async function api(method,url,body){
 }
 function renderFlags(s){
   document.getElementById('flags').textContent=
-    `pwmEnable(OE low)=${s.pwmEnable}\nstby=${s.motorStby}\namp=${s.ampEnable}`;
+    `pwmEnable(OE low)=${s.pwmEnable}\nstby=${s.motorStby}\namp=${s.ampEnable}\ncam=${s.camera}\nlcd=${s.lcd}`;
   document.getElementById('btnPwm').textContent=s.pwmEnable?'PWM 已开 (点关闭)':'使能 PWM (OE#)';
   document.getElementById('btnMtr').textContent=s.motorStby?'STBY 已开 (点关闭)':'使能电机 STBY';
   document.getElementById('btnAmp').textContent=s.ampEnable?'功放 已开 (点关闭)':'功放 SD_MODE';
@@ -131,6 +170,8 @@ async function refresh(){
     `OLED ${s.oled?'<span class=ok>OK</span>':'<span class=bad>FAIL</span>'}\n`+
     `PCA U16 ${s.pcaServo?'<span class=ok>OK</span>':'<span class=bad>FAIL</span>'}  `+
     `U23 ${s.pcaMotor?'<span class=ok>OK</span>':'<span class=bad>FAIL</span>'}\n`+
+    `LCD ${s.lcd?'<span class=ok>OK</span>':'<span class=bad>OFF</span>'}  `+
+    `CAM ${s.camera?'<span class=ok>ON</span>':'<span class=warn>OFF</span>'}\n`+
     `I2C: ${(s.i2c||[]).map(x=>'0x'+x.toString(16)).join(', ')}`;
   renderFlags(s);
   const e=await api('GET','/api/encoders');
@@ -150,8 +191,12 @@ async function setMotor(dir){
   await api('POST','/api/motor',{id:+motorId.value,dir,duty:+motorDuty.value});
 }
 async function stopAllMotors(){await api('POST','/api/motor/stop_all')}
+async function setLed(id,duty){await api('POST','/api/led',{id,duty:+duty})}
 async function readMic(){const m=await api('GET','/api/mic');if(m)mic.textContent=`RMS ${m.rms}  peak ${m.peak}`;}
 async function oled(cmd){await api('POST','/api/oled',{cmd,text:oledText.value})}
+async function camOn(on){await api('POST','/api/camera',{on});refresh()}
+async function camSnap(){document.getElementById('camImg').src='/api/camera/capture?t='+Date.now()}
+async function readTouch(){const t=await api('GET','/api/touch');if(t)touch.textContent=`irq=${t.irq} valid=${t.valid}\nx=${t.x} y=${t.y} z=${t.z}`}
 refresh();
 setInterval(refresh,2000);
 </script>

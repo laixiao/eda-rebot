@@ -5,7 +5,7 @@ if not exist "%CLI%" (
   echo Missing tools\arduino-cli.exe
   exit /b 1
 )
-set FQBN=esp32:esp32:esp32s3:FlashSize=16M,PartitionScheme=default,PSRAM=opi,CDCOnBoot=default,UploadMode=default,USBMode=hwcdc
+set FQBN=esp32:esp32:esp32s3:FlashSize=16M,PartitionScheme=huge_app,PSRAM=opi,CDCOnBoot=default,UploadMode=default,USBMode=hwcdc
 "%CLI%" compile --fqbn %FQBN% "%~dp0eda_robot_debug"
 if errorlevel 1 exit /b 1
 echo.

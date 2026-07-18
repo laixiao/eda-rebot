@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""局域网调用机器人头部板 REST API 示例。用法: python robot_api.py 192.168.x.x"""
+"""局域网调用机器人头部板 REST API。用法: python robot_api.py 192.168.x.x"""
 
 from __future__ import annotations
 
@@ -31,7 +31,11 @@ class RobotApi:
         req = urllib.request.Request(url, data=data, headers=headers, method=method.upper())
         try:
             with urllib.request.urlopen(req, timeout=self.timeout) as resp:
-                return json.loads(resp.read().decode("utf-8"))
+                ctype = resp.headers.get("Content-Type", "")
+                raw = resp.read()
+                if "image/" in ctype:
+                    return {"ok": True, "content_type": ctype, "bytes": len(raw)}
+                return json.loads(raw.decode("utf-8"))
         except urllib.error.HTTPError as e:
             body = e.read().decode("utf-8", errors="replace")
             try:
@@ -84,8 +88,22 @@ class RobotApi:
     def led(self, led_id: int, duty: int = 100) -> dict:
         return self._call("/api/led", {"id": led_id, "duty": duty})
 
-    def camera(self) -> dict:
-        return self._call("/api/camera")
+    def camera(self, on: bool | None = None) -> dict:
+        if on is None:
+            return self._call("/api/camera")
+        return self._call("/api/camera", {"on": on}, method="POST")
+
+    def camera_capture(self) -> dict:
+        return self._call("/api/camera/capture")
+
+    def lcd(self, cmd: str = "status", color: str | None = None) -> dict:
+        params: dict[str, Any] = {"cmd": cmd}
+        if color is not None:
+            params["color"] = color
+        return self._call("/api/lcd", params, method="POST")
+
+    def touch(self) -> dict:
+        return self._call("/api/touch")
 
 
 def main() -> int:
@@ -93,10 +111,11 @@ def main() -> int:
     bot = RobotApi(host)
     print("status:", bot.status())
     print("catalog:", bot.api())
-    # 安全演示：不开电机/舵机，只读与 OLED
     print("oled:", bot.oled("LAN OK"))
     print("encoders:", bot.encoders())
     print("camera:", bot.camera())
+    print("lcd:", bot.lcd("status"))
+    print("touch:", bot.touch())
     return 0
 
 
