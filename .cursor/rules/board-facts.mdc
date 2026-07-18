@@ -1,76 +1,69 @@
 ---
-description: 本板（AI智能机器狗_lx_改版_v2 / eda-robotpro_6）电路固定事实，审查与固件建议时直接引用
+description: 本板电路事实（以 EasyEDA Bridge 实时网表为准，2026-07-15 复查）
 alwaysApply: true
 ---
 
-# 本板电路事实（2026-07-14 删除摄像头/探照灯/SPI 显示后实时网表核实）
+# 本板电路事实（2026-07-15 Bridge 实时网表）
 
-## 电源树（v2 改版）
+工程：`AI智能机器狗_lx_改版_v2` / 图页 UUID `1d774ca900623155`。  
+**审查以实时网表为准**；旧「已删除摄像头/显示」结论已过时——当前原理图仍含摄像头、SPI 显示、探照灯相关器件与网络。
 
-电池(U9 KF350) → VIN → **Q5 AO4407C 高边 P-MOS 载流开关**（SW1 SK-12D07 小拨动开关经 R6 1k 把栅极拉地导通；R5 100k 栅源关断上拉；C26 100nF 软启动）→ VBAT → D1(SS56 防反) → net"8V" → U11 TMI3255 降压(FB 39k/7.5k ≈ 4.96V) → **5V** → U5 **LD1117S33** → **3V3**。原先分裂的 `3.3V`/`3V3` 已统一为单一 `3V3` 网络；U1、U2、U10、U13、U16、U19、U22、U23 及相关上拉均接入该电源网。
+## 规模（2026-07-15）
 
-## I2C 总线（网名 OLED_SDA / OLED_SCL）
+- 约 **102** 个位号器件、**41** 条网络；原理图 DRC API 返回空列表
+- U1 **IO35/36/37** 无外设网络（Octal PSRAM，禁止使用）
 
-- 引脚:U1 IO12=SDA、IO13=SCL，R11/R12 **4.7k** 上拉到 3V3（v2 由 10k 改小）
-- 当前地址：**XL9555(U13)=0x20**、**OLED(U10)=0x3C**、**PCA9685(U16)=0x40**、**PCA9685(U23)=0x41**；U23 A0 已接 3V3，无地址冲突
-- XL9555 INT# → IO2（R4 10k 上拉）；注意 ENC3/4 边沿也会触发 INT
+## 电源树
 
-## 外设分配（v2）
+电池(U9) → VIN → Q5 高边开关 → VBAT → D1 → 8V → U11 → **5V** → U5 LD1117 → **3V3**（统一网名 `3V3`）
 
-| 功能 | 引脚/通道 |
-|---|---|
-| 摄像头（已删除） | 2026-07-14 已删除 U6/U7/U8、R15/R16/R22、C4/C7/C8/C16 及全部 `CAM_*` 网络；原 ESP32 摄像头 GPIO 与 XL9555 IO0_4 现为 NC |
-| I2S 麦克风 INMP441(U2) | SCK=IO16, WS=IO17, SD=IO18, L/R 接地 |
-| I2S 功放 MAX98357(U3) | LRC=IO38, BCLK=IO39, DIN=IO40；**SD_MODE → XL9555 IO1_6**（v2 从 IO10 移出） |
-| UART0 下载(T2) | RXD0/TXD0；本板无 USB |
-| 编码器 ENC1/ENC2 | **ESP32 直连**:ENC1_A=IO9, ENC1_B=IO10, ENC2_A=IO21, ENC2_B=IO47（可用 PCNT） |
-| 编码器 ENC3/ENC4 | XL9555 IO0_0~IO0_3（I2C 读取，仅低速可靠） |
-| SPI 显示/触摸（已删除） | 2026-07-14 已删除 U4、R25/R26/R27、18 条相关导线和“SPI显示模块”标题；全部显示相关网络已消失。R7/R9/R20 保留，网络改名为 `IO45_STRAP/IO3_STRAP/IO46_STRAP`，继续提供 10k 启动下拉 |
-| 探照灯（已删除） | 删除前实时图仅剩两路；2026-07-14 已删除 U12/U14、Q1/Q2/Q3、R13/R14/R19 及 `LED_1/LED_2/LED_GND/LED_ALL` 网络；U23 LED0-2 与 XL9555 IO1_7 现为 NC |
-| 电机 TB6612 ×2(U19/U22) | VM=5V, VCC=3V3, PWMA/PWMB 拉高；方向/PWM 由 U23 LED8-15 驱动；STBY 共接 XL9555 IO0_5，R24 **10k** 下拉（2026-07-10 已由 1k 改为 10k），默认关闭 |
-| 舵机 ×5(T3-T7) | U16 LED11-15，5V 供电；U16/U23 的 OE# 共接 XL9555 IO0_6，R23 10k 上拉到 3V3，默认禁止 PWM 输出 |
+## I2C（OLED_SDA / OLED_SCL）
 
-## Strapping 现状（v2）
-
-| GPIO | 复用 | 保障措施 |
+| 设备 | 地址 | 说明 |
 |---|---|---|
-| IO0 | BOOT 按键/T1 排针 | R1 10k 上拉 |
-| IO3 | LCD_MISO | R9 10k 下拉（JTAG strap 默认无效） |
-| IO45 | LCD_SCK | R7 10k 下拉 → VDD_SPI=3.3V 维持 |
-| IO46 | LCD_MOSI | R20 10k 下拉 → 下载模式组合有效 |
+| XL9555 U13 | 0x20 | A0/A1/A2=GND；INT#→U1 IO2 |
+| OLED U10 | 0x3C | |
+| PCA9685 U16 | 0x40 | A0..A5=GND；舵机 |
+| PCA9685 U23 | 0x41 | A0=3V3；电机方向 + 探照灯 |
 
-## 已删除的显示模组（历史参考）
+U1：IO12=SDA，IO13=SCL。
 
-- 该 SPI 显示/触摸模组已于 2026-07-14 从原理图删除，以下仅保留旧硬件资料供追溯。
-- 屏：**3.5 寸 HSD 320x480，ST7796 + 电阻触摸**（用户确认 SKU；固件读 RDDID 兜底，ST7796 支持 RGB565）
-- 触摸：**电阻式，转接板 U1 = XPT2046 型 SPI 触摸 ADC**，与屏共 SPI；读触摸时钟须 ≤2MHz 分时；PENIRQ 开漏输出
-- 转接板：4.0 寸 40PIN SPI 转接板 V1.3（料号 40002），J1 引脚 1=VCC…9=SDO，**10=T_CLK、11=T_CS、12=T_SDI、13=T_SDO、14=T_IRQ**（若换电容款则映射 SCL/RST/SDA/NC/INT）
-- 供电：VCC=2.8~3.3V（本板 3.3V 直供正确），整机 0.33W，背光 6 LED 共 90mA（转接板有 Q1 驱动管，LED 脚为逻辑输入）
+## ESP32 外设（U1）
 
-## 资源占用
+| 功能 | 连接 |
+|---|---|
+| 麦克风 INMP441 U2 | SCK=IO16(`MIC_SCK`)，WS=IO17，SD=IO18 |
+| 功放 MAX98357 U3 | LRC=IO38，BCLK=IO39，DIN=IO40；SD=`SPK_SD`→XL9555 IO1_6 |
+| ENC1/ENC2 | IO9/IO10，IO21/IO47 |
+| 摄像头相关 GPIO | 仍接 `CAM_*`（含 D0–D7、XCLK、PCLK、VSYNC、HREF、SDA/SCL 等） |
+| 显示 strap | IO3=`LCD_MISO`，IO45=`LCD_SCK`，IO46=`LCD_MOSI`（另有 XL9555 控 CS/DC/RST/LED） |
 
-- ESP32：删除摄像头后 IO1/4/5/6/7/8/11/14/15/19/20/41/42/48 已释放；删除显示后 IO3/45/46 也不再接外设，但仍带 10k 下拉并受启动配置约束；**IO35/36/37 仍因 Octal PSRAM 占用而禁止使用**。
-- XL9555：IO0_4、IO0_7、IO1_0~IO1_5、IO1_7 空闲；IO0_5=电机 STBY，IO0_6=两颗 PCA9685 OE#，IO1_6=功放 SD_MODE。
-- U23：LED0-7 均未使用，LED8-15 继续驱动两颗 TB6612 的方向输入。
+## XL9555（U13）
 
-## 最新审查状态与已接受条件（2026-07-14 删除模块后复查）
+| 脚 | 网络 |
+|---|---|
+| IO0_0..3 | ENC3_A/B，ENC4_A/B |
+| IO0_4 | CAM_PWDN |
+| IO0_5 | STBY（U19/U22 共接，默认下拉） |
+| IO0_6 | OE#（U16/U23 共接，默认上拉禁 PWM） |
+| IO1_0..5 | T_CS，LCD_LED，LCD_DC，LCD_RST，LCD_CS，T_IRQ |
+| IO1_6 | SPK_SD |
 
-- 实时网表：**80 个物理器件、61 条网络**；80 个位号全部唯一，无单端悬空命名网络；`3.3V`、全部 `CAM_*`、探照灯和显示专属网络均不再出现。
-- 本次删除 18 个物理器件：U6/U7/U8、R15/R16/R22、C4/C7/C8/C16、U12/U14、Q1/Q2/Q3、R13/R14/R19；另删除 63 条相关导线和“摄像头/探照灯x3”两个区块标题。
-- 随后删除 SPI 显示相关 U4、R25/R26/R27、18 条导线和 1 个标题；R7/R9/R20 与 U1 的连接保留，并重命名为 `IO45_STRAP/IO3_STRAP/IO46_STRAP`，原 `LCD_SCK/LCD_MISO/LCD_MOSI` 网络已删除。
-- 已修复：3V3 电源网分裂、U16/U23 地址冲突、PCA9685 OE# 上电悬空、双 STBY 下拉并联、LCD_CS/T_CS/T_IRQ 默认上拉、R24 已改 10k。
-- 用户接受的使用条件：**实际 5V 接入总负载保持低于 5A**，不再以“所有接口同时满载”的功率预算作为打板阻断项。
-- 用户接受的功能条件：**仅 ENC1/ENC2 用于可靠硬件计数**；ENC3/ENC4 保留在 XL9555，只作低速/状态用途，不再作为打板阻断项。
-- **U5 LD1117S33（C35879，标称 1.3A/15V，SOT-223）仍是热风险**：摄像头和 SPI LCD 负载已移除，但 5V→3V3 压差仍为 1.7V，ESP32-S3 WiFi 峰值、OLED、编码器和逻辑器件共用，仍需实测峰值电流与温升。
-- **U19/U22 驱动 5V 风扇的边界**：TB6612 库参数为每桥 1A、峰值 3.2A，VM=5V。可驱动启动电流低于约 1A、稳态留足热裕量的 2 线 5V 小风扇，接 U17/U18 的 1/2 脚（3 脚是 3V3，不是风扇 5V）；只能固定一个 IN 为低、另一个 IN 做正向 PWM，禁止反转。3/4 线风扇应保持 5V 常供并使用独立低边 MOSFET 或专用 PWM 控制脚，不建议接 H 桥调速。
-- **机械占位器件进入生产数据**：M1~M5（SG90 舵机占位）与 SCREW1~8（M2 螺丝）均无 C 编号但 `Add into BOM=yes`；U2（INMP441 模块）、U3（MAX98357 模块）也无 C 编号，属外购模块手工焊接。下单 SMT 前需在 BOM 里排除/标注这些行，避免贴片报错。
-- 网表共 47 个未连接引脚：包含已释放的 U1 摄像头 GPIO、U13 IO0_4/IO0_7/IO1_0~IO1_5/IO1_7、U23 LED0-7、U16 未使用通道、SW1 未使用触点；其中 U1 IO35/36/37 必须继续保持 NC。
+## 舵机 / 电机 / 探照灯（U16/U23）
 
-## DRC 明细（2026-07-14 API 实测）
+- 舵机 T3–T7：`SERVO_1`…`SERVO_5` → U16 **LED11–15**
+- U19 TB6612：MOT1/MOT2；PWMA/PWMB→3V3；STBY→IO0_5  
+  - MOT1：AIN1=`MOTOR1_2`→U23 **LED14**，AIN2=`MOTOR1_1`→**LED15**  
+  - MOT2：BIN1=`MOTOR2_1`→**LED13**，BIN2=`MOTOR2_2`→**LED12**
+- U22 TB6612：MOT3/MOT4  
+  - MOT3：AIN1=`MOTOR3_2`→**LED10**，AIN2=`MOTOR3_1`→**LED11**  
+  - MOT4：BIN1=`MOTOR4_1`→**LED9**，BIN2=`MOTOR4_2`→**LED8**
+- 探照灯：U23 LED0=`LED_1`，LED1=`LED_2`，LED2=`LED_ALL`
 
-- **原理图 DRC**：3 条 warning；API 仅返回数量，新增汇总 warning 与删除模块后新增 NC 引脚一致，未出现单端命名网络。
-- **PCB DRC（PCB2_8，含 verbose 明细）**：
-  - **Connection Error ≈371 条 = PCB 完全未布线**（lineCount=0、viaCount=0，仅两层 GND 敷铜 POUR1/POUR2）。布线完成前此项自然消除。
-  - **Clearance：内层 Inner1 存在名为 `3.3V` 的 Plane Zone（内电层分区），与 `3V3` 网络的 T1_3、U2_5、U10_2 通孔焊盘间距为 0** —— 内电层平面网络名还是旧的 `3.3V`，与现网络 `3V3` 不匹配，属真实错误，布线阶段必须把内电层分区网络改为 `3V3`。
-  - Top 层 GND 敷铜与 U16_23（IO0_6）SMD 焊盘间距 0：敷铜重灌后复查。
-- 本次只修改并保存了原理图，**未执行 PCB 更新/同步**；PCB 仍需手动从原理图更新，删除摄像头/探照灯封装与旧网络后再重新运行 PCB DRC。Inner1 的旧 `3.3V` 平面分区问题仍须单独修复。
+固件电机 API：`id 0..3` = MOT1..MOT4；`MOTOR_IN1/IN2` 必须按上表，勿再使用旧的 LED8/9 顺序假定。
+
+## 固件约定（`firmware/`）
+
+- 上电：OE# 高、STBY 低、CAM_PWDN 高、LCD/T_CS 高、功放关
+- 摄像头流媒体 API **未实现**（硬件在图中）
+- `/api/led?id=0..2` 控探照灯；须先 `/api/pwm?on=1`

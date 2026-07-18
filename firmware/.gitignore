@@ -1,0 +1,7 @@
+.pio/
+.vscode/
+*.bin
+*.elf
+*.map
+tools/
+eda_robot_debug/build/
