@@ -19,6 +19,8 @@ idf_component_register(
         esp_event
         esp_http_server
         esp_timer
+        esp_psram
+        esp_hw_support
         driver
         esp_driver_i2c
         esp_driver_spi

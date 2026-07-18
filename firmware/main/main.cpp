@@ -27,9 +27,10 @@
 #include "st7796.h"
 #include "xpt2046.h"
 #include "web_ui.h"
+#include "esp_psram.h"
 
 static const char *TAG = "eda_robot";
-static const char *FW_VERSION = "2.0.0";
+static const char *FW_VERSION = "2.0.1";
 
 static XL9555 xl;
 static PCA9685 pcaServo;
@@ -212,9 +213,11 @@ static std::string argStr(const ReqArgs &a, const char *key, const char *defVal 
 }
 
 static std::string i2cScanJson() {
+  // 只扫本板已知地址，避免 1..126 全扫导致超时刷屏并卡死 HTTP
+  static const uint8_t kAddrs[] = {ADDR_XL9555, ADDR_OLED, ADDR_PCA_SERVO, ADDR_PCA_MOTOR};
   std::string s = "[";
   bool first = true;
-  for (uint8_t addr = 1; addr < 127; addr++) {
+  for (uint8_t addr : kAddrs) {
     if (board_i2c_probe(addr)) {
       if (!first) s += ',';
       first = false;
@@ -319,18 +322,21 @@ static esp_err_t handleStatus(httpd_req_t *req) {
   int rssi = 0;
   if (esp_wifi_sta_get_ap_info(&ap) == ESP_OK) rssi = ap.rssi;
 
-  char buf[768];
+  const bool psramOk = esp_psram_is_initialized();
+  const size_t psramBytes = psramOk ? esp_psram_get_size() : 0;
+  char buf[896];
   snprintf(buf, sizeof(buf),
            "{\"ok\":true,\"fw\":\"%s\",\"ip\":\"%s\",\"rssi\":%d,"
+           "\"psram\":%s,\"psramBytes\":%u,"
            "\"xl9555\":%s,\"oled\":%s,\"pcaServo\":%s,\"pcaMotor\":%s,"
            "\"lcd\":%s,\"camera\":%s,\"i2s\":%s,"
            "\"pwmEnable\":%s,\"motorStby\":%s,\"ampEnable\":%s,\"i2c\":%s}",
-           FW_VERSION, ipStr, rssi, xl.present() ? "true" : "false",
-           oled.present() ? "true" : "false", pcaServo.present() ? "true" : "false",
-           pcaMotor.present() ? "true" : "false", lcdOk ? "true" : "false",
-           cameraOk() ? "true" : "false", i2sReady ? "true" : "false",
-           flagPwm ? "true" : "false", flagStby ? "true" : "false",
-           flagAmp ? "true" : "false", i2cScanJson().c_str());
+           FW_VERSION, ipStr, rssi, psramOk ? "true" : "false", (unsigned)psramBytes,
+           xl.present() ? "true" : "false", oled.present() ? "true" : "false",
+           pcaServo.present() ? "true" : "false", pcaMotor.present() ? "true" : "false",
+           lcdOk ? "true" : "false", cameraOk() ? "true" : "false",
+           i2sReady ? "true" : "false", flagPwm ? "true" : "false",
+           flagStby ? "true" : "false", flagAmp ? "true" : "false", i2cScanJson().c_str());
   return sendJson(req, 200, buf);
 }
 
@@ -537,7 +543,9 @@ static esp_err_t handleCamera(httpd_req_t *req) {
   bool on = argBool(a, "on", true);
   if (on) {
     if (!cameraBegin(xl))
-      return sendJson(req, 500, "{\"ok\":false,\"error\":\"camera init failed (check FPC / PSRAM)\"}");
+      return sendJson(req, 500,
+                      "{\"ok\":false,\"error\":\"camera init failed\",\"hint\":\"need working Octal PSRAM "
+                      "(N16R8); check module / IO35-37 NC / FPC\"}");
     return sendJson(req, 200, "{\"ok\":true,\"camera\":true}");
   }
   cameraEnd(xl);

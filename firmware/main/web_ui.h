@@ -170,6 +170,7 @@ async function refresh(){
     `PCA U16 ${s.pcaServo?'<span class=ok>OK</span>':'<span class=bad>FAIL</span>'}  `+
     `U23 ${s.pcaMotor?'<span class=ok>OK</span>':'<span class=bad>FAIL</span>'}\n`+
     `LCD ${s.lcd?'<span class=ok>OK</span>':'<span class=bad>OFF</span>'}  `+
+    `PSRAM ${s.psram?'<span class=ok>'+Math.round((s.psramBytes||0)/1048576)+'MB</span>':'<span class=warn>FAIL</span>'}\n`+
     `CAM ${s.camera?'<span class=ok>ON</span>':'<span class=warn>OFF</span>'}\n`+
     `I2C: ${(s.i2c||[]).map(x=>'0x'+x.toString(16)).join(', ')}`;
   renderFlags(s);
