@@ -11,3 +11,17 @@ cd /root/ssd/eda-rebot/firmware
 idf.py -p /dev/ttyUSB0 monitor --no-reset
 
 idf.py -p /dev/ttyUSB0 flash
+
+
+# 先退出 monitor（Ctrl+]），再：
+cd /root/ssd/eda-rebot/firmware
+idf.py -p /dev/ttyUSB0 erase-flash
+idf.py -p /dev/ttyUSB0 flash monitor
+
+# 若出现 partition invalid magic 0x10aa 死循环：
+# 多为旧 QIO bootloader；本工程已改为 DIO，需 fullclean 重建后再 flash
+# idf.py fullclean && idf.py build && idf.py -p /dev/ttyUSB0 flash
+#
+# 若出现 octal_psram: PSRAM chip is not connected → abort：
+# 工程已开 SPIRAM_IGNORE_NOTFOUND + 40M；仍失败则会无 PSRAM 继续启动
+# 摄像头/大缓冲可能不可用；需核对模组是否真为 N16R8、IO35/36/37 是否悬空
