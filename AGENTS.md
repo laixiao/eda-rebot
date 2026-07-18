@@ -9,7 +9,7 @@
 | 原理图图页 UUID | `1d774ca900623155` |
 | 主控 | `U1 ESP32-S3-WROOM-1-N16R8`（16MB Flash + 8MB Octal PSRAM） |
 | 最新实时网表基线 | 2026-07-18：约 102 位号、90 网络 |
-| 固件 | `firmware/` FW **1.2.0**（Arduino：`eda_robot_debug/`） |
+| 固件 | `firmware/` ESP-IDF FW **2.0.0**（`idf.py build`） |
 | DRC | 原理图 DRC API 空；**PCB（V1.0.0）尚未布线**，内层若残留 `3.3V` 平面须改为 `3V3` |
 
 详细且持续更新的电路事实见 `.cursor/rules/board-facts.mdc`。审查时以 EasyEDA 实时网表为最终依据。
@@ -81,4 +81,4 @@
 | `.cursor/rules/esp32-s3-constraints.mdc` | U1 PSRAM/引脚约束 |
 | `docs/SPI显示模块转接板.md` | ST7796 + XPT2046 转接板引脚 |
 | `docs/12GA-N20编码器.md` | 电机、编码器线色与参数 |
-| `firmware/` | 局域网调试固件与 Python 客户端 |
+| `firmware/` | ESP-IDF 局域网调试固件（FW 2.0.0）与 Python 客户端 |

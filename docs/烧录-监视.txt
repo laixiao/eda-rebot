@@ -1,0 +1,13 @@
+出现 Brownout Reset（需要重点关注）
+
+rst:0xf (BROWNOUT_RST)
+
+表示曾经发生过欠压复位。
+
+烧录和监视不可同时，避免占用同一个端口。
+
+source ~/.espressif/v5.5.4/esp-idf/export.sh
+cd /root/ssd/eda-rebot/firmware
+idf.py -p /dev/ttyUSB0 monitor --no-reset
+
+idf.py -p /dev/ttyUSB0 flash

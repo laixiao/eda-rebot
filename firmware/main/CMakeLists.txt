@@ -1,0 +1,29 @@
+idf_component_register(
+    SRCS
+        "main.cpp"
+        "xl9555.cpp"
+        "pca9685.cpp"
+        "ssd1306.cpp"
+        "st7796.cpp"
+        "xpt2046.cpp"
+        "camera_board.cpp"
+        "board_i2c.cpp"
+        "board_spi.cpp"
+        "board_i2s.cpp"
+    INCLUDE_DIRS
+        "."
+    REQUIRES
+        nvs_flash
+        esp_wifi
+        esp_netif
+        esp_event
+        esp_http_server
+        esp_timer
+        driver
+        esp_driver_i2c
+        esp_driver_spi
+        esp_driver_gpio
+        esp_driver_i2s
+        esp_driver_ledc
+)
+

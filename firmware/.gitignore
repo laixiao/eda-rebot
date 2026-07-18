@@ -1,7 +1,12 @@
 .pio/
 .vscode/
+.cache/
 *.bin
 *.elf
 *.map
 tools/
-eda_robot_debug/build/
+build/
+sdkconfig
+sdkconfig.old
+dependencies.lock
+managed_components/

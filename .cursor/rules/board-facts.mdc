@@ -62,8 +62,9 @@ U1：IO12=SDA，IO13=SCL。
 
 固件电机 API：`id 0..3` = MOT1..MOT4。
 
-## 固件约定（`firmware/`，FW ≥ 1.2.0）
+## 固件约定（`firmware/`，ESP-IDF FW ≥ 2.0.0）
 
+- 构建：`cd firmware && idf.py set-target esp32s3 && idf.py build`（需 ESP-IDF ≥ 5.3）
 - 上电：OE# 高、STBY 低、CAM_PWDN 高、LCD/T_CS 高、功放关；LCD 启动时初始化并开背光
 - `/api/camera?on=1` 上电摄像头；`/api/camera/capture` JPEG；`/stream` MJPEG
 - `/api/lcd` 控 ST7796；`/api/touch` 读 XPT2046
