@@ -27,10 +27,19 @@ button.danger{background:#da3633;border-color:#f85149}
 button:disabled{opacity:.45;cursor:not-allowed}
 input[type=range]{width:140px}
 input[type=number],input[type=text]{width:72px;background:#0d1117;color:var(--fg);border:1px solid var(--line);border-radius:6px;padding:6px}
+input[type=file]{max-width:100%;color:var(--muted)}
+.progress{height:8px;background:#0d1117;border-radius:4px;overflow:hidden;margin-top:8px}
+.progress>i{display:block;height:100%;width:0;background:var(--acc);transition:width .15s}
 pre{margin:0;white-space:pre-wrap;word-break:break-all;font:12px/1.4 ui-monospace,Consolas,monospace;color:#c9d1d9;max-height:180px;overflow:auto}
 .ok{color:var(--acc)}.bad{color:var(--bad)}.warn{color:var(--warn)}
 label{color:var(--muted)}
-img.cam{max-width:100%;background:#000;border-radius:6px;min-height:120px}
+img.cam{max-width:100%;width:100%;aspect-ratio:4/3;object-fit:contain;background:#0d1117;border:1px solid var(--line);border-radius:6px;display:block}
+.cam-wrap{position:relative;background:#0d1117;border:1px solid var(--line);border-radius:6px;overflow:hidden}
+.cam-wrap:not(.has-img) img.cam{visibility:hidden;border:0}
+.cam-ph{position:absolute;inset:0;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:6px;color:var(--muted);pointer-events:none}
+.cam-ph svg{opacity:.55}
+.cam-ph span{font-size:12px}
+.cam-wrap.has-img .cam-ph{display:none}
 </style>
 </head>
 <body>
@@ -122,7 +131,17 @@ img.cam{max-width:100%;background:#000;border-radius:6px;min-height:120px}
     <button onclick="camSnap()">抓拍</button>
     <a href="/stream" target="_blank" style="color:#58a6ff">MJPEG 流</a>
   </div>
-  <img id="camImg" class="cam" alt="capture"/>
+  <div id="camWrap" class="cam-wrap">
+    <img id="camImg" class="cam" alt="capture" onload="camShow(true)" onerror="camShow(false)"/>
+    <div class="cam-ph" aria-hidden="true">
+      <svg width="48" height="48" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5">
+        <path d="M4 7h3l2-2h6l2 2h3a2 2 0 0 1 2 2v9a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V9a2 2 0 0 1 2-2z"/>
+        <circle cx="12" cy="13" r="3.5"/>
+        <line x1="3" y1="3" x2="21" y2="21"/>
+      </svg>
+      <span>无画面 · 开启后抓拍</span>
+    </div>
+  </div>
 </section>
 <section>
   <h2>SPI 屏 ST7796 + 触摸</h2>
@@ -139,6 +158,16 @@ img.cam{max-width:100%;background:#000;border-radius:6px;min-height:120px}
   </div>
   <pre id="touch">-</pre>
   <div class="row"><button onclick="readTouch()">读触摸</button></div>
+</section>
+<section>
+  <h2>Web 烧录 (OTA)</h2>
+  <pre id="otaInfo">-</pre>
+  <div class="row">
+    <input id="otaFile" type="file" accept=".bin,application/octet-stream"/>
+    <button id="otaBtn" class="primary" onclick="otaFlash()">上传并烧录</button>
+  </div>
+  <div class="progress"><i id="otaBar"></i></div>
+  <pre id="otaLog">选择 build/eda_robot.bin，无需串口。烧录成功后自动重启。</pre>
 </section>
 </main>
 <script>
@@ -204,11 +233,73 @@ async function stopAllMotors(){await api('POST','/api/motor/stop_all')}
 async function setLed(id,duty){await api('POST','/api/led',{id,duty:+duty})}
 async function readMic(){const m=await api('GET','/api/mic');if(m)mic.textContent=`RMS ${m.rms}  peak ${m.peak}`;}
 async function oled(cmd){await api('POST','/api/oled',{cmd,text:oledText.value})}
-async function camOn(on){await api('POST','/api/camera',{on});refresh()}
-async function camSnap(){document.getElementById('camImg').src='/api/camera/capture?t='+Date.now()}
+function camShow(ok){
+  document.getElementById('camWrap').classList.toggle('has-img',!!ok);
+}
+async function camOn(on){
+  await api('POST','/api/camera',{on});
+  if(!on){
+    document.getElementById('camImg').removeAttribute('src');
+    camShow(false);
+  }
+  refresh();
+}
+async function camSnap(){
+  camShow(false);
+  document.getElementById('camImg').src='/api/camera/capture?t='+Date.now();
+}
 async function readTouch(){const t=await api('GET','/api/touch');if(t)touch.textContent=`irq=${t.irq} valid=${t.valid}\nx=${t.x} y=${t.y} z=${t.z}`}
+async function refreshOta(){
+  const o=await api('GET','/api/ota');
+  if(!o)return;
+  document.getElementById('otaInfo').textContent=
+    `FW ${o.fw}\nrunning ${o.running} @0x${(o.runningOffset||0).toString(16)}\n`+
+    `next ${o.next} (${Math.round((o.nextSize||0)/1048576)}MB)  busy=${o.busy}`;
+}
+async function otaFlash(){
+  const f=document.getElementById('otaFile').files[0];
+  const log=document.getElementById('otaLog');
+  const bar=document.getElementById('otaBar');
+  const btn=document.getElementById('otaBtn');
+  if(!f){alert('请先选择 .bin 固件');return}
+  if(!confirm('上传 '+f.name+' ('+Math.round(f.size/1024)+'KB) 并重启？\n勿断电、勿刷新页面。'))return;
+  btn.disabled=true;bar.style.width='0%';log.textContent='上传中...';
+  try{
+    await new Promise((resolve,reject)=>{
+      const xhr=new XMLHttpRequest();
+      xhr.open('POST','/api/ota');
+      xhr.setRequestHeader('Content-Type','application/octet-stream');
+      xhr.timeout=180000;
+      xhr.upload.onprogress=e=>{
+        if(e.lengthComputable){
+          const p=Math.round(e.loaded*100/e.total);
+          bar.style.width=p+'%';
+          log.textContent='上传 '+p+'%  ('+e.loaded+'/'+e.total+')';
+        }
+      };
+      xhr.onload=()=>{
+        let j;try{j=JSON.parse(xhr.responseText)}catch(e){j={ok:false,raw:xhr.responseText}}
+        if(xhr.status>=200&&xhr.status<300&&j.ok!==false){
+          bar.style.width='100%';
+          log.textContent='烧录成功，设备重启中… 约 5s 后刷新页面。\n'+JSON.stringify(j);
+          setTimeout(()=>location.reload(),5000);
+          resolve(j);
+        }else reject(new Error((j&&j.error)||xhr.responseText||('HTTP '+xhr.status)));
+      };
+      xhr.onerror=()=>reject(new Error('网络错误'));
+      xhr.ontimeout=()=>reject(new Error('超时'));
+      xhr.send(f);
+    });
+  }catch(e){
+    log.textContent='失败: '+e.message;
+    alert('OTA 失败: '+e.message);
+    btn.disabled=false;
+  }
+}
 refresh();
+refreshOta();
 setInterval(refresh,2000);
+setInterval(refreshOta,5000);
 </script>
 </body>
 </html>)HTML";

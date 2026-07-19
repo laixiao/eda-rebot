@@ -21,6 +21,9 @@ idf_component_register(
         esp_timer
         esp_psram
         esp_hw_support
+        app_update
+        esp_partition
+        esp_app_format
         driver
         esp_driver_i2c
         esp_driver_spi

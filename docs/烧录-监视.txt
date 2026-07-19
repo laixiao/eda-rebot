@@ -6,9 +6,65 @@ rst:0xf (BROWNOUT_RST)
 
 烧录和监视不可同时，避免占用同一个端口。
 
-source ~/.espressif/v5.5.4/esp-idf/export.sh
+进入环境
+source /root/ssd/home-data/.espressif/v5.5.4/esp-idf/export.sh
 cd /root/ssd/eda-rebot/firmware
 idf.py -p /dev/ttyUSB0 monitor --no-reset
 
-idf.py -p /dev/ttyUSB0 flash
+构建
+idf.py build
 
+────────────────────────────────────────
+本板烧录要点（无自动下载电路）
+────────────────────────────────────────
+1. 不要先开 monitor（占串口；且看完日志后再 flash 时芯片往往已不在下载模式）
+2. 手动进下载模式：按住 BOOT → 短按 EN → 松开 BOOT
+3. 立刻用下面「手动烧录」命令（必须 --before no_reset）
+4. idf.py 的 -D ESPTOOL_BEFORE=no_reset 无效；默认仍是 default_reset，会踢出下载模式
+
+确认已进下载（可选，看完马上 Ctrl+] 退出再烧）：
+idf.py -p /dev/ttyUSB0 monitor --no-reset
+应出现：boot:0x0 (DOWNLOAD...) / waiting for download
+然后立刻重新按 BOOT+EN 进下载，再跑手动烧录（不要用带 default_reset 的 idf.py flash）
+
+手动烧录（推荐，不要先开 monitor）
+  python flash_when_download.py
+脚本会自行尝试 no_reset / 自动下载器复位 / default_reset。
+
+若必须先确认下载模式：
+1) monitor 见 waiting for download 后 Ctrl+]
+2) 立刻 python flash_when_download.py
+注意：退出 monitor 常会 DTR 复位，下载模式可能已丢，故优先直接跑脚本。
+
+接线：GND、TX↔RXD0、RX↔TXD0；自动下载再接 BOOT→T1、EN→EN；3.3V 不接。
+
+失败特征：
+Invalid head of packet (0x61/0x20/0x66...) → 芯片在跑固件，不在下载模式，重新 BOOT+EN 后再烧
+Invalid head of packet (0x05) 且 Connecting 很快失败 → 多半是 USB 串口噪声
+  本机 CH341 若挂在 ohci-platform（USB1.1/12M）极不稳定；
+  请拔到 ehci-platform 的 USB2.0 口（lsusb -t 应看到 480M），再 BOOT+EN 后重烧
+  可用：lsusb -t | head -20 确认不在 ohci
+
+监视（烧录成功后）
+idf.py -p /dev/ttyUSB0 monitor --no-reset
+
+不要用 460800：本机 CH340+OHCI 极易噪声失败。
+idf.py 也请降速：
+idf.py -p /dev/ttyUSB0 -b 115200 flash
+（仍失败时只用 python flash_when_download.py，不要 flash monitor 联用）
+
+────────────────────────────────────────
+Web 烧录 OTA（FW ≥ 2.1.0，无需再接线）
+────────────────────────────────────────
+前提：板子已用串口成功刷过带双 OTA 分区表的固件，且已连上 WiFi。
+
+1) 本机构建：idf.py build  → 得到 build/eda_robot.bin
+2) 浏览器打开 http://<板子IP>/  → 「Web 烧录」选 .bin → 上传并烧录
+   或命令行：
+     curl -X POST --data-binary @build/eda_robot.bin \
+       -H 'Content-Type: application/octet-stream' \
+       http://<板子IP>/api/ota
+3) 成功后板子自动重启；约 5–10 秒后再访问页面，看 FW 版本
+
+注意：分区表从单应用改为双 OTA 的那一次，必须串口全量烧录（含 partition-table）。
+此后日常升级只用 Web/OTA。

@@ -9,7 +9,7 @@
 | 原理图图页 UUID | `1d774ca900623155` |
 | 主控 | `U1 ESP32-S3-WROOM-1-N16R8`（16MB Flash + 8MB Octal PSRAM） |
 | 最新实时网表基线 | 2026-07-18：约 102 位号、90 网络 |
-| 固件 | `firmware/` ESP-IDF FW **2.0.0**（`idf.py build`） |
+| 固件 | `firmware/` ESP-IDF FW **2.1.0**（`idf.py build`；支持 Web OTA） |
 | DRC | 原理图 DRC API 空；**PCB（V1.0.0）尚未布线**，内层若残留 `3.3V` 平面须改为 `3V3` |
 
 详细且持续更新的电路事实见 `.cursor/rules/board-facts.mdc`。审查时以 EasyEDA 实时网表为最终依据。
@@ -51,6 +51,7 @@
 | OLED U10 | I2C 0x3C | `/api/oled` |
 | 摄像头 U6 | 见 board-facts；PWDN=XL IO0_4 | `/api/camera` `/stream` |
 | SPI 屏+触摸 U4 | 见 board-facts | `/api/lcd` `/api/touch` |
+| Web 烧录 OTA | 双分区 `ota_0`/`ota_1` | `/api/ota` 上传 `eda_robot.bin` |
 
 ## U1 Strapping 启动脚
 
