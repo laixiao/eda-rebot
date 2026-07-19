@@ -28,9 +28,14 @@
 #include "xpt2046.h"
 #include "web_ui.h"
 #include "esp_psram.h"
+#include "esp_ota_ops.h"
+#include "esp_app_format.h"
+#include "esp_partition.h"
+#include "esp_system.h"
 
 static const char *TAG = "eda_robot";
-static const char *FW_VERSION = "2.0.1";
+static const char *FW_VERSION = "2.1.0";
+static volatile bool otaBusy = false;
 
 static XL9555 xl;
 static PCA9685 pcaServo;
@@ -311,7 +316,8 @@ static esp_err_t handleApiIndex(httpd_req_t *req) {
   body += "{\"path\":\"/api/encoders/reset\"},{\"path\":\"/api/mic\"},";
   body += "{\"path\":\"/api/beep\"},{\"path\":\"/api/oled\"},";
   body += "{\"path\":\"/api/camera\"},{\"path\":\"/api/camera/capture\"},";
-  body += "{\"path\":\"/stream\"},{\"path\":\"/api/lcd\"},{\"path\":\"/api/touch\"}";
+  body += "{\"path\":\"/stream\"},{\"path\":\"/api/lcd\"},{\"path\":\"/api/touch\"},";
+  body += "{\"path\":\"/api/ota\",\"methods\":[\"GET\",\"POST\"],\"note\":\"upload .bin\"}";
   body += "]}";
   return sendJson(req, 200, body);
 }
@@ -330,13 +336,14 @@ static esp_err_t handleStatus(httpd_req_t *req) {
            "\"psram\":%s,\"psramBytes\":%u,"
            "\"xl9555\":%s,\"oled\":%s,\"pcaServo\":%s,\"pcaMotor\":%s,"
            "\"lcd\":%s,\"camera\":%s,\"i2s\":%s,"
-           "\"pwmEnable\":%s,\"motorStby\":%s,\"ampEnable\":%s,\"i2c\":%s}",
+           "\"pwmEnable\":%s,\"motorStby\":%s,\"ampEnable\":%s,\"otaBusy\":%s,\"i2c\":%s}",
            FW_VERSION, ipStr, rssi, psramOk ? "true" : "false", (unsigned)psramBytes,
            xl.present() ? "true" : "false", oled.present() ? "true" : "false",
            pcaServo.present() ? "true" : "false", pcaMotor.present() ? "true" : "false",
            lcdOk ? "true" : "false", cameraOk() ? "true" : "false",
            i2sReady ? "true" : "false", flagPwm ? "true" : "false",
-           flagStby ? "true" : "false", flagAmp ? "true" : "false", i2cScanJson().c_str());
+           flagStby ? "true" : "false", flagAmp ? "true" : "false",
+           otaBusy ? "true" : "false", i2cScanJson().c_str());
   return sendJson(req, 200, buf);
 }
 
@@ -654,6 +661,125 @@ static esp_err_t handleLcd(httpd_req_t *req) {
   return sendJson(req, 400, "{\"ok\":false,\"error\":\"cmd=init|on|off|fill|rotate\"}");
 }
 
+static esp_err_t handleOtaInfo(httpd_req_t *req) {
+  const esp_partition_t *running = esp_ota_get_running_partition();
+  const esp_partition_t *next = esp_ota_get_next_update_partition(nullptr);
+  const esp_app_desc_t *desc = esp_app_get_description();
+  char b[384];
+  snprintf(b, sizeof(b),
+           "{\"ok\":true,\"fw\":\"%s\",\"project\":\"%s\",\"idf\":\"%s\","
+           "\"running\":\"%s\",\"runningOffset\":%u,\"runningSize\":%u,"
+           "\"next\":\"%s\",\"nextOffset\":%u,\"nextSize\":%u,\"busy\":%s,"
+           "\"hint\":\"POST raw .bin to /api/ota (application/octet-stream)\"}",
+           FW_VERSION, desc ? desc->project_name : "?", desc ? desc->idf_ver : "?",
+           running ? running->label : "?", running ? (unsigned)running->address : 0,
+           running ? (unsigned)running->size : 0, next ? next->label : "?",
+           next ? (unsigned)next->address : 0, next ? (unsigned)next->size : 0,
+           otaBusy ? "true" : "false");
+  return sendJson(req, 200, b);
+}
+
+static esp_err_t handleOta(httpd_req_t *req) {
+  if (req->method == HTTP_OPTIONS) return handleOptions(req);
+  if (req->method == HTTP_GET) return handleOtaInfo(req);
+
+  if (otaBusy) return sendJson(req, 400, "{\"ok\":false,\"error\":\"OTA already in progress\"}");
+  if (req->content_len <= 0)
+    return sendJson(req, 400, "{\"ok\":false,\"error\":\"Content-Length required; POST raw firmware .bin\"}");
+  if (req->content_len < 1024)
+    return sendJson(req, 400, "{\"ok\":false,\"error\":\"firmware too small\"}");
+
+  const esp_partition_t *update = esp_ota_get_next_update_partition(nullptr);
+  if (!update)
+    return sendJson(req, 500, "{\"ok\":false,\"error\":\"no OTA partition (need dual-OTA table)\"}");
+  if ((size_t)req->content_len > update->size)
+    return sendJson(req, 400, "{\"ok\":false,\"error\":\"firmware larger than OTA slot\"}");
+
+  otaBusy = true;
+  emergencyStop();
+  if (cameraOk()) cameraPower(xl, false);
+
+  ESP_LOGI(TAG, "OTA begin -> %s @0x%x size=%d", update->label, (unsigned)update->address,
+           req->content_len);
+
+  esp_ota_handle_t ota = 0;
+  esp_err_t err = esp_ota_begin(update, OTA_WITH_SEQUENTIAL_WRITES, &ota);
+  if (err != ESP_OK) {
+    otaBusy = false;
+    char b[96];
+    snprintf(b, sizeof(b), "{\"ok\":false,\"error\":\"esp_ota_begin %s\"}", esp_err_to_name(err));
+    return sendJson(req, 500, b);
+  }
+
+  char buf[4096];
+  int remaining = req->content_len;
+  int written = 0;
+  bool magicOk = false;
+  while (remaining > 0) {
+    int want = remaining > (int)sizeof(buf) ? (int)sizeof(buf) : remaining;
+    int got = 0;
+    while (got < want) {
+      int n = httpd_req_recv(req, buf + got, want - got);
+      if (n == HTTPD_SOCK_ERR_TIMEOUT) continue;
+      if (n <= 0) {
+        esp_ota_abort(ota);
+        otaBusy = false;
+        return sendJson(req, 500, "{\"ok\":false,\"error\":\"recv aborted\"}");
+      }
+      got += n;
+    }
+
+    if (!magicOk) {
+      if ((uint8_t)buf[0] != ESP_IMAGE_HEADER_MAGIC) {
+        esp_ota_abort(ota);
+        otaBusy = false;
+        return sendJson(req, 400,
+                        "{\"ok\":false,\"error\":\"not ESP firmware (magic!=0xE9); use build/*.bin\"}");
+      }
+      magicOk = true;
+    }
+
+    err = esp_ota_write(ota, buf, got);
+    if (err != ESP_OK) {
+      esp_ota_abort(ota);
+      otaBusy = false;
+      char b[96];
+      snprintf(b, sizeof(b), "{\"ok\":false,\"error\":\"esp_ota_write %s\"}", esp_err_to_name(err));
+      return sendJson(req, 500, b);
+    }
+    remaining -= got;
+    written += got;
+    if ((written & 0x3FFFF) == 0) ESP_LOGI(TAG, "OTA %d / %d", written, req->content_len);
+  }
+
+  err = esp_ota_end(ota);
+  if (err != ESP_OK) {
+    otaBusy = false;
+    char b[96];
+    snprintf(b, sizeof(b), "{\"ok\":false,\"error\":\"esp_ota_end %s (bad image?)\"}",
+             esp_err_to_name(err));
+    return sendJson(req, 500, b);
+  }
+
+  err = esp_ota_set_boot_partition(update);
+  if (err != ESP_OK) {
+    otaBusy = false;
+    char b[96];
+    snprintf(b, sizeof(b), "{\"ok\":false,\"error\":\"set_boot %s\"}", esp_err_to_name(err));
+    return sendJson(req, 500, b);
+  }
+
+  ESP_LOGI(TAG, "OTA ok %d bytes -> %s, reboot", written, update->label);
+  char b[160];
+  snprintf(b, sizeof(b),
+           "{\"ok\":true,\"written\":%d,\"partition\":\"%s\",\"rebooting\":true}", written,
+           update->label);
+  sendJson(req, 200, b);
+  vTaskDelay(pdMS_TO_TICKS(500));
+  esp_restart();
+  return ESP_OK;
+}
+
 static esp_err_t handleTouch(httpd_req_t *req) {
   uint16_t x = 0, y = 0, z = 0;
   bool pressed = touch.touched();
@@ -683,8 +809,11 @@ static void registerUri(httpd_handle_t s, const char *path, httpd_method_t metho
 static void setupHttp() {
   httpd_config_t config = HTTPD_DEFAULT_CONFIG();
   config.max_uri_handlers = 48;
-  config.stack_size = 8192;
+  config.stack_size = 10240;
   config.uri_match_fn = httpd_uri_match_wildcard;
+  config.recv_wait_timeout = 120;
+  config.send_wait_timeout = 30;
+  config.lru_purge_enable = true;
 
   if (httpd_start(&server, &config) != ESP_OK) {
     ESP_LOGE(TAG, "httpd_start failed");
@@ -708,6 +837,9 @@ static void setupHttp() {
   registerUri(server, "/stream", HTTP_GET, handleStream);
   registerUri(server, "/api/touch", HTTP_GET, handleTouch);
   registerUri(server, "/api/touch", HTTP_OPTIONS, handleOptions);
+  registerUri(server, "/api/ota", HTTP_GET, handleOta);
+  registerUri(server, "/api/ota", HTTP_POST, handleOta);
+  registerUri(server, "/api/ota", HTTP_OPTIONS, handleOptions);
 
   const char *both[] = {"/api/estop",         "/api/pwm",  "/api/stby", "/api/amp",
                         "/api/servo",         "/api/servos", "/api/motor", "/api/motor/stop_all",
@@ -793,8 +925,13 @@ extern "C" void app_main(void) {
     ESP_ERROR_CHECK(nvs_flash_init());
   }
 
+  // Confirm current OTA image so rollback does not revert after a good boot
+  esp_ota_mark_app_valid_cancel_rollback();
+
   ESP_LOGI(TAG, "=== EDA Robot LAN API (ESP-IDF) ===");
   ESP_LOGI(TAG, "FW %s  board AI通用机器狗_v4", FW_VERSION);
+  const esp_partition_t *run = esp_ota_get_running_partition();
+  if (run) ESP_LOGI(TAG, "running partition %s @0x%x", run->label, (unsigned)run->address);
 
   encoders_init();
   board_i2c_init();

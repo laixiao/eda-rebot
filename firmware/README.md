@@ -16,7 +16,19 @@ idf.py -p /dev/ttyUSB0 flash monitor
 
 | 路径 | 说明 |
 |---|---|
-| `main/` | 应用与驱动，FW **2.0.0** |
+| `main/` | 应用与驱动，FW **2.1.0**（含 Web OTA） |
 | `clients/` | Python 调试客户端 |
 
 浏览器打开板子 IP，或 `GET /api`。
+
+## Web 烧录 (OTA)
+
+首次仍需串口刷入（会写入双 OTA 分区表）。之后可在调试页 **Web 烧录** 上传 `build/eda_robot.bin`，或：
+
+```bash
+curl -X POST --data-binary @build/eda_robot.bin \
+  -H 'Content-Type: application/octet-stream' \
+  http://<板子IP>/api/ota
+```
+
+`GET /api/ota` 查看当前/下一分区。成功后自动重启。

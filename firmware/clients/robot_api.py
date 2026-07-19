@@ -105,6 +105,37 @@ class RobotApi:
     def touch(self) -> dict:
         return self._call("/api/touch")
 
+    def ota_info(self) -> dict:
+        return self._call("/api/ota")
+
+    def ota_flash(self, bin_path: str, timeout: float = 180.0) -> dict:
+        """POST raw firmware .bin to /api/ota (board reboots on success)."""
+        import pathlib
+
+        data = pathlib.Path(bin_path).read_bytes()
+        url = self.base + "/api/ota"
+        req = urllib.request.Request(
+            url,
+            data=data,
+            headers={
+                "Content-Type": "application/octet-stream",
+                "Content-Length": str(len(data)),
+            },
+            method="POST",
+        )
+        try:
+            with urllib.request.urlopen(req, timeout=timeout) as resp:
+                return json.loads(resp.read().decode("utf-8"))
+        except urllib.error.HTTPError as e:
+            body = e.read().decode("utf-8", errors="replace")
+            try:
+                return json.loads(body)
+            except json.JSONDecodeError:
+                return {"ok": False, "error": body, "http": e.code}
+        except urllib.error.URLError as e:
+            # reboot drops TCP — often means success
+            return {"ok": True, "rebooting": True, "note": str(e.reason)}
+
 
 def main() -> int:
     host = sys.argv[1] if len(sys.argv) > 1 else "192.168.4.1"
