@@ -1,0 +1,35 @@
+# 固件 WiFi：禁止烧录无密码/占位固件
+
+## 为什么绝对禁止
+
+本板 **无法依赖 BOOT+EN 串口烧录做恢复**（无可靠自动下载、串口不稳）。  
+日常升级靠 **Web OTA**，前提是板子还能连上真实 WiFi。
+
+一旦烧进 `your-ssid` / 空密码 / 错误密码 → 板子离线 → **OTA 失效且串口也救不回来**。  
+因此：禁止烧录任何没有正确 WiFi 密码的固件。
+
+## 强制要求
+
+任何 **build / 串口烧录 / Web OTA** 之前：
+
+1. `firmware/main/wifi_config.h` **必须存在**
+2. `WIFI_SSID` / `WIFI_PASS` 必须是真实可用热点（禁止 `your-ssid`、`your-password`、空字符串）
+3. 烧录前校验 bin：`strings build/eda_robot.bin | grep -E 'your-ssid|your-password'` **必须无输出**；真实 SSID/密码应能搜到
+
+禁止：
+
+- 缺 `wifi_config.h` 时用 example 回退并烧录
+- 未做上述 bin 自检就 OTA/flash
+- 以「先烧上去再改」为由跳过 WiFi 配置
+
+## 操作清单
+
+1. 确认 `wifi_config.h` 存在且密码正确  
+2. `idf.py build`  
+3. bin 自检通过  
+4. 仅此时才允许 `POST /api/ota` 或串口 flash  
+
+## 工程保障
+
+- `board_config.h`：无 `wifi_config.h` 时 `#error`
+- `main/CMakeLists.txt`：缺文件则 `FATAL_ERROR`

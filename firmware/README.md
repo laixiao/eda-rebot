@@ -4,13 +4,16 @@ ESP32-S3-WROOM-1-N16R8 局域网调试固件，原生 **ESP-IDF v5.5** 工程。
 
 ## 构建
 
-Wi-Fi 参数位于已忽略的 `main/wifi_config.h`；新环境可参考 `main/wifi_config.example.h`。
+**烧录/OTA 前必须有 `main/wifi_config.h`**（真实 SSID/密码）。缺文件时编译直接失败，不会再用 example 的 `your-ssid`。
 
 ```bash
-. $IDF_PATH/export.sh   # 或 source ~/.../esp-idf/export.sh
+cp main/wifi_config.example.h main/wifi_config.h   # 仅首次
+# 编辑 WIFI_SSID / WIFI_PASS
+. $IDF_PATH/export.sh
 cd firmware
 idf.py set-target esp32s3
 idf.py build
+# 烧录前确认：strings build/eda_robot.bin | grep your-ssid 应无输出
 idf.py -p /dev/ttyUSB0 flash monitor
 ```
 

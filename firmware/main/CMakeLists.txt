@@ -1,3 +1,9 @@
+if(NOT EXISTS "${CMAKE_CURRENT_LIST_DIR}/wifi_config.h")
+    message(FATAL_ERROR
+        "main/wifi_config.h is required before build/flash/OTA. "
+        "Copy wifi_config.example.h -> wifi_config.h and set WIFI_SSID / WIFI_PASS.")
+endif()
+
 idf_component_register(
     SRCS
         "main.cpp"

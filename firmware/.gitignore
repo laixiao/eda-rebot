@@ -10,4 +10,3 @@ sdkconfig
 sdkconfig.old
 dependencies.lock
 managed_components/
-main/wifi_config.h

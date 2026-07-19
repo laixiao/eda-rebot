@@ -5,7 +5,7 @@
   "clangd.arguments": [
     "--background-index",
     "--query-driver=**",
-    "--compile-commands-dir=/root/ssd/eda-rebot/build"
+    "--compile-commands-dir=/root/ssd/eda-rebot/firmware/build"
   ],
   "idf.flashType": "UART",
   "idf.port": "/dev/ttyUSB0"

@@ -4,7 +4,7 @@
 #if __has_include("wifi_config.h")
 #include "wifi_config.h"
 #else
-#include "wifi_config.example.h"
+#error "main/wifi_config.h required before build/flash/OTA — copy wifi_config.example.h and set SSID/PASS"
 #endif
 
 // 引脚与地址来自 2026-07-18 Bridge 实时网表

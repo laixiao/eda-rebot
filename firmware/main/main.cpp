@@ -36,6 +36,7 @@
 
 static const char *TAG = "eda_robot";
 static const char *FW_VERSION = "2.1.0";
+static const int64_t MOTOR_FAILSAFE_US = 1500000;
 static volatile bool otaBusy = false;
 
 static XL9555 xl;
@@ -448,15 +449,17 @@ static esp_err_t handleStatus(httpd_req_t *req) {
            "{\"ok\":true,\"fw\":\"%s\",\"ip\":\"%s\",\"rssi\":%d,"
            "\"psram\":%s,\"psramBytes\":%u,"
            "\"xl9555\":%s,\"oled\":%s,\"pcaServo\":%s,\"pcaMotor\":%s,"
-           "\"lcd\":%s,\"camera\":%s,\"i2s\":%s,"
-           "\"pwmEnable\":%s,\"motorStby\":%s,\"ampEnable\":%s,\"otaBusy\":%s,\"i2c\":%s}",
+           "\"lcd\":%s,\"touch\":%s,\"camera\":%s,\"streaming\":%s,\"i2s\":%s,"
+           "\"pwmEnable\":%s,\"motorStby\":%s,\"motorActiveMask\":%u,"
+           "\"motorFailsafeMs\":%u,\"ampEnable\":%s,\"otaBusy\":%s,\"i2c\":%s}",
            FW_VERSION, ipStr, rssi, psramOk ? "true" : "false", (unsigned)psramBytes,
            xl.present() ? "true" : "false", oled.present() ? "true" : "false",
            pcaServo.present() ? "true" : "false", pcaMotor.present() ? "true" : "false",
            lcdReady ? "true" : "false", touchReady ? "true" : "false",
            cameraOk() ? "true" : "false", streaming ? "true" : "false",
            i2sReady ? "true" : "false", flagPwm ? "true" : "false",
-           flagStby ? "true" : "false", flagAmp ? "true" : "false",
+           flagStby ? "true" : "false", (unsigned)motorActiveMask,
+           (unsigned)(MOTOR_FAILSAFE_US / 1000), flagAmp ? "true" : "false",
            otaBusy ? "true" : "false", i2cScanJson().c_str());
   return sendJson(req, 200, buf);
 }

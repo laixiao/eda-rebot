@@ -1,2 +1,4 @@
 CompileFlags:
-    Remove: [-f*, -m*]
+  Remove: [-f*, -m*]
+
+CompilationDatabase: firmware/build

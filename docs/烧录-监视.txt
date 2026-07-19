@@ -57,8 +57,11 @@ idf.py -p /dev/ttyUSB0 -b 115200 flash
 Web 烧录 OTA（FW ≥ 2.1.0，无需再接线）
 ────────────────────────────────────────
 前提：板子已用串口成功刷过带双 OTA 分区表的固件，且已连上 WiFi。
+强制：必须有 main/wifi_config.h（真实 SSID+密码）。禁止烧录 your-ssid/无密码固件——
+本板无法依赖 BOOT+EN 恢复，错 WiFi 会永久失去 OTA。
 
-1) 本机构建：idf.py build  → 得到 build/eda_robot.bin
+1) 确认 wifi_config.h 存在后：idf.py build  → 得到 build/eda_robot.bin
+   自检：strings build/eda_robot.bin | grep your-ssid  （应无输出）
 2) 浏览器打开 http://<板子IP>/  → 「Web 烧录」选 .bin → 上传并烧录
    或命令行：
      curl -X POST --data-binary @build/eda_robot.bin \
@@ -68,3 +71,6 @@ Web 烧录 OTA（FW ≥ 2.1.0，无需再接线）
 
 注意：分区表从单应用改为双 OTA 的那一次，必须串口全量烧录（含 partition-table）。
 此后日常升级只用 Web/OTA。
+
+当前板子IP
+http://192.168.3.216/

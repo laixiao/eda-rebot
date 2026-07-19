@@ -18,6 +18,7 @@
 
 - **原理图只读**：不通过 EasyEDA API 改图，只读取、查询和审查；改线由用户手动操作。
 - **U1 IO35/36/37 禁用**：N16R8 内部 Octal PSRAM 占用，必须保持 NC。
+- **禁止烧录无 WiFi 密码/占位固件**：本板无法靠 BOOT+EN 恢复；错 SSID 会离线且 OTA 失效。烧录前必须有真实 `wifi_config.h` 并自检 bin；见 `.cursor/rules/firmware-wifi.mdc`。
 - 用户已接受：实际接入的 **5V 总负载保持低于 5A**。
 - 用户已接受：仅 ENC1/ENC2 用于可靠计数；ENC3/ENC4 经 XL9555，只作低速/状态用途。
 
