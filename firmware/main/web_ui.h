@@ -33,7 +33,13 @@ input[type=file]{max-width:100%;color:var(--muted)}
 pre{margin:0;white-space:pre-wrap;word-break:break-all;font:12px/1.4 ui-monospace,Consolas,monospace;color:#c9d1d9;max-height:180px;overflow:auto}
 .ok{color:var(--acc)}.bad{color:var(--bad)}.warn{color:var(--warn)}
 label{color:var(--muted)}
-img.cam{max-width:100%;background:#000;border-radius:6px;min-height:120px}
+img.cam{max-width:100%;width:100%;aspect-ratio:4/3;object-fit:contain;background:#0d1117;border:1px solid var(--line);border-radius:6px;display:block}
+.cam-wrap{position:relative;background:#0d1117;border:1px solid var(--line);border-radius:6px;overflow:hidden}
+.cam-wrap:not(.has-img) img.cam{visibility:hidden;border:0}
+.cam-ph{position:absolute;inset:0;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:6px;color:var(--muted);pointer-events:none}
+.cam-ph svg{opacity:.55}
+.cam-ph span{font-size:12px}
+.cam-wrap.has-img .cam-ph{display:none}
 </style>
 </head>
 <body>
@@ -125,7 +131,17 @@ img.cam{max-width:100%;background:#000;border-radius:6px;min-height:120px}
     <button onclick="camSnap()">抓拍</button>
     <a href="/stream" target="_blank" style="color:#58a6ff">MJPEG 流</a>
   </div>
-  <img id="camImg" class="cam" alt="capture"/>
+  <div id="camWrap" class="cam-wrap">
+    <img id="camImg" class="cam" alt="capture" onload="camShow(true)" onerror="camShow(false)"/>
+    <div class="cam-ph" aria-hidden="true">
+      <svg width="48" height="48" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5">
+        <path d="M4 7h3l2-2h6l2 2h3a2 2 0 0 1 2 2v9a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V9a2 2 0 0 1 2-2z"/>
+        <circle cx="12" cy="13" r="3.5"/>
+        <line x1="3" y1="3" x2="21" y2="21"/>
+      </svg>
+      <span>无画面 · 开启后抓拍</span>
+    </div>
+  </div>
 </section>
 <section>
   <h2>SPI 屏 ST7796 + 触摸</h2>
@@ -207,8 +223,21 @@ async function stopAllMotors(){await api('POST','/api/motor/stop_all')}
 async function setLed(id,duty){await api('POST','/api/led',{id,duty:+duty})}
 async function readMic(){const m=await api('GET','/api/mic');if(m)mic.textContent=`RMS ${m.rms}  peak ${m.peak}`;}
 async function oled(cmd){await api('POST','/api/oled',{cmd,text:oledText.value})}
-async function camOn(on){await api('POST','/api/camera',{on});refresh()}
-async function camSnap(){document.getElementById('camImg').src='/api/camera/capture?t='+Date.now()}
+function camShow(ok){
+  document.getElementById('camWrap').classList.toggle('has-img',!!ok);
+}
+async function camOn(on){
+  await api('POST','/api/camera',{on});
+  if(!on){
+    document.getElementById('camImg').removeAttribute('src');
+    camShow(false);
+  }
+  refresh();
+}
+async function camSnap(){
+  camShow(false);
+  document.getElementById('camImg').src='/api/camera/capture?t='+Date.now();
+}
 async function readTouch(){const t=await api('GET','/api/touch');if(t)touch.textContent=`irq=${t.irq} valid=${t.valid}\nx=${t.x} y=${t.y} z=${t.z}`}
 async function refreshOta(){
   const o=await api('GET','/api/ota');
