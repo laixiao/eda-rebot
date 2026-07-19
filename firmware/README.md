@@ -21,7 +21,7 @@ idf.py -p /dev/ttyUSB0 flash monitor
 
 | 路径 | 说明 |
 |---|---|
-| `main/` | 应用与驱动，FW **2.1.0**（含 Web OTA） |
+| `main/` | 应用与驱动，FW **2.1.3**（含 Web OTA） |
 | `clients/` | Python 调试客户端 |
 
 浏览器打开板子 IP，或 `GET /api`。

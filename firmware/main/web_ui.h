@@ -25,8 +25,11 @@ button:hover{border-color:#8b949e}
 button.primary{background:#238636;border-color:#2ea043}
 button.danger{background:#da3633;border-color:#f85149}
 button:disabled{opacity:.45;cursor:not-allowed}
-input[type=range]{width:140px}
+input[type=range]{width:140px;accent-color:var(--acc)}
 input[type=number],input[type=text]{width:72px;background:#0d1117;color:var(--fg);border:1px solid var(--line);border-radius:6px;padding:6px}
+.led-row{display:grid;grid-template-columns:72px 1fr 40px;gap:8px;align-items:center;margin:8px 0}
+.led-row input[type=range]{width:100%;min-width:0}
+.led-pct{font-variant-numeric:tabular-nums;color:var(--muted);text-align:right}
 input[type=file]{max-width:100%;color:var(--muted)}
 .progress{height:8px;background:#0d1117;border-radius:4px;overflow:hidden;margin-top:8px}
 .progress>i{display:block;height:100%;width:0;background:var(--acc);transition:width .15s}
@@ -94,14 +97,24 @@ img.cam{max-width:100%;width:100%;aspect-ratio:4/3;object-fit:contain;background
 </section>
 <section>
   <h2>探照灯 (U23 LED0-2)</h2>
-  <div class="row">
-    <button onclick="setLed(0,100)">LED_1</button>
-    <button onclick="setLed(1,100)">LED_2</button>
-    <button onclick="setLed(2,100)">LED_ALL</button>
-    <button onclick="setLed(0,0);setLed(1,0);setLed(2,0)">全关</button>
+  <div class="led-row">
+    <label for="led0">LED_1</label>
+    <input id="led0" type="range" min="0" max="100" value="0" oninput="onLedSlide(0,this)"/>
+    <span id="ledV0" class="led-pct">0%</span>
   </div>
-  <div class="row"><label>占空%</label><input id="ledDuty" type="number" min="0" max="100" value="80"/>
-    <button onclick="setLed(2,+ledDuty.value)">ALL@%</button>
+  <div class="led-row">
+    <label for="led1">LED_2</label>
+    <input id="led1" type="range" min="0" max="100" value="0" oninput="onLedSlide(1,this)"/>
+    <span id="ledV1" class="led-pct">0%</span>
+  </div>
+  <div class="led-row">
+    <label for="led2">LED_ALL</label>
+    <input id="led2" type="range" min="0" max="100" value="0" oninput="onLedSlide(2,this)"/>
+    <span id="ledV2" class="led-pct">0%</span>
+  </div>
+  <div class="row">
+    <button onclick="ledsSetAll(0)">全关</button>
+    <button onclick="ledsSetAll(100)">全亮</button>
   </div>
 </section>
 <section>
@@ -249,7 +262,37 @@ async function startMotor(dir){
 function stopMotorTimer(){if(motorTimer){clearInterval(motorTimer);motorTimer=0}}
 async function stopMotorHold(){motorGeneration++;stopMotorTimer();await setMotor(0)}
 async function stopAllMotors(){await api('POST','/api/motor/stop_all')}
-async function setLed(id,duty){await api('POST','/api/led',{id,duty:+duty})}
+const ledTimers=[0,0,0];
+function onLedSlide(id,el){
+  const duty=Math.max(0,Math.min(100,+el.value||0));
+  document.getElementById('ledV'+id).textContent=duty+'%';
+  if(ledTimers[id]) clearTimeout(ledTimers[id]);
+  ledTimers[id]=setTimeout(()=>setLed(id,duty,true),40);
+}
+async function setLed(id,duty,quiet){
+  duty=Math.max(0,Math.min(100,+duty||0));
+  const el=document.getElementById('led'+id);
+  const lab=document.getElementById('ledV'+id);
+  if(el) el.value=String(duty);
+  if(lab) lab.textContent=duty+'%';
+  const r=await fetch('/api/led',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({id,duty})});
+  const t=await r.text();
+  let j; try{j=JSON.parse(t)}catch(e){j={ok:false,raw:t}}
+  if(j&&j.pwmEnable){
+    const btn=document.getElementById('btnPwm');
+    if(btn) btn.textContent='PWM 已开 (点关闭)';
+  }
+  if(!quiet && (!r.ok||j.ok===false)) alert((j&&j.error)||t||('HTTP '+r.status));
+  return j;
+}
+async function ledsSetAll(duty){
+  for(let i=0;i<3;i++){
+    if(ledTimers[i]){clearTimeout(ledTimers[i]);ledTimers[i]=0}
+    const j=await setLed(i,duty,true);
+    if(j&&j.ok===false){alert(j.error||'探照灯设置失败');break}
+  }
+  refresh();
+}
 async function readMic(){const m=await api('GET','/api/mic');if(m)mic.textContent=`RMS ${m.rms}  peak ${m.peak}`;}
 async function oled(cmd){await api('POST','/api/oled',{cmd,text:oledText.value})}
 function camShow(ok){

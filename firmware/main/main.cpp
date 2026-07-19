@@ -35,7 +35,7 @@
 #include "esp_system.h"
 
 static const char *TAG = "eda_robot";
-static const char *FW_VERSION = "2.1.0";
+static const char *FW_VERSION = "2.1.3";
 static const int64_t MOTOR_FAILSAFE_US = 1500000;
 static volatile bool otaBusy = false;
 
@@ -270,17 +270,20 @@ static std::string i2cScanJson() {
 }
 
 // ---- actuators ----
+// U16 (servo PCA) may be absent; do not block OE# / motor PCA (U23) when it is.
+static bool pcaAllOffOrAbsent(PCA9685 &pca) { return !pca.present() || pca.allOff(); }
+
 static bool setPwmEnable(bool on) {
   if (!actuatorLock()) return false;
   bool ok = true;
   if (on) {
-    const bool motorsOff = pcaMotor.allOff();
-    const bool servosOff = pcaServo.allOff();
+    const bool motorsOff = pcaAllOffOrAbsent(pcaMotor);
+    const bool servosOff = pcaAllOffOrAbsent(pcaServo);
     ok = motorsOff && servosOff;
     if (ok) ok = xl.setPin(XL_OE, false);
   } else {
-    const bool motorsOff = pcaMotor.allOff();
-    const bool servosOff = pcaServo.allOff();
+    const bool motorsOff = pcaAllOffOrAbsent(pcaMotor);
+    const bool servosOff = pcaAllOffOrAbsent(pcaServo);
     ok = xl.setPin(XL_OE, true) && motorsOff && servosOff;
     if (ok || motorsOff) motorActiveMask = 0;
   }
@@ -390,8 +393,8 @@ static bool emergencyStop() {
   const bool stbyOk = xl.setPin(XL_STBY, false);
   const bool oeOk = xl.setPin(XL_OE, true);
   const bool ampOk = xl.setPin(XL_AMP_SD, false);
-  const bool motorOk = pcaMotor.allOff();
-  const bool servoOk = pcaServo.allOff();
+  const bool motorOk = pcaAllOffOrAbsent(pcaMotor);
+  const bool servoOk = pcaAllOffOrAbsent(pcaServo);
   if (stbyOk) flagStby = false;
   if (oeOk) flagPwm = false;
   if (ampOk) flagAmp = false;
@@ -597,9 +600,18 @@ static esp_err_t handleLed(httpd_req_t *req) {
   int duty = argInt(a, "duty", 100);
   if (id < 0 || id > 2)
     return sendJson(req, 400, "{\"ok\":false,\"error\":\"id 0=LED_1 1=LED_2 2=LED_ALL\"}");
-  if (!flagPwm) return sendJson(req, 400, "{\"ok\":false,\"error\":\"enable PWM first with POST /api/pwm\"}");
   if (duty < 0) duty = 0;
   if (duty > 100) duty = 100;
+  // OE# 默认关闭；点亮时自动使能，避免 Web「全亮」静默失败
+  if (!flagPwm) {
+    if (duty == 0) {
+      char b[96];
+      snprintf(b, sizeof(b), "{\"ok\":true,\"id\":%d,\"duty\":0,\"pwmEnable\":false}", id);
+      return sendJson(req, 200, b);
+    }
+    if (!setPwmEnable(true))
+      return sendJson(req, 500, "{\"ok\":false,\"error\":\"auto enable PWM (OE#) failed\"}");
+  }
   uint16_t d = (uint16_t)((duty * 4095L) / 100);
   if (!actuatorLock())
     return sendJson(req, 500, "{\"ok\":false,\"error\":\"actuator lock failed\"}");
@@ -607,8 +619,8 @@ static esp_err_t handleLed(httpd_req_t *req) {
   actuatorUnlock();
   if (!ledOk)
     return sendJson(req, 500, "{\"ok\":false,\"error\":\"led write failed\"}");
-  char b[80];
-  snprintf(b, sizeof(b), "{\"ok\":true,\"id\":%d,\"duty\":%d}", id, duty);
+  char b[96];
+  snprintf(b, sizeof(b), "{\"ok\":true,\"id\":%d,\"duty\":%d,\"pwmEnable\":true}", id, duty);
   return sendJson(req, 200, b);
 }
 
