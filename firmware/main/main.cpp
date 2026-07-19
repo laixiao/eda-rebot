@@ -705,8 +705,8 @@ static esp_err_t handleCamera(httpd_req_t *req) {
     xSemaphoreGive(cameraMutex);
     if (!ok)
       return sendJson(req, 500,
-                      "{\"ok\":false,\"error\":\"camera init failed\",\"hint\":\"need working Octal PSRAM "
-                      "(N16R8); check module / IO35-37 NC / FPC\"}");
+                      "{\"ok\":false,\"error\":\"camera init failed\",\"hint\":\"SCCB no ACK on IO4/IO5 — "
+                      "check OV2640 FPC seating, 3V3 power, CAM_PWDN (XL IO0_4)\"}");
     return sendJson(req, 200, "{\"ok\":true,\"camera\":true}");
   }
   cameraEnd(xl);
@@ -854,6 +854,55 @@ static esp_err_t handleLcd(httpd_req_t *req) {
     snprintf(b, sizeof(b), "{\"ok\":true,\"color\":%u}", c);
     return sendJson(req, 200, b);
   }
+  if (cmd == "rect") {
+    int x = argInt(a, "x", 0);
+    int y = argInt(a, "y", 0);
+    int w = argInt(a, "w", 40);
+    int h = argInt(a, "h", 40);
+    uint16_t c = parseColor(argStr(a, "color", "FFFF"), 0xFFFF);
+    lcd.fillRect((int16_t)x, (int16_t)y, (int16_t)w, (int16_t)h, c);
+    lcdOk = lcd.present();
+    if (!lcdOk) return sendJson(req, 500, "{\"ok\":false,\"error\":\"lcd rect failed\"}");
+    return sendJson(req, 200, "{\"ok\":true}");
+  }
+  if (cmd == "text") {
+    std::string text = argStr(a, "text", "EDA Robot");
+    if (text.size() > 240) text.resize(240);
+    int x = argInt(a, "x", 8);
+    int y = argInt(a, "y", 8);
+    int scale = argInt(a, "scale", 2);
+    if (scale < 1) scale = 1;
+    if (scale > 6) scale = 6;
+    uint16_t fg = parseColor(argStr(a, "color", "FFFF"), 0xFFFF);
+    uint16_t bg = parseColor(argStr(a, "bg", "0000"), 0x0000);
+    if (argBool(a, "clear", false)) lcd.fillScreen(bg);
+    lcd.drawText((int16_t)x, (int16_t)y, text.c_str(), fg, bg, (uint8_t)scale);
+    lcd.backlight(true);
+    lcdOk = lcd.present();
+    if (!lcdOk) return sendJson(req, 500, "{\"ok\":false,\"error\":\"lcd text failed\"}");
+    char b[96];
+    snprintf(b, sizeof(b), "{\"ok\":true,\"x\":%d,\"y\":%d,\"scale\":%d,\"len\":%u}", x, y, scale,
+             (unsigned)text.size());
+    return sendJson(req, 200, b);
+  }
+  if (cmd == "demo") {
+    lcd.fillScreen(0x0000);
+    lcd.fillRect(0, 0, (int16_t)lcd.width(), 48, 0x001F);
+    lcd.drawText(8, 12, "EDA-RobotPro", 0xFFFF, 0x001F, 2);
+    char line[48];
+    snprintf(line, sizeof(line), "FW %s", FW_VERSION);
+    lcd.drawText(8, 64, line, 0x07FF, 0x0000, 2);
+    snprintf(line, sizeof(line), "IP %s", ipStr[0] ? ipStr : "no-ip");
+    lcd.drawText(8, 96, line, 0x07E0, 0x0000, 2);
+    snprintf(line, sizeof(line), "LCD %ux%u", lcd.width(), lcd.height());
+    lcd.drawText(8, 128, line, 0xFFE0, 0x0000, 2);
+    lcd.drawText(8, 176, "Web Debug -> LCD text", 0xFFFF, 0x0000, 2);
+    lcd.drawText(8, 208, "ASCII only (5x7)", 0xC618, 0x0000, 2);
+    lcd.backlight(true);
+    lcdOk = lcd.present();
+    if (!lcdOk) return sendJson(req, 500, "{\"ok\":false,\"error\":\"lcd demo failed\"}");
+    return sendJson(req, 200, "{\"ok\":true,\"demo\":true}");
+  }
   if (cmd == "rotate") {
     int r = argInt(a, "r", 0);
     lcd.setRotation((uint8_t)r);
@@ -864,7 +913,8 @@ static esp_err_t handleLcd(httpd_req_t *req) {
              lcd.height());
     return sendJson(req, 200, b);
   }
-  return sendJson(req, 400, "{\"ok\":false,\"error\":\"cmd=init|on|off|fill|rotate\"}");
+  return sendJson(req, 400,
+                  "{\"ok\":false,\"error\":\"cmd=init|on|off|fill|rect|text|demo|rotate\"}");
 }
 
 static esp_err_t handleOtaInfo(httpd_req_t *req) {
@@ -1195,7 +1245,9 @@ extern "C" void app_main(void) {
     touchOk = touch.begin(xl);
     if (lcdOk) {
       lcd.fillScreen(0x0000);
-      lcd.fillRect(0, 0, 320, 40, 0x001F);
+      lcd.fillRect(0, 0, 320, 48, 0x001F);
+      lcd.drawText(8, 12, "EDA-RobotPro", 0xFFFF, 0x001F, 2);
+      lcd.drawText(8, 64, "boot OK", 0x07E0, 0x0000, 2);
       lcdOk = lcd.present();
     }
   }

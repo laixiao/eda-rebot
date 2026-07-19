@@ -1,6 +1,7 @@
 #include "st7796.h"
 #include "board_config.h"
 #include "board_spi.h"
+#include "font5x7.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 
@@ -156,3 +157,71 @@ void ST7796::fillRect(int16_t x, int16_t y, int16_t w, int16_t h, uint16_t color
 }
 
 void ST7796::fillScreen(uint16_t color) { fillRect(0, 0, w_, h_, color); }
+
+void ST7796::drawChar(int16_t x, int16_t y, char c, uint16_t fg, uint16_t bg, uint8_t scale) {
+  if (!ok_ || scale == 0) return;
+  if (scale > 6) scale = 6;
+  if (c < 32 || c > 126) c = '?';
+  const uint8_t *glyph = FONT5X7 + (c - 32) * 5;
+  const int16_t cw = (int16_t)(6 * scale);
+  const int16_t ch = (int16_t)(8 * scale);
+  if (x >= w_ || y >= h_ || x + cw <= 0 || y + ch <= 0) return;
+  if (x < 0 || y < 0 || x + cw > w_ || y + ch > h_) {
+    // clipped path: slow but correct
+    for (uint8_t col = 0; col < 6; col++) {
+      const uint8_t bits = (col < 5) ? glyph[col] : 0;
+      for (uint8_t row = 0; row < 8; row++) {
+        const bool on = (row < 7) && (bits & (1u << row));
+        fillRect(x + (int16_t)col * scale, y + (int16_t)row * scale, scale, scale, on ? fg : bg);
+      }
+    }
+    return;
+  }
+
+  setWindow((uint16_t)x, (uint16_t)y, (uint16_t)(x + cw - 1), (uint16_t)(y + ch - 1));
+  dc(true);
+  cs(false);
+  for (uint8_t row = 0; row < 8; row++) {
+    for (uint8_t sy = 0; sy < scale; sy++) {
+      for (uint8_t col = 0; col < 6; col++) {
+        const uint8_t bits = (col < 5) ? glyph[col] : 0;
+        const bool on = (row < 7) && (bits & (1u << row));
+        const uint16_t color = on ? fg : bg;
+        for (uint8_t sx = 0; sx < scale; sx++) {
+          if (!board_spi_write16(color, SPI_HZ)) {
+            io_ok_ = false;
+            cs(true);
+            ok_ = false;
+            return;
+          }
+        }
+      }
+    }
+  }
+  cs(true);
+  if (!io_ok_) ok_ = false;
+}
+
+void ST7796::drawText(int16_t x, int16_t y, const char *text, uint16_t fg, uint16_t bg,
+                      uint8_t scale) {
+  if (!ok_ || !text || scale == 0) return;
+  if (scale > 6) scale = 6;
+  const int16_t x0 = x;
+  const int16_t stepX = (int16_t)(6 * scale);
+  const int16_t stepY = (int16_t)(8 * scale);
+  while (*text) {
+    if (*text == '\n') {
+      x = x0;
+      y += stepY;
+      ++text;
+      continue;
+    }
+    if (x + stepX > w_) {
+      x = x0;
+      y += stepY;
+    }
+    if (y >= h_) break;
+    drawChar(x, y, *text++, fg, bg, scale);
+    x += stepX;
+  }
+}

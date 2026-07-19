@@ -10,6 +10,8 @@ class ST7796 {
   void backlight(bool on);
   void fillScreen(uint16_t color);
   void fillRect(int16_t x, int16_t y, int16_t w, int16_t h, uint16_t color);
+  void drawChar(int16_t x, int16_t y, char c, uint16_t fg, uint16_t bg, uint8_t scale = 2);
+  void drawText(int16_t x, int16_t y, const char *text, uint16_t fg, uint16_t bg, uint8_t scale = 2);
   void setRotation(uint8_t r);
   uint16_t width() const { return w_; }
   uint16_t height() const { return h_; }

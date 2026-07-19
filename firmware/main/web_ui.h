@@ -149,12 +149,31 @@ img.cam{max-width:100%;width:100%;aspect-ratio:4/3;object-fit:contain;background
     <button onclick="api('POST','/api/lcd',{cmd:'init'})">初始化</button>
     <button onclick="api('POST','/api/lcd',{cmd:'on'})">背光开</button>
     <button onclick="api('POST','/api/lcd',{cmd:'off'})">背光关</button>
+    <button class="primary" onclick="api('POST','/api/lcd',{cmd:'demo'})">演示画面</button>
   </div>
   <div class="row">
     <button onclick="api('POST','/api/lcd',{cmd:'fill',color:'F800'})">红</button>
     <button onclick="api('POST','/api/lcd',{cmd:'fill',color:'07E0'})">绿</button>
     <button onclick="api('POST','/api/lcd',{cmd:'fill',color:'001F'})">蓝</button>
     <button onclick="api('POST','/api/lcd',{cmd:'fill',color:'0000'})">黑</button>
+  </div>
+  <label>屏上文字（ASCII，用 \n 换行）</label>
+  <div class="row">
+    <input id="lcdText" type="text" style="width:100%;max-width:280px" value="Hello EDA Robot"/>
+  </div>
+  <div class="row">
+    <label>x</label><input id="lcdX" type="number" value="8"/>
+    <label>y</label><input id="lcdY" type="number" value="80"/>
+    <label>scale</label><input id="lcdScale" type="number" min="1" max="6" value="2"/>
+  </div>
+  <div class="row">
+    <label>fg</label><input id="lcdFg" type="text" value="FFFF" style="width:64px"/>
+    <label>bg</label><input id="lcdBg" type="text" value="0000" style="width:64px"/>
+  </div>
+  <div class="row">
+    <button class="primary" onclick="lcdDrawText(false)">显示文字</button>
+    <button onclick="lcdDrawText(true)">清屏后显示</button>
+    <button onclick="lcdShowStatus()">显示状态信息</button>
   </div>
   <pre id="touch">-</pre>
   <div class="row"><button onclick="readTouch()">读触摸</button></div>
@@ -247,6 +266,29 @@ async function camOn(on){
 async function camSnap(){
   camShow(false);
   document.getElementById('camImg').src='/api/camera/capture?t='+Date.now();
+}
+async function lcdDrawText(clear){
+  await api('POST','/api/lcd',{
+    cmd:'text',
+    text:document.getElementById('lcdText').value,
+    x:+document.getElementById('lcdX').value,
+    y:+document.getElementById('lcdY').value,
+    scale:+document.getElementById('lcdScale').value||2,
+    color:document.getElementById('lcdFg').value||'FFFF',
+    bg:document.getElementById('lcdBg').value||'0000',
+    clear:!!clear
+  });
+}
+async function lcdShowStatus(){
+  const s=await api('GET','/api/status');
+  if(!s)return;
+  const t=
+    'EDA-RobotPro\n'+
+    'FW '+s.fw+'\n'+
+    'IP '+(s.ip||'no-ip')+'\n'+
+    'RSSI '+(s.rssi??'?')+'\n'+
+    'LCD '+(s.lcd?'OK':'OFF')+' CAM '+(s.camera?'ON':'OFF');
+  await api('POST','/api/lcd',{cmd:'text',text:t,x:8,y:8,scale:2,color:'FFFF',bg:'0000',clear:true});
 }
 async function readTouch(){const t=await api('GET','/api/touch');if(t)touch.textContent=`irq=${t.irq} valid=${t.valid}\nx=${t.x} y=${t.y} z=${t.z}`}
 async function refreshOta(){

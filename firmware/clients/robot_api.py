@@ -98,10 +98,38 @@ class RobotApi:
     def camera_capture(self) -> dict:
         return self._call("/api/camera/capture")
 
-    def lcd(self, cmd: str = "status", color: str | None = None) -> dict:
+    def lcd(
+        self,
+        cmd: str = "status",
+        color: str | None = None,
+        text: str | None = None,
+        x: int | None = None,
+        y: int | None = None,
+        scale: int | None = None,
+        bg: str | None = None,
+        clear: bool | None = None,
+        w: int | None = None,
+        h: int | None = None,
+    ) -> dict:
         params: dict[str, Any] = {"cmd": cmd}
         if color is not None:
             params["color"] = color
+        if text is not None:
+            params["text"] = text
+        if x is not None:
+            params["x"] = x
+        if y is not None:
+            params["y"] = y
+        if scale is not None:
+            params["scale"] = scale
+        if bg is not None:
+            params["bg"] = bg
+        if clear is not None:
+            params["clear"] = clear
+        if w is not None:
+            params["w"] = w
+        if h is not None:
+            params["h"] = h
         return self._call("/api/lcd", params, method="POST")
 
     def touch(self) -> dict:
