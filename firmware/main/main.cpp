@@ -28,6 +28,8 @@
 #include "st7796.h"
 #include "xpt2046.h"
 #include "web_ui.h"
+#include "web_radar_ui.h"
+#include "radar_at6010.h"
 #include "esp_psram.h"
 #include "esp_ota_ops.h"
 #include "esp_app_format.h"
@@ -35,7 +37,7 @@
 #include "esp_system.h"
 
 static const char *TAG = "eda_robot";
-static const char *FW_VERSION = "2.1.3";
+static const char *FW_VERSION = "2.2.0";
 static const int64_t MOTOR_FAILSAFE_US = 1500000;
 static volatile bool otaBusy = false;
 
@@ -100,6 +102,7 @@ static void IRAM_ATTR onEnc2(void *) {
 static void updateEnc34() {
   uint8_t p0 = 0;
   if (!xl.readPort(0, p0)) return;
+  radar_set_gpio_out((p0 >> XL_RADAR_OUT) & 1);
   portENTER_CRITICAL(&encMux);
   if (!enc34Initialized) {
     prevXlA = p0;
@@ -416,6 +419,58 @@ static esp_err_t handleRoot(httpd_req_t *req) {
   return httpd_resp_send(req, INDEX_HTML, HTTPD_RESP_USE_STRLEN);
 }
 
+static esp_err_t handleRadarPage(httpd_req_t *req) {
+  addCors(req);
+  httpd_resp_set_type(req, "text/html");
+  return httpd_resp_send(req, RADAR_HTML, HTTPD_RESP_USE_STRLEN);
+}
+
+static esp_err_t handleRadarGet(httpd_req_t *req) {
+  char buf[512];
+  radar_json_summary(buf, sizeof(buf));
+  return sendJson(req, 200, buf);
+}
+
+static esp_err_t handleRadarLive(httpd_req_t *req) {
+  char buf[3072];
+  radar_json_live(buf, sizeof(buf));
+  return sendJson(req, 200, buf);
+}
+
+static bool argsHasKey(const ReqArgs &a, const char *key) {
+  char v[8];
+  if (queryGet(a.q, key, v, sizeof(v))) return true;
+  const std::string k = std::string("\"") + key + "\"";
+  return a.body.find(k) != std::string::npos;
+}
+
+static esp_err_t handleRadarPost(httpd_req_t *req) {
+  auto a = loadArgs(req);
+  const std::string cmd = argStr(a, "cmd", "");
+  if (argsHasKey(a, "on")) {
+    const bool on = argBool(a, "on", true);
+    const uint32_t baud = (uint32_t)argInt(a, "baud", 921600);
+    if (on) {
+      if (!radar_start(baud))
+        return sendJson(req, 500, "{\"ok\":false,\"error\":\"radar uart start failed\"}");
+    } else {
+      radar_stop();
+    }
+  }
+  if (cmd == "version") radar_cmd_get_version();
+  else if (cmd == "poll") radar_cmd_get_det();
+  else if (cmd == "sense_on") radar_cmd_sense(true);
+  else if (cmd == "sense_off") radar_cmd_sense(false);
+  else if (cmd == "baud") {
+    const uint32_t baud = (uint32_t)argInt(a, "baud", 115200);
+    if (!radar_cmd_set_baud(baud))
+      return sendJson(req, 500, "{\"ok\":false,\"error\":\"set baud failed\"}");
+  }
+  char buf[512];
+  radar_json_summary(buf, sizeof(buf));
+  return sendJson(req, 200, buf);
+}
+
 static esp_err_t handleApiIndex(httpd_req_t *req) {
   std::string body = "{";
   body += "\"ok\":true,\"fw\":\"";
@@ -432,7 +487,8 @@ static esp_err_t handleApiIndex(httpd_req_t *req) {
   body += "{\"path\":\"/api/beep\"},{\"path\":\"/api/oled\"},";
   body += "{\"path\":\"/api/camera\"},{\"path\":\"/api/camera/capture\"},";
   body += "{\"path\":\"/stream\"},{\"path\":\"/api/lcd\"},{\"path\":\"/api/touch\"},";
-  body += "{\"path\":\"/api/ota\",\"methods\":[\"GET\",\"POST\"],\"note\":\"upload .bin\"}";
+  body += "{\"path\":\"/api/ota\",\"methods\":[\"GET\",\"POST\"],\"note\":\"upload .bin\"},";
+  body += "{\"path\":\"/api/radar\"},{\"path\":\"/api/radar/live\"},{\"path\":\"/radar\"}";
   body += "]}";
   return sendJson(req, 200, body);
 }
@@ -1086,7 +1142,7 @@ static bool registerUri(httpd_handle_t s, const char *path, httpd_method_t metho
 static void setupHttp() {
   httpRegistrationOk = true;
   httpd_config_t config = HTTPD_DEFAULT_CONFIG();
-  config.max_uri_handlers = 48;
+  config.max_uri_handlers = 56;
   config.stack_size = 10240;
   config.uri_match_fn = httpd_uri_match_wildcard;
   config.recv_wait_timeout = 120;
@@ -1099,10 +1155,16 @@ static void setupHttp() {
   }
 
   registerUri(server, "/", HTTP_GET, handleRoot);
+  registerUri(server, "/radar", HTTP_GET, handleRadarPage);
   registerUri(server, "/api", HTTP_GET, handleApiIndex);
   registerUri(server, "/api/", HTTP_GET, handleApiIndex);
   registerUri(server, "/api/status", HTTP_GET, handleStatus);
   registerUri(server, "/api/status", HTTP_OPTIONS, handleOptions);
+  registerUri(server, "/api/radar", HTTP_GET, handleRadarGet);
+  registerUri(server, "/api/radar", HTTP_POST, handleRadarPost);
+  registerUri(server, "/api/radar", HTTP_OPTIONS, handleOptions);
+  registerUri(server, "/api/radar/live", HTTP_GET, handleRadarLive);
+  registerUri(server, "/api/radar/live", HTTP_OPTIONS, handleOptions);
   registerUri(server, "/api/encoders", HTTP_GET, handleEncoders);
   registerUri(server, "/api/encoders", HTTP_OPTIONS, handleOptions);
   registerUri(server, "/api/mic", HTTP_GET, handleMic);
@@ -1192,19 +1254,32 @@ static void encoders_init() {
   gpio_config_t io = {};
   io.intr_type = GPIO_INTR_ANYEDGE;
   io.mode = GPIO_MODE_INPUT;
-  io.pin_bit_mask = (1ULL << PIN_ENC1_A) | (1ULL << PIN_ENC1_B) | (1ULL << PIN_ENC2_A) |
-                    (1ULL << PIN_ENC2_B);
+  // ENC1 临时给雷达 UART（IO9/10），仅初始化 ENC2
+  const bool radarOwnsEnc1 =
+      (PIN_RADAR_UART_RX == PIN_ENC1_A || PIN_RADAR_UART_TX == PIN_ENC1_A ||
+       PIN_RADAR_UART_RX == PIN_ENC1_B || PIN_RADAR_UART_TX == PIN_ENC1_B);
+  io.pin_bit_mask = (1ULL << PIN_ENC2_A) | (1ULL << PIN_ENC2_B);
+  if (!radarOwnsEnc1) io.pin_bit_mask |= (1ULL << PIN_ENC1_A) | (1ULL << PIN_ENC1_B);
   io.pull_up_en = GPIO_PULLUP_ENABLE;
   io.pull_down_en = GPIO_PULLDOWN_DISABLE;
   gpio_config(&io);
   gpio_install_isr_service(0);
-  gpio_isr_handler_add((gpio_num_t)PIN_ENC1_A, onEnc1, nullptr);
+  if (!radarOwnsEnc1) gpio_isr_handler_add((gpio_num_t)PIN_ENC1_A, onEnc1, nullptr);
   gpio_isr_handler_add((gpio_num_t)PIN_ENC2_A, onEnc2, nullptr);
 }
 
 static void background_task(void *) {
+  int64_t lastRadarPollUs = 0;
   while (true) {
     updateEnc34();
+    radar_poll();
+    const int64_t now = esp_timer_get_time();
+    if (radar_running() && now - lastRadarPollUs > 250000) {
+      lastRadarPollUs = now;
+      RadarSnapshot snap;
+      radar_get_snapshot(snap);
+      if (!snap.last_frame_us || now - snap.last_frame_us > 400000) radar_cmd_get_det();
+    }
     bool motorExpired = false;
     if (actuatorLock()) {
       motorExpired = flagStby && motorActiveMask != 0 &&
@@ -1244,6 +1319,7 @@ extern "C" void app_main(void) {
   }
   xSemaphoreGive(streamSlot);
 
+  radar_init();
   encoders_init();
   board_i2c_init();
 

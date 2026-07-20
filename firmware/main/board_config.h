@@ -20,6 +20,12 @@ static const int PIN_ENC1_B = 10;
 static const int PIN_ENC2_A = 21;
 static const int PIN_ENC2_B = 47;
 
+// MS60-1211S80M / AT6010 临时飞线：占用 ENC1 座作 UART；GPIO-OUT→ENC3_A(XL IO0_0)
+// ESP RX ← 雷达 TX；ESP TX → 雷达 RX；默认波特率 921600（HCI 协议）
+static const int PIN_RADAR_UART_RX = 9;  // ENC1_A
+static const int PIN_RADAR_UART_TX = 10; // ENC1_B
+static const uint8_t XL_RADAR_OUT = 0;   // ENC3_A = XL9555 IO0_0
+
 static const int PIN_I2S_MIC_SCK = 16;
 static const int PIN_I2S_MIC_WS = 17;
 static const int PIN_I2S_MIC_SD = 18;

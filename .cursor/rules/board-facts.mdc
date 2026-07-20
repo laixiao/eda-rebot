@@ -49,6 +49,17 @@ U1：IO12=SDA，IO13=SCL。
 | IO1_0..5 | T_CS，LCD_LED，LCD_DC，LCD_RST，LCD_CS，T_IRQ |
 | IO1_6 | SPK_SD |
 
+## 60G 雷达 MS60-1211S80M（临时飞线）
+
+| 雷达 | 本板 |
+|---|---|
+| VCC / GND | 舵机座电源（3.0~5.5V） |
+| GPIO-OUT | ENC3_A（XL9555 IO0_0） |
+| TX / RX | ENC1_A=IO9（ESP RX）/ ENC1_B=IO10（ESP TX） |
+
+- 协议：AT6010 HCI，默认 **921600 8N1**；CI 帧头 `0x58/0x59`，主动上报 `0x5A`
+- 固件：`/api/radar`、`/api/radar/live`、页面 `/radar`（FW ≥ 2.2.0）；占用 ENC1 时 ENC1 计数禁用
+
 ## 舵机 / 电机 / 探照灯（U16/U23）
 
 - 舵机 T3–T7：`SERVO_1`…`SERVO_5` → U16 **LED11–15**
@@ -62,7 +73,7 @@ U1：IO12=SDA，IO13=SCL。
 
 固件电机 API：`id 0..3` = MOT1..MOT4。
 
-## 固件约定（`firmware/`，ESP-IDF FW ≥ 2.1.0）
+## 固件约定（`firmware/`，ESP-IDF FW ≥ 2.2.0）
 
 - 构建：`cd firmware && idf.py set-target esp32s3 && idf.py build`（需 ESP-IDF ≥ 5.3）
 - 上电：OE# 高、STBY 低、CAM_PWDN 高、LCD/T_CS 高、功放关；LCD 启动时初始化并开背光

@@ -118,6 +118,15 @@ img.cam{max-width:100%;width:100%;aspect-ratio:4/3;object-fit:contain;background
   </div>
 </section>
 <section>
+  <h2>60G 雷达 MS60</h2>
+  <pre id="radarSum">加载中...</pre>
+  <div class="row">
+    <a href="/radar" style="color:#58a6ff;font-weight:600">打开详细调试 →</a>
+    <button onclick="radarOn(true)">开 UART</button>
+    <button onclick="radarOn(false)">关 UART</button>
+  </div>
+</section>
+<section>
   <h2>编码器</h2>
   <pre id="enc">-</pre>
   <div class="row"><button onclick="api('POST','/api/encoders/reset')">清零</button></div>
@@ -239,7 +248,16 @@ async function refresh(){
   const e=await api('GET','/api/encoders');
   if(e) document.getElementById('enc').textContent=
     `ENC1 ${e.enc1}  ENC2 ${e.enc2}\nENC3 ${e.enc3}  ENC4 ${e.enc4}\nrawIO0 0x${(e.xlPort0||0).toString(16)}`;
+  const rd=await api('GET','/api/radar');
+  if(rd) document.getElementById('radarSum').innerHTML=
+    `UART ${rd.uart?'<span class=ok>开</span>':'<span class=warn>关</span>'}  `+
+    `链路 ${rd.link?'<span class=ok>OK</span>':'<span class=warn>—</span>'}  `+
+    `OUT ${rd.gpioOut?'<span class=ok>有人</span>':'无人'}\n`+
+    `存在 ${rd.present?'<span class=ok>是</span>':'否'}  目标 ${rd.objNum||0}\n`+
+    `距离 ${rd.range_mm?(rd.range_mm/1000).toFixed(2)+'m':'—'}  角度 ${rd.angle_deg!=null?rd.angle_deg+'°':'—'}\n`+
+    `态势 ${rd.gesture||'—'}  ${rd.det||''}`;
 }
+async function radarOn(on){await api('POST','/api/radar',{on:!!on});refresh()}
 async function togglePwm(){const s=await api('GET','/api/status');await api('POST','/api/pwm',{on:!s.pwmEnable});refresh()}
 async function toggleStby(){const s=await api('GET','/api/status');await api('POST','/api/stby',{on:!s.motorStby});refresh()}
 async function toggleAmp(){const s=await api('GET','/api/status');await api('POST','/api/amp',{on:!s.ampEnable});refresh()}

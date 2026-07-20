@@ -9,7 +9,7 @@
 | 原理图图页 UUID | `1d774ca900623155` |
 | 主控 | `U1 ESP32-S3-WROOM-1-N16R8`（16MB Flash + 8MB Octal PSRAM） |
 | 最新实时网表基线 | 2026-07-18：约 102 位号、90 网络 |
-| 固件 | `firmware/` ESP-IDF FW **2.1.0**（`idf.py build`；支持 Web OTA） |
+| 固件 | `firmware/` ESP-IDF FW **2.2.0**（`idf.py build`；支持 Web OTA、60G 雷达调试） |
 | DRC | 原理图 DRC API 空；**PCB（V1.0.0）尚未布线**，内层若残留 `3.3V` 平面须改为 `3V3` |
 
 详细且持续更新的电路事实见 `.cursor/rules/board-facts.mdc`。审查时以 EasyEDA 实时网表为最终依据。
@@ -44,8 +44,9 @@
 |---|---|---|
 | I2S 麦克风 U2 | SCK=IO16、WS=IO17、SD=IO18 | `/api/mic` |
 | I2S 功放 U3 | LRC=IO38、BCLK=IO39、DIN=IO40、SD→XL IO1_6 | `/api/amp` `/api/beep` |
-| 编码器 1/2 | IO9/10、IO21/47 | `/api/encoders` |
-| 编码器 3/4 | XL9555 IO0_0~3 | `/api/encoders` |
+| 编码器 1/2 | IO9/10、IO21/47 | `/api/encoders`（雷达临时占用 ENC1 时 ENC1 禁用） |
+| 编码器 3/4 | XL9555 IO0_0~3 | `/api/encoders`；ENC3_A 可接雷达 GPIO-OUT |
+| 60G 雷达 MS60 | UART→ENC1 IO9/10；OUT→ENC3_A | `/api/radar` `/radar` |
 | 舵机 T3-T7 | U16 LED11-15 | `/api/servo`（先 `/api/pwm?on=1`） |
 | 电机 U19/U22 | U23 LED14/15…LED9/8；STBY=IO0_5 | `/api/motor`（先 pwm+stby） |
 | 探照灯 | U23 LED0/1/2 | `/api/led` |
@@ -83,4 +84,4 @@
 | `.cursor/rules/esp32-s3-constraints.mdc` | U1 PSRAM/引脚约束 |
 | `docs/SPI显示模块转接板.md` | ST7796 + XPT2046 转接板引脚 |
 | `docs/12GA-N20编码器.md` | 电机、编码器线色与参数 |
-| `firmware/` | ESP-IDF 局域网调试固件（FW 2.0.0）与 Python 客户端 |
+| `firmware/` | ESP-IDF 局域网调试固件（FW 2.2.0）与 Python 客户端 |
