@@ -46,6 +46,7 @@ pre{margin:0;white-space:pre-wrap;word-break:break-all;font:11px/1.4 ui-monospac
   <a class="back" href="/">← 调试首页</a>
   <h1>MS60-1211S80M · 60G 雷达</h1>
   <span id="link" class="badge off">UART</span>
+  <span id="acqBadge" class="badge off">采集</span>
   <span id="outBadge" class="badge off">OUT</span>
   <button onclick="cmd('version')">刷新模块信息</button>
 </header>
@@ -82,6 +83,7 @@ pre{margin:0;white-space:pre-wrap;word-break:break-all;font:11px/1.4 ui-monospac
   <pre>接线（临时）：雷达 TX→ENC1_A(IO9/ESP RX)，RX→ENC1_B(IO10/ESP TX)，OUT→ENC3_A，VCC/GND→舵机座电源。
 UART 固定使用已验证的 115200 8N1：雷达 TX→IO9，雷达 RX→IO10，正常极性；页面无需配置。
 固件每 200ms 自动发送一次只读 0x30 检测查询，关闭浏览器也会持续采集。
+主页面“雷达采集”总开关只暂停查询和数据解析，不切断雷达 VCC，UART 仍保持就绪。
 0x59/0x30 传输、校验及单目标距离/角度已通过实机验证；TYPE=5 多目标仍待完整验收。
 多目标 slot 仅为帧内序号，不是稳定目标 ID。</pre>
 </section>
@@ -134,7 +136,7 @@ function draw(s){
     ctx.strokeStyle='rgba(61,214,140,0.45)';ctx.lineWidth=2;ctx.stroke();
   }
   // targets
-  const objs=(s.multiValid&&s.objs&&s.objs.length)?s.objs: (s.primaryValid&&s.range_mm?[ {slot:0,range_mm:s.range_mm,angle_deg:s.angle_deg} ]:[]);
+  const objs=s.enabled?((s.multiValid&&s.objs&&s.objs.length)?s.objs: (s.primaryValid&&s.range_mm?[ {slot:0,range_mm:s.range_mm,angle_deg:s.angle_deg} ]:[])):[];
   objs.forEach((o,i)=>{
     const[x,y]=polar(o.range_mm,o.angle_deg,R);
     ctx.beginPath();ctx.arc(x,y,8,0,6.28);
@@ -147,7 +149,7 @@ function draw(s){
   ctx.beginPath();ctx.arc(cx,cy,5,0,6.28);ctx.fillStyle='#f0883e';ctx.fill();
 }
 function setChips(s){
-  const flags=[
+  const flags=s.enabled?[
     [s.gpioOut,'GPIO OUT'],
     [s.present,'活体/存在'],
     [s.detResult&1,'靠近'],
@@ -156,7 +158,7 @@ function setChips(s){
     [s.detResult&8,'微动'],
     [s.detResult&16,'呼吸'],
     [s.gesture&&s.gesture.indexOf('扫')>=0,s.gesture||'手势']
-  ];
+  ]:[[false,'采集已关闭']];
   document.getElementById('chips').innerHTML=flags.map(([on,lab])=>
     `<span class="chip ${on?'on':''} ${lab&&String(lab).indexOf('扫')>=0&&on?'hot':''}">${lab}</span>`).join('');
 }
@@ -164,25 +166,27 @@ function render(s){
   last=s;
   document.getElementById('link').textContent=s.uart?(s.link?'链路OK':'等待数据'):'UART关';
   document.getElementById('link').className='badge'+(s.uart?(s.link?'':' warn'):' off');
-  document.getElementById('outBadge').textContent=s.gpioOut?'OUT 有人':'OUT 无人';
+  document.getElementById('acqBadge').textContent=s.enabled?'采集中':'采集已关闭';
+  document.getElementById('acqBadge').className='badge'+(s.enabled?'':' off');
+  document.getElementById('outBadge').textContent=s.gpioOut?'OUT 高':'OUT 低';
   document.getElementById('outBadge').className='badge'+(s.gpioOut?'':' off');
-  document.getElementById('kPresent').innerHTML=s.present?'<span class=ok>有</span>':'<span class=bad>无</span>';
-  document.getElementById('kRange').textContent=s.range_mm?(s.range_mm/1000).toFixed(2)+' m':'—';
-  document.getElementById('kAngle').textContent=(s.angle_deg!=null?s.angle_deg+'°':'—');
-  document.getElementById('kGest').textContent=s.gesture||'—';
+  document.getElementById('kPresent').innerHTML=!s.enabled?'<span class=warn>停用</span>':(s.present?'<span class=ok>有</span>':'<span class=bad>无</span>');
+  document.getElementById('kRange').textContent=s.enabled&&s.range_mm?(s.range_mm/1000).toFixed(2)+' m':'—';
+  document.getElementById('kAngle').textContent=s.enabled&&s.angle_deg!=null?s.angle_deg+'°':'—';
+  document.getElementById('kGest').textContent=s.enabled?(s.gesture||'—'):'采集已关闭';
   document.getElementById('detLine').textContent=
     `det=${s.det||'-'}  result=0x${(s.detResult||0).toString(16)}  type=${s.reportType}\n`+
     `置信度 range=${s.rbConf} angle=${s.angleConf}  frame=${s.frameIdx}\n`+
     `呼吸=${s.br||0}  心率=${s.hr||0}  velo=${s.velo||0}`;
   const body=document.getElementById('objs');
-  if(s.multiValid&&s.objs&&s.objs.length){
+  if(s.enabled&&s.multiValid&&s.objs&&s.objs.length){
     body.innerHTML=s.objs.map(o=>`<tr><td>${o.slot}</td><td>${(o.range_mm/1000).toFixed(2)} m</td><td>${o.angle_deg}°</td><td>${o.velo||0}</td></tr>`).join('');
-  }else if(s.primaryValid&&s.range_mm){
+  }else if(s.enabled&&s.primaryValid&&s.range_mm){
     body.innerHTML=`<tr><td>主目标</td><td>${(s.range_mm/1000).toFixed(2)} m</td><td>${s.angle_deg}°</td><td>${s.velo||0}</td></tr>`;
   }else body.innerHTML='<tr><td colspan="4" style="color:var(--muted)">无目标</td></tr>';
   document.getElementById('moduleInfo').textContent=
     `链路 ${s.link?'正常':'等待回复'} · 115200 8N1 · RX IO9 / TX IO10\n模块版本 ${s.version||'未读取'}\n`+
-    `检测查询 自动 5 Hz · 多目标稳定ID=${!!s.idStable}`;
+    `检测查询 ${s.enabled?'自动 5 Hz':'已暂停'} · 多目标稳定ID=${!!s.idStable}`;
   document.getElementById('meta').textContent=
     `协议 ${s.protocol||'unknown'}\n`+
     `波特率 ${s.baud}  帧 ${s.rxFrames} (59=${s.frames59||0}, 5A=${s.frames5A||0})  字节 ${s.rxBytes}\n`+

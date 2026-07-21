@@ -21,7 +21,7 @@ idf.py -p /dev/ttyUSB0 flash monitor
 
 | 路径 | 说明 |
 |---|---|
-| `main/` | 应用与驱动，FW **2.2.7**（含 Web OTA、雷达自动查询、急停、深度睡眠关机） |
+| `main/` | 应用与驱动，FW **2.2.8**（含 Web OTA、雷达采集总开关、急停、深度睡眠关机） |
 | `clients/` | Python 调试客户端 |
 
 浏览器打开板子 IP，或 `GET /api`。
@@ -42,7 +42,7 @@ curl -X POST --data-binary @build/eda_robot.bin \
 
 ## MS60-1211S80M 雷达验证
 
-临时接线及资料位于 `../docs/MS60-1211S80M/`。实机已验证雷达使用 115200 8N1、正常极性，雷达 TX→IO9、RX→IO10。固件启动后固定使用该配置，并每 200ms 自动发送一次只读 `0x30` 检测查询；`/radar` 页面无需配置，关闭浏览器也会持续采集。
+临时接线及资料位于 `../docs/MS60-1211S80M/`。实机已验证雷达使用 115200 8N1、正常极性，雷达 TX→IO9、RX→IO10。固件启动后固定使用该配置，并每 200ms 自动发送一次只读 `0x30` 检测查询；`/radar` 页面无需配置，关闭浏览器也会持续采集。主页面的“雷达采集”总开关可通过 `POST /api/radar {"on":false|true}` 暂停/恢复查询与解析，但不会切断雷达 VCC，UART 和 ENC1 引脚占用保持不变。
 
 ```bash
 python clients/robot_api.py 192.168.3.215

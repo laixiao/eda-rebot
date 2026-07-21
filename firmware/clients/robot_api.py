@@ -142,6 +142,10 @@ class RobotApi:
     def radar(self, live: bool = False) -> dict:
         return self._call("/api/radar/live" if live else "/api/radar")
 
+    def radar_enable(self, on: bool = True) -> dict:
+        """Enable or pause radar acquisition; this does not switch radar power."""
+        return self._call("/api/radar", {"on": on}, method="POST")
+
     def ota_info(self) -> dict:
         return self._call("/api/ota")
 

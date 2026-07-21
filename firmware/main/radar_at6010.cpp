@@ -20,6 +20,7 @@ static const int64_t RADAR_QUERY_INTERVAL_US = 200000;
 
 static SemaphoreHandle_t sMtx = nullptr;
 static bool sUartOn = false;
+static bool sEnabled = true;
 static bool sGpioOut = false;
 static int64_t sLastQueryUs = 0;
 
@@ -345,6 +346,7 @@ bool radar_init() {
   strncpy(sState.gesture, "—", sizeof(sState.gesture) - 1);
   strncpy(sState.det_text, "—", sizeof(sState.det_text) - 1);
   strncpy(sState.version, "未读取", sizeof(sState.version) - 1);
+  sState.enabled = true;
   sState.baud = 115200;
   sState.uart_tx_pin = PIN_RADAR_UART_TX;
   sState.uart_rx_pin = PIN_RADAR_UART_RX;
@@ -395,6 +397,8 @@ bool radar_start() {
 
   xSemaphoreTake(sMtx, portMAX_DELAY);
   sUartOn = true;
+  sEnabled = true;
+  sState.enabled = true;
   sState.uart_on = true;
   sState.baud = RADAR_BAUD;
   sState.uart_tx_pin = PIN_RADAR_UART_TX;
@@ -442,15 +446,45 @@ void radar_stop() {
   gpio_config(&io);
 }
 
+void radar_set_enabled(bool enabled) {
+  if (!sMtx || !sUartOn) return;
+  xSemaphoreTake(sMtx, portMAX_DELAY);
+  if (sEnabled == enabled) {
+    xSemaphoreGive(sMtx);
+    return;
+  }
+  sEnabled = enabled;
+  sState.enabled = enabled;
+  clearPrimary();
+  clearMulti();
+  sState.present = false;
+  sState.link_ok = false;
+  sState.trail_len = 0;
+  memset(sState.trail, 0, sizeof(sState.trail));
+  sRxLen = 0;
+  sLastQueryUs = 0;
+  strncpy(sState.gesture, enabled ? "等待数据" : "采集已关闭", sizeof(sState.gesture) - 1);
+  xSemaphoreGive(sMtx);
+  uart_flush_input(RADAR_UART);
+}
+
+bool radar_enabled() {
+  if (!sMtx) return false;
+  xSemaphoreTake(sMtx, portMAX_DELAY);
+  const bool enabled = sEnabled;
+  xSemaphoreGive(sMtx);
+  return enabled;
+}
+
 void radar_set_gpio_out(bool level) {
   if (!sMtx) return;
   xSemaphoreTake(sMtx, portMAX_DELAY);
   sGpioOut = level;
   sState.gpio_out = level;
   sState.last_out_us = esp_timer_get_time();
-  if (!sState.primary_valid && !sState.multi_valid)
+  if (sEnabled && !sState.primary_valid && !sState.multi_valid)
     updateGesture(sState.det_result, sState.angle_deg, level);
-  sState.present = sState.primary_valid || sState.multi_valid || sGpioOut;
+  sState.present = sEnabled && (sState.primary_valid || sState.multi_valid || sGpioOut);
   xSemaphoreGive(sMtx);
 }
 
@@ -461,6 +495,11 @@ void radar_poll() {
   uint32_t totalRead = 0;
 
   xSemaphoreTake(sMtx, portMAX_DELAY);
+  if (!sEnabled) {
+    sState.present = false;
+    xSemaphoreGive(sMtx);
+    return;
+  }
   while (totalRead < 4096 && esp_timer_get_time() < deadline) {
     size_t buffered = 0;
     if (uart_get_buffered_data_len(RADAR_UART, &buffered) == ESP_OK)
@@ -497,7 +536,10 @@ void radar_poll() {
 
 bool radar_cmd_get_version() { return sendCi(0xFE, nullptr, 0); }
 
-bool radar_cmd_get_det() { return sendCi(0x30, nullptr, 0); }
+bool radar_cmd_get_det() {
+  if (!radar_enabled()) return false;
+  return sendCi(0x30, nullptr, 0);
+}
 
 void radar_get_snapshot(RadarSnapshot &out) {
   if (!sMtx) {
@@ -506,7 +548,8 @@ void radar_get_snapshot(RadarSnapshot &out) {
   }
   xSemaphoreTake(sMtx, portMAX_DELAY);
   out = sState;
-  out.present = sState.primary_valid || sState.multi_valid || sGpioOut;
+  out.enabled = sEnabled;
+  out.present = sEnabled && (sState.primary_valid || sState.multi_valid || sGpioOut);
   out.gpio_out = sGpioOut;
   out.uart_on = sUartOn;
   xSemaphoreGive(sMtx);
@@ -539,14 +582,15 @@ size_t radar_json_summary(char *buf, size_t buflen) {
   return (size_t)snprintf(
       buf, buflen,
       "{\"ok\":true,\"protocol\":\"at6010_ci_0x30_validated\",\"idStable\":false,"
-      "\"uart\":%s,\"link\":%s,\"baud\":%u,"
+      "\"enabled\":%s,\"uart\":%s,\"link\":%s,\"baud\":%u,"
       "\"tx\":%u,\"rx\":%u,\"txLevel\":%d,\"rxLevel\":%d,\"gpioOut\":%s,\"present\":%s,"
       "\"primaryValid\":%s,\"range_mm\":%u,\"angle_deg\":%d,\"det\":\"%s\",\"gesture\":\"%s\","
       "\"multiValid\":%s,\"declaredObjNum\":%u,\"objNum\":%u,\"truncated\":%s,"
       "\"version\":\"%s\",\"rxFrames\":%u,\"rxBytes\":%u,\"crcErr\":%u,"
       "\"malformedFrames\":%u,\"unknownFrames\":%u,\"discardedBytes\":%u,\"droppedBytes\":%u,"
       "\"frames59\":%u,\"frames5A\":%u,\"uartBufferedBytes\":%u,\"lastFrameHex\":\"%s\"}",
-      s.uart_on ? "true" : "false", s.link_ok ? "true" : "false", (unsigned)s.baud,
+      s.enabled ? "true" : "false", s.uart_on ? "true" : "false",
+      s.link_ok ? "true" : "false", (unsigned)s.baud,
       (unsigned)s.uart_tx_pin, (unsigned)s.uart_rx_pin, txLevel, rxLevel,
       s.gpio_out ? "true" : "false", s.present ? "true" : "false",
       s.primary_valid ? "true" : "false", (unsigned)s.range_mm, (int)s.angle_deg, d, g,
@@ -571,7 +615,7 @@ size_t radar_json_live(char *buf, size_t buflen) {
   int w = snprintf(
       buf, buflen,
       "{\"ok\":true,\"protocol\":\"at6010_ci_0x30_validated\",\"idStable\":false,"
-      "\"uart\":%s,\"link\":%s,\"baud\":%u,\"gpioOut\":%s,\"present\":%s,"
+      "\"enabled\":%s,\"uart\":%s,\"link\":%s,\"baud\":%u,\"gpioOut\":%s,\"present\":%s,"
       "\"primaryValid\":%s,\"isDetected\":%u,\"detResult\":%u,\"det\":\"%s\",\"gesture\":\"%s\","
       "\"range_mm\":%u,\"angle_deg\":%d,\"velo\":%d,\"rbConf\":%u,\"angleConf\":%u,"
       "\"frameIdx\":%u,\"reportType\":%u,\"br\":%u,\"hr\":%u,"
@@ -582,7 +626,8 @@ size_t radar_json_live(char *buf, size_t buflen) {
       "\"lastFrameUs\":%lld,\"lastPrimaryUs\":%lld,\"lastMultiUs\":%lld,"
       "\"pins\":{\"tx\":%u,\"rx\":%u,\"txLevel\":%d,\"rxLevel\":%d,\"out\":\"ENC3_A\"},"
       "\"objs\":[",
-      s.uart_on ? "true" : "false", s.link_ok ? "true" : "false", (unsigned)s.baud,
+      s.enabled ? "true" : "false", s.uart_on ? "true" : "false",
+      s.link_ok ? "true" : "false", (unsigned)s.baud,
       s.gpio_out ? "true" : "false", s.present ? "true" : "false",
       s.primary_valid ? "true" : "false", (unsigned)s.is_detected,
       (unsigned)s.det_result, d, g, (unsigned)s.range_mm, (int)s.angle_deg, (int)s.velo,

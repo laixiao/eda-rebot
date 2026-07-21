@@ -147,8 +147,7 @@ img.cam{max-width:100%;width:100%;aspect-ratio:4/3;object-fit:contain;background
   <pre id="radarSum">加载中...</pre>
   <div class="row">
     <a href="/radar" style="color:#58a6ff;font-weight:600">打开详细调试 →</a>
-    <button onclick="radarOn(true)">开 UART</button>
-    <button onclick="radarOn(false)">关 UART</button>
+    <button id="btnRadar" onclick="toggleRadar()">启用雷达采集</button>
   </div>
 </section>
 <section>
@@ -274,15 +273,21 @@ async function refresh(){
   if(e) document.getElementById('enc').textContent=
     `ENC1 ${e.enc1}  ENC2 ${e.enc2}\nENC3 ${e.enc3}  ENC4 ${e.enc4}\nrawIO0 0x${(e.xlPort0||0).toString(16)}`;
   const rd=await api('GET','/api/radar');
-  if(rd) document.getElementById('radarSum').innerHTML=
-    `UART ${rd.uart?'<span class=ok>开</span>':'<span class=warn>关</span>'}  `+
+  if(rd){
+    document.getElementById('btnRadar').textContent=rd.enabled?'雷达采集 已开 (点关闭)':'启用雷达采集';
+    document.getElementById('radarSum').innerHTML=
+    `采集 ${rd.enabled?'<span class=ok>开</span>':'<span class=warn>关</span>'}  `+
+    `UART ${rd.uart?'<span class=ok>就绪</span>':'<span class=warn>故障</span>'}  `+
     `链路 ${rd.link?'<span class=ok>OK</span>':'<span class=warn>—</span>'}  `+
-    `OUT ${rd.gpioOut?'<span class=ok>有人</span>':'无人'}\n`+
-    `存在 ${rd.present?'<span class=ok>是</span>':'否'}  目标 ${rd.objNum||0}\n`+
-    `距离 ${rd.range_mm?(rd.range_mm/1000).toFixed(2)+'m':'—'}  角度 ${rd.angle_deg!=null?rd.angle_deg+'°':'—'}\n`+
-    `态势 ${rd.gesture||'—'}  ${rd.det||''}`;
+    `OUT ${rd.gpioOut?'<span class=ok>高</span>':'低'}\n`+
+    (rd.enabled ?
+      `存在 ${rd.present?'<span class=ok>是</span>':'否'}  目标 ${rd.objNum||0}\n`+
+      `距离 ${rd.range_mm?(rd.range_mm/1000).toFixed(2)+'m':'—'}  角度 ${rd.angle_deg!=null?rd.angle_deg+'°':'—'}\n`+
+      `态势 ${rd.gesture||'—'}  ${rd.det||''}` :
+      '采集已关闭（雷达仍通电，UART 保持就绪）');
+  }
 }
-async function radarOn(on){await api('POST','/api/radar',{on:!!on});refresh()}
+async function toggleRadar(){const r=await api('GET','/api/radar');await api('POST','/api/radar',{on:!r.enabled});refresh()}
 async function shutdownDevice(){
   if(!confirm('将先急停并关闭外设，然后进入深度睡眠。\n这不会切断电池；需断电重上电或按 EN 复位恢复。确定关机？'))return;
   const btn=document.getElementById('btnShutdown');

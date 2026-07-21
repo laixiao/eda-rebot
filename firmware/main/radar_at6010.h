@@ -24,6 +24,7 @@ struct RadarTrailPoint {
 };
 
 struct RadarSnapshot {
+  bool enabled;
   bool uart_on;
   bool link_ok;
   uint32_t baud;
@@ -74,6 +75,8 @@ struct RadarSnapshot {
 bool radar_init();
 bool radar_start();
 void radar_stop();
+void radar_set_enabled(bool enabled);
+bool radar_enabled();
 void radar_set_gpio_out(bool level);
 void radar_poll();  // call from bg task
 bool radar_cmd_get_version();

@@ -38,7 +38,7 @@
 #include "esp_system.h"
 
 static const char *TAG = "eda_robot";
-static const char *FW_VERSION = "2.2.7";
+static const char *FW_VERSION = "2.2.8";
 static const int64_t MOTOR_FAILSAFE_US = 1500000;
 static volatile bool otaBusy = false;
 static volatile bool shutdownPending = false;
@@ -466,15 +466,31 @@ static esp_err_t handleRadarLive(httpd_req_t *req) {
   return sendJson(req, 200, buf);
 }
 
+static bool argsHasKey(const ReqArgs &a, const char *key) {
+  char v[8];
+  if (queryGet(a.q, key, v, sizeof(v))) return true;
+  const std::string k = std::string("\"") + key + "\"";
+  return a.body.find(k) != std::string::npos;
+}
+
 static esp_err_t handleRadarPost(httpd_req_t *req) {
   auto a = loadArgs(req);
+  if (argsHasKey(a, "on")) {
+    radar_set_enabled(argBool(a, "on", true));
+    char buf[1536];
+    radar_json_summary(buf, sizeof(buf));
+    return sendJson(req, 200, buf);
+  }
   const std::string cmd = argStr(a, "cmd", "");
   bool commandOk = false;
   if (cmd == "version") commandOk = radar_cmd_get_version();
   else if (cmd == "poll") commandOk = radar_cmd_get_det();
   else return sendJson(req, 400, "{\"ok\":false,\"error\":\"unsupported radar command\"}");
-  if (!commandOk)
+  if (!commandOk) {
+    if (cmd == "poll" && !radar_enabled())
+      return sendJson(req, 409, "{\"ok\":false,\"error\":\"radar acquisition is disabled\"}");
     return sendJson(req, 500, "{\"ok\":false,\"error\":\"radar UART write failed\"}");
+  }
   char buf[1536];
   radar_json_summary(buf, sizeof(buf));
   return sendJson(req, 200, buf);
