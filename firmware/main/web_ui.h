@@ -50,6 +50,7 @@ img.cam{max-width:100%;width:100%;aspect-ratio:4/3;object-fit:contain;background
   <h1>EDA-RobotPro Web Debug</h1>
   <span id="wifi" class="badge off">...</span>
   <button class="danger" onclick="api('POST','/api/estop')">紧急停止</button>
+  <button id="btnShutdown" class="danger" title="进入深度睡眠，需断电重上电或复位恢复" onclick="shutdownDevice()">关机</button>
   <button onclick="refresh()">刷新状态</button>
 </header>
 <main>
@@ -146,7 +147,7 @@ img.cam{max-width:100%;width:100%;aspect-ratio:4/3;object-fit:contain;background
   </div>
 </section>
 <section>
-  <h2>摄像头 OV2640</h2>
+  <h2>摄像头 OV5640</h2>
   <div class="row">
     <button class="primary" onclick="camOn(true)">开启</button>
     <button onclick="camOn(false)">关闭</button>
@@ -258,6 +259,19 @@ async function refresh(){
     `态势 ${rd.gesture||'—'}  ${rd.det||''}`;
 }
 async function radarOn(on){await api('POST','/api/radar',{on:!!on});refresh()}
+async function shutdownDevice(){
+  if(!confirm('将先急停并关闭外设，然后进入深度睡眠。\n这不会切断电池；需断电重上电或按 EN 复位恢复。确定关机？'))return;
+  const btn=document.getElementById('btnShutdown');
+  btn.disabled=true;
+  btn.textContent='关机中...';
+  const r=await api('POST','/api/shutdown');
+  if(!r||r.ok===false){btn.disabled=false;btn.textContent='关机';return}
+  clearInterval(refreshTimer);
+  clearInterval(otaTimer);
+  const wifi=document.getElementById('wifi');
+  wifi.textContent='已关机';
+  wifi.className='badge off';
+}
 async function togglePwm(){const s=await api('GET','/api/status');await api('POST','/api/pwm',{on:!s.pwmEnable});refresh()}
 async function toggleStby(){const s=await api('GET','/api/status');await api('POST','/api/stby',{on:!s.motorStby});refresh()}
 async function toggleAmp(){const s=await api('GET','/api/status');await api('POST','/api/amp',{on:!s.ampEnable});refresh()}
@@ -401,8 +415,8 @@ async function otaFlash(){
 }
 refresh();
 refreshOta();
-setInterval(refresh,2000);
-setInterval(refreshOta,5000);
+const refreshTimer=setInterval(refresh,2000);
+const otaTimer=setInterval(refreshOta,5000);
 </script>
 </body>
 </html>)HTML";

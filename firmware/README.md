@@ -21,10 +21,12 @@ idf.py -p /dev/ttyUSB0 flash monitor
 
 | 路径 | 说明 |
 |---|---|
-| `main/` | 应用与驱动，FW **2.1.3**（含 Web OTA） |
+| `main/` | 应用与驱动，FW **2.2.6**（含 Web OTA、雷达原始帧诊断、急停、深度睡眠关机） |
 | `clients/` | Python 调试客户端 |
 
 浏览器打开板子 IP，或 `GET /api`。
+
+调试页的“紧急停止”仅关闭执行器输出；“关机”会先急停、关闭外设和 Wi-Fi，再进入深度睡眠。板上没有 MCU 可控的主电源锁存，因此不会切断电池，需断电重上电或按 EN 复位恢复。
 
 ## Web 烧录 (OTA)
 
@@ -37,3 +39,14 @@ curl -X POST --data-binary @build/eda_robot.bin \
 ```
 
 `GET /api/ota` 查看当前/下一分区。成功后自动重启。
+
+## MS60-1211S80M 雷达验证
+
+临时接线及资料位于 `../docs/MS60-1211S80M/`。卖家设置工具配置为 115200 8N1，通用 AT6010 HCI 文档则写 921600，因此固件启动只在 115200 被动监听，并允许在 `/radar` 页面本地切换速率对照；不会自动修改雷达模块的永久波特率。
+
+```bash
+python clients/robot_api.py 192.168.3.215
+curl http://192.168.3.215/api/radar/live
+```
+
+`protocol=at6010_hci_unconfirmed` 表示当前 `0x59/0x5A` 解码仍需真实帧验证。TYPE=5 暂按“最多三个区域最近目标”显示，`slot` 只是帧内序号，不是稳定目标 ID。判断链路时同时检查 `rxBytes`、`frames59`、`frames5A`、`crcErr`、`malformedFrames`、`discardedBytes` 和 `droppedBytes`；仅有收到字节不等于协议已确认。

@@ -57,7 +57,8 @@ U1：IO12=SDA，IO13=SCL。
 | GPIO-OUT | ENC3_A（XL9555 IO0_0） |
 | TX / RX | ENC1_A=IO9（ESP RX）/ ENC1_B=IO10（ESP TX） |
 
-- 协议：AT6010 HCI，默认 **921600 8N1**；CI 帧头 `0x58/0x59`，主动上报 `0x5A`
+- 串口协议待厂商文档确认：现有 AIR Touch AT6010 HCI 文档定义 **921600 8N1**、CI 帧头
+  `0x58/0x59`、主动上报 `0x5A`，但 MS60 手册只引用觅感专用指令文档，不能视为同一协议
 - 固件：`/api/radar`、`/api/radar/live`、页面 `/radar`（FW ≥ 2.2.0）；占用 ENC1 时 ENC1 计数禁用
 
 ## 舵机 / 电机 / 探照灯（U16/U23）

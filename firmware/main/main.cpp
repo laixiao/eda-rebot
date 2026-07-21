@@ -34,12 +34,14 @@
 #include "esp_ota_ops.h"
 #include "esp_app_format.h"
 #include "esp_partition.h"
+#include "esp_sleep.h"
 #include "esp_system.h"
 
 static const char *TAG = "eda_robot";
-static const char *FW_VERSION = "2.2.0";
+static const char *FW_VERSION = "2.2.6";
 static const int64_t MOTOR_FAILSAFE_US = 1500000;
 static volatile bool otaBusy = false;
+static volatile bool shutdownPending = false;
 
 static XL9555 xl;
 static PCA9685 pcaServo;
@@ -406,6 +408,33 @@ static bool emergencyStop() {
   return stbyOk && oeOk && ampOk && motorOk && servoOk;
 }
 
+static void shutdownTask(void *) {
+  vTaskDelay(pdMS_TO_TICKS(500));
+  ESP_LOGW(TAG, "shutdown: disabling peripherals and entering deep sleep");
+
+  emergencyStop();
+  radar_stop();
+
+  if (cameraMutex && xSemaphoreTake(cameraMutex, pdMS_TO_TICKS(500)) == pdTRUE) {
+    cameraEnd(xl);
+    xSemaphoreGive(cameraMutex);
+  } else {
+    cameraPower(xl, false);
+  }
+
+  if (oled.present() && oledMutex && xSemaphoreTake(oledMutex, pdMS_TO_TICKS(200)) == pdTRUE) {
+    oled.clear();
+    oled.show();
+    xSemaphoreGive(oledMutex);
+  }
+  if (lcd.present()) lcd.backlight(false);
+
+  const esp_err_t wifiErr = esp_wifi_stop();
+  if (wifiErr != ESP_OK) ESP_LOGW(TAG, "shutdown: esp_wifi_stop failed: %s", esp_err_to_name(wifiErr));
+  vTaskDelay(pdMS_TO_TICKS(100));
+  esp_deep_sleep_start();
+}
+
 // ---- handlers ----
 static esp_err_t handleOptions(httpd_req_t *req) {
   addCors(req);
@@ -426,7 +455,7 @@ static esp_err_t handleRadarPage(httpd_req_t *req) {
 }
 
 static esp_err_t handleRadarGet(httpd_req_t *req) {
-  char buf[512];
+  char buf[1536];
   radar_json_summary(buf, sizeof(buf));
   return sendJson(req, 200, buf);
 }
@@ -449,24 +478,35 @@ static esp_err_t handleRadarPost(httpd_req_t *req) {
   const std::string cmd = argStr(a, "cmd", "");
   if (argsHasKey(a, "on")) {
     const bool on = argBool(a, "on", true);
-    const uint32_t baud = (uint32_t)argInt(a, "baud", 921600);
+    const uint32_t baud = (uint32_t)argInt(a, "baud", 115200);
+    const bool swapPins = argBool(a, "swap", false);
+    const bool invertUart = argBool(a, "invert", false);
     if (on) {
-      if (!radar_start(baud))
+      if (!radar_start(baud, swapPins, invertUart))
         return sendJson(req, 500, "{\"ok\":false,\"error\":\"radar uart start failed\"}");
     } else {
       radar_stop();
     }
   }
-  if (cmd == "version") radar_cmd_get_version();
-  else if (cmd == "poll") radar_cmd_get_det();
-  else if (cmd == "sense_on") radar_cmd_sense(true);
-  else if (cmd == "sense_off") radar_cmd_sense(false);
-  else if (cmd == "baud") {
-    const uint32_t baud = (uint32_t)argInt(a, "baud", 115200);
-    if (!radar_cmd_set_baud(baud))
-      return sendJson(req, 500, "{\"ok\":false,\"error\":\"set baud failed\"}");
+  bool commandOk = true;
+  if (cmd == "version") commandOk = radar_cmd_get_version();
+  else if (cmd == "poll") commandOk = radar_cmd_get_det();
+  else if (cmd == "probe") {
+    const uint32_t ms = (uint32_t)argInt(a, "ms", 100);
+    if (!radar_probe_rx_edges(ms))
+      return sendJson(req, 409, "{\"ok\":false,\"error\":\"radar uart is off\"}");
   }
-  char buf[512];
+  else if (cmd == "sense_on") commandOk = radar_cmd_sense(true);
+  else if (cmd == "sense_off") commandOk = radar_cmd_sense(false);
+  else if (cmd == "baud") {
+    return sendJson(req, 403,
+                    "{\"ok\":false,\"error\":\"permanent radar baud changes are disabled\"}");
+  } else if (!cmd.empty()) {
+    return sendJson(req, 400, "{\"ok\":false,\"error\":\"unknown radar command\"}");
+  }
+  if (!commandOk)
+    return sendJson(req, 500, "{\"ok\":false,\"error\":\"radar UART write failed\"}");
+  char buf[1536];
   radar_json_summary(buf, sizeof(buf));
   return sendJson(req, 200, buf);
 }
@@ -479,6 +519,7 @@ static esp_err_t handleApiIndex(httpd_req_t *req) {
   body += "\"board\":\"AI通用机器狗_v4 / V1.0.0\",";
   body += "\"endpoints\":[";
   body += "{\"path\":\"/api/status\"},{\"path\":\"/api/estop\"},";
+  body += "{\"path\":\"/api/shutdown\",\"note\":\"deep sleep; wake by power cycle or reset\"},";
   body += "{\"path\":\"/api/pwm\"},{\"path\":\"/api/stby\"},{\"path\":\"/api/amp\"},";
   body += "{\"path\":\"/api/servo\"},{\"path\":\"/api/servos\"},";
   body += "{\"path\":\"/api/motor\"},{\"path\":\"/api/motor/stop_all\"},";
@@ -528,6 +569,24 @@ static esp_err_t handleEstop(httpd_req_t *req) {
   if (!emergencyStop())
     return sendJson(req, 500, "{\"ok\":false,\"error\":\"estop hardware write failed\"}");
   return sendJson(req, 200, "{\"ok\":true,\"estop\":true}");
+}
+
+static esp_err_t handleShutdown(httpd_req_t *req) {
+  (void)loadArgs(req);
+  if (otaBusy) return sendJson(req, 409, "{\"ok\":false,\"error\":\"OTA in progress\"}");
+  if (shutdownPending)
+    return sendJson(req, 409, "{\"ok\":false,\"error\":\"shutdown already in progress\"}");
+  if (!emergencyStop())
+    return sendJson(req, 500, "{\"ok\":false,\"error\":\"shutdown safety stop failed\"}");
+
+  shutdownPending = true;
+  if (xTaskCreate(shutdownTask, "shutdown", 3072, nullptr, 8, nullptr) != pdPASS) {
+    shutdownPending = false;
+    return sendJson(req, 500, "{\"ok\":false,\"error\":\"shutdown task start failed\"}");
+  }
+  return sendJson(req, 200,
+                  "{\"ok\":true,\"shutdown\":true,\"mode\":\"deep_sleep\","
+                  "\"wake\":\"power_cycle_or_reset\"}");
 }
 
 static esp_err_t handlePwm(httpd_req_t *req) {
@@ -774,7 +833,7 @@ static esp_err_t handleCamera(httpd_req_t *req) {
     if (!ok)
       return sendJson(req, 500,
                       "{\"ok\":false,\"error\":\"camera init failed\",\"hint\":\"SCCB no ACK on IO4/IO5 — "
-                      "check OV2640 FPC seating, 3V3 power, CAM_PWDN (XL IO0_4)\"}");
+                      "check OV5640 FPC, CAM_1V2≈1.2V, CAM_PWDN (XL IO0_4)\"}");
     return sendJson(req, 200, "{\"ok\":true,\"camera\":true}");
   }
   cameraEnd(xl);
@@ -1181,13 +1240,13 @@ static void setupHttp() {
   registerUri(server, "/api/ota", HTTP_POST, handleOta);
   registerUri(server, "/api/ota", HTTP_OPTIONS, handleOptions);
 
-  const char *mutating[] = {"/api/estop",         "/api/pwm",  "/api/stby", "/api/amp",
-                            "/api/servo",         "/api/servos", "/api/motor", "/api/motor/stop_all",
-                            "/api/led",           "/api/encoders/reset", "/api/beep", "/api/oled",
-                            "/api/lcd"};
+  const char *mutating[] = {"/api/estop",         "/api/shutdown", "/api/pwm",  "/api/stby",
+                            "/api/amp",           "/api/servo",    "/api/servos", "/api/motor",
+                            "/api/motor/stop_all", "/api/led",      "/api/encoders/reset",
+                            "/api/beep",          "/api/oled",     "/api/lcd"};
   esp_err_t (*fns[])(httpd_req_t *) = {
-      handleEstop, handlePwm, handleStby, handleAmp, handleServo, handleServos, handleMotor,
-      handleMotorStopAll, handleLed, handleEncReset, handleBeep, handleOled, handleLcd};
+      handleEstop, handleShutdown, handlePwm, handleStby, handleAmp, handleServo, handleServos,
+      handleMotor, handleMotorStopAll, handleLed, handleEncReset, handleBeep, handleOled, handleLcd};
   static_assert(sizeof(mutating) / sizeof(mutating[0]) == sizeof(fns) / sizeof(fns[0]));
   for (size_t i = 0; i < sizeof(mutating) / sizeof(mutating[0]); i++) {
     registerUri(server, mutating[i], HTTP_POST, fns[i]);
@@ -1269,17 +1328,9 @@ static void encoders_init() {
 }
 
 static void background_task(void *) {
-  int64_t lastRadarPollUs = 0;
   while (true) {
     updateEnc34();
     radar_poll();
-    const int64_t now = esp_timer_get_time();
-    if (radar_running() && now - lastRadarPollUs > 250000) {
-      lastRadarPollUs = now;
-      RadarSnapshot snap;
-      radar_get_snapshot(snap);
-      if (!snap.last_frame_us || now - snap.last_frame_us > 400000) radar_cmd_get_det();
-    }
     bool motorExpired = false;
     if (actuatorLock()) {
       motorExpired = flagStby && motorActiveMask != 0 &&
@@ -1321,6 +1372,8 @@ extern "C" void app_main(void) {
 
   radar_init();
   encoders_init();
+  const bool radarBootUart = radar_start(115200, false, false);
+  ESP_LOGI(TAG, "radar early UART=%d", radarBootUart);
   board_i2c_init();
 
   bool okXl = xl.begin(ADDR_XL9555);

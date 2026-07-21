@@ -21,7 +21,7 @@ static const int PIN_ENC2_A = 21;
 static const int PIN_ENC2_B = 47;
 
 // MS60-1211S80M / AT6010 临时飞线：占用 ENC1 座作 UART；GPIO-OUT→ENC3_A(XL IO0_0)
-// ESP RX ← 雷达 TX；ESP TX → 雷达 RX；默认波特率 921600（HCI 协议）
+// ESP RX ← 雷达 TX；ESP TX → 雷达 RX；先按卖家工具配置 115200 被动监听
 static const int PIN_RADAR_UART_RX = 9;  // ENC1_A
 static const int PIN_RADAR_UART_TX = 10; // ENC1_B
 static const uint8_t XL_RADAR_OUT = 0;   // ENC3_A = XL9555 IO0_0
@@ -34,6 +34,7 @@ static const int PIN_I2S_AMP_LRC = 38;
 static const int PIN_I2S_AMP_BCLK = 39;
 static const int PIN_I2S_AMP_DIN = 40;
 
+// 摄像头：DC-5M21-5640-803-V1（OV5640）；FPC 脚10由板载 U8 提供 1.2V
 static const int PIN_CAM_XCLK = 15;
 static const int PIN_CAM_PCLK = 1;
 static const int PIN_CAM_VSYNC = 6;

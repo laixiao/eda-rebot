@@ -18,10 +18,12 @@ static const int RADAR_RX_BUF = 2048;
 
 static SemaphoreHandle_t sMtx = nullptr;
 static bool sUartOn = false;
-static uint32_t sBaud = 921600;
+static uint32_t sBaud = 115200;
+static bool sPinsSwapped = false;
+static bool sUartInverted = false;
 static bool sGpioOut = false;
 
-static uint8_t sRx[512];
+static uint8_t sRx[1024];
 static size_t sRxLen = 0;
 
 static RadarSnapshot sState = {};
@@ -34,6 +36,35 @@ static uint16_t ciChecksum(const uint8_t *data, size_t n) {
   uint32_t sum = 0;
   for (size_t i = 0; i < n; i++) sum += data[i];
   return (uint16_t)sum;
+}
+
+static void rememberFrame(const uint8_t *data, size_t n) {
+  static const char HEX[] = "0123456789ABCDEF";
+  const size_t maxBytes = (sizeof(sState.last_frame_hex) - 1) / 2;
+  if (n > maxBytes) n = maxBytes;
+  for (size_t i = 0; i < n; i++) {
+    sState.last_frame_hex[i * 2] = HEX[data[i] >> 4];
+    sState.last_frame_hex[i * 2 + 1] = HEX[data[i] & 0x0F];
+  }
+  sState.last_frame_hex[n * 2] = 0;
+}
+
+static void clearPrimary() {
+  sState.primary_valid = false;
+  sState.is_detected = 0;
+  sState.range_mm = 0;
+  sState.angle_deg = 0;
+  sState.velo = 0;
+  sState.rb_conf = 0;
+  sState.angle_conf = 0;
+}
+
+static void clearMulti() {
+  sState.declared_obj_num = 0;
+  sState.obj_num = 0;
+  sState.multi_valid = false;
+  sState.truncated = false;
+  for (int i = 0; i < RADAR_OBJ_MAX; i++) sState.objs[i] = {};
 }
 
 static bool sendCi(uint8_t cmd, const uint8_t *params, uint8_t plen) {
@@ -113,55 +144,67 @@ static void updateGesture(uint8_t det, int16_t angle_deg, bool detected) {
 }
 
 static void applyDetInfo(const uint8_t *p, size_t n, uint8_t type) {
-  if (n < 8) return;
+  if (n < 8) {
+    sState.malformed_frames++;
+    return;
+  }
   sState.report_type = type;
   sState.is_detected = p[0];
   sState.det_result = p[1];
   sState.range_mm = (uint16_t)(p[2] | (p[3] << 8));
   sState.angle_deg = (int16_t)(p[4] | (p[5] << 8));
   sState.velo = (int16_t)(p[6] | (p[7] << 8));
+  sState.rb_conf = 0;
+  sState.angle_conf = 0;
   if (n >= 20) {
     sState.rb_conf = p[14];
     sState.angle_conf = p[15];
     sState.frame_idx = (uint32_t)(p[16] | (p[17] << 8) | (p[18] << 16) | (p[19] << 24));
   }
+  sState.primary_valid = sState.is_detected != 0;
+  sState.last_primary_us = esp_timer_get_time();
   formatDetText(sState.det_result, sState.det_text, sizeof(sState.det_text));
-  updateGesture(sState.det_result, sState.angle_deg, sState.is_detected != 0);
-  if (sState.is_detected) {
-    pushTrail(sState.range_mm, sState.angle_deg);
-    for (int i = 0; i < RADAR_OBJ_MAX; i++) sState.objs[i] = {};
-    sState.objs[0] = {sState.range_mm, sState.angle_deg, sState.velo, sState.rb_conf,
-                      sState.angle_conf, true};
-    sState.obj_num = 1;
-  } else {
-    sState.obj_num = 0;
-    for (int i = 0; i < RADAR_OBJ_MAX; i++) sState.objs[i] = {};
-  }
+  updateGesture(sState.det_result, sState.angle_deg, sState.primary_valid);
+  if (sState.primary_valid) pushTrail(sState.range_mm, sState.angle_deg);
+  else clearPrimary();
   sState.link_ok = true;
   sState.last_frame_us = esp_timer_get_time();
   sState.rx_frames++;
 }
 
 static void applyRegion(const uint8_t *p, size_t n) {
-  if (n < 4) return;
-  uint32_t num = (uint32_t)(p[0] | (p[1] << 8) | (p[2] << 16) | (p[3] << 24));
-  if (num > RADAR_OBJ_MAX) num = RADAR_OBJ_MAX;
-  sState.report_type = 5;
-  sState.obj_num = (uint8_t)num;
-  for (int i = 0; i < RADAR_OBJ_MAX; i++) sState.objs[i] = {};
+  if (n < 4) {
+    sState.malformed_frames++;
+    return;
+  }
+  const uint32_t declared = (uint32_t)(p[0] | (p[1] << 8) | (p[2] << 16) | (p[3] << 24));
+  if (declared > (SIZE_MAX - 4) / 4 || n < 4 + (size_t)declared * 4) {
+    sState.malformed_frames++;
+    return;
+  }
+
+  RadarTarget parsed[RADAR_OBJ_MAX] = {};
+  const uint32_t reported = declared > RADAR_OBJ_MAX ? RADAR_OBJ_MAX : declared;
   size_t off = 4;
-  for (uint32_t i = 0; i < num && off + 4 <= n; i++) {
+  for (uint32_t i = 0; i < reported; i++) {
     const uint16_t r = (uint16_t)(p[off] | (p[off + 1] << 8));
     const int16_t a = (int16_t)(p[off + 2] | (p[off + 3] << 8));
-    sState.objs[i] = {r, a, 0, 0, 0, true};
+    parsed[i] = {r, a, 0, 0, 0, true};
     off += 4;
   }
-  if (num > 0) {
-    sState.is_detected = 1;
-    sState.range_mm = sState.objs[0].range_mm;
-    sState.angle_deg = sState.objs[0].angle_deg;
-    pushTrail(sState.range_mm, sState.angle_deg);
-    updateGesture(sState.det_result, sState.angle_deg, true);
+
+  sState.report_type = 5;
+  sState.declared_obj_num = declared;
+  sState.obj_num = (uint8_t)reported;
+  sState.multi_valid = reported > 0;
+  sState.truncated = declared > RADAR_OBJ_MAX;
+  sState.last_multi_us = esp_timer_get_time();
+  memcpy(sState.objs, parsed, sizeof(parsed));
+  if (reported > 0) {
+    pushTrail(parsed[0].range_mm, parsed[0].angle_deg);
+    updateGesture(sState.det_result, parsed[0].angle_deg, true);
+  } else if (!sState.primary_valid && !sGpioOut) {
+    strncpy(sState.gesture, "无人", sizeof(sState.gesture) - 1);
   }
   formatDetText(sState.det_result, sState.det_text, sizeof(sState.det_text));
   sState.link_ok = true;
@@ -170,7 +213,10 @@ static void applyRegion(const uint8_t *p, size_t n) {
 }
 
 static void applyBhr(const uint8_t *p, size_t n) {
-  if (n < 6) return;
+  if (n < 6) {
+    sState.malformed_frames++;
+    return;
+  }
   sState.report_type = 4;
   sState.det_result = p[0];
   sState.br_val = p[1];
@@ -198,6 +244,7 @@ static void handleAutoPayload(uint8_t type, const uint8_t *p, size_t n) {
       break;
     default:
       sState.report_type = type;
+      sState.unknown_frames++;
       sState.link_ok = true;
       sState.last_frame_us = esp_timer_get_time();
       sState.rx_frames++;
@@ -206,6 +253,7 @@ static void handleAutoPayload(uint8_t type, const uint8_t *p, size_t n) {
 }
 
 static void handleCiReply(uint8_t cmd, const uint8_t *p, uint8_t plen) {
+  sState.link_ok = true;
   if (cmd == 0xFE && plen >= 7) {
     snprintf(sState.version, sizeof(sState.version), "SDK %u.%u.%u / cust %u.%u / hw %u.%u",
              p[0], p[1], p[2], p[3], p[4], p[5], p[6]);
@@ -224,6 +272,7 @@ static void consumeRx() {
     size_t i = 0;
     while (i < sRxLen && sRx[i] != 0x5A && sRx[i] != 0x59) i++;
     if (i > 0) {
+      sState.discarded_bytes += (uint32_t)i;
       memmove(sRx, sRx + i, sRxLen - i);
       sRxLen -= i;
     }
@@ -234,6 +283,8 @@ static void consumeRx() {
       const uint8_t len = sRx[1];
       const size_t total = (size_t)2 + len + 1;  // HEAD LEN PAYLOAD CHECK
       if (len == 0 || total > sizeof(sRx)) {
+        sState.malformed_frames++;
+        sState.discarded_bytes++;
         memmove(sRx, sRx + 1, sRxLen - 1);
         sRxLen--;
         continue;
@@ -243,11 +294,15 @@ static void consumeRx() {
       for (size_t k = 0; k < 2 + len; k++) sum += sRx[k];
       if (sum != sRx[2 + len]) {
         sState.crc_err++;
+        sState.discarded_bytes++;
         memmove(sRx, sRx + 1, sRxLen - 1);
         sRxLen--;
         continue;
       }
       const uint8_t type = sRx[2];
+      rememberFrame(sRx, total);
+      sState.frames_5a++;
+      if (type < 8) sState.type_frames[type]++;
       handleAutoPayload(type, sRx + 3, len > 0 ? (size_t)len - 1 : 0);
       memmove(sRx, sRx + total, sRxLen - total);
       sRxLen -= total;
@@ -260,6 +315,8 @@ static void consumeRx() {
     const uint8_t plen = sRx[2];
     const size_t total = (size_t)5 + plen;
     if (total > sizeof(sRx)) {
+      sState.malformed_frames++;
+      sState.discarded_bytes++;
       memmove(sRx, sRx + 1, sRxLen - 1);
       sRxLen--;
       continue;
@@ -269,10 +326,13 @@ static void consumeRx() {
     const uint16_t got = ciChecksum(sRx, 3 + plen);
     if (expect != got) {
       sState.crc_err++;
+      sState.discarded_bytes++;
       memmove(sRx, sRx + 1, sRxLen - 1);
       sRxLen--;
       continue;
     }
+    rememberFrame(sRx, total);
+    sState.frames_59++;
     handleCiReply(cmd, sRx + 3, plen);
     memmove(sRx, sRx + total, sRxLen - total);
     sRxLen -= total;
@@ -285,18 +345,27 @@ bool radar_init() {
   strncpy(sState.gesture, "—", sizeof(sState.gesture) - 1);
   strncpy(sState.det_text, "—", sizeof(sState.det_text) - 1);
   strncpy(sState.version, "未读取", sizeof(sState.version) - 1);
-  sState.baud = 921600;
+  sState.baud = 115200;
+  sState.uart_tx_pin = PIN_RADAR_UART_TX;
+  sState.uart_rx_pin = PIN_RADAR_UART_RX;
   sState.report_type = 0xFF;
   return sMtx != nullptr;
 }
 
-bool radar_start(uint32_t baud) {
-  if (!sMtx) radar_init();
-  if (sUartOn) {
-    if (baud && baud != sBaud) return radar_cmd_set_baud(baud);
-    return true;
+bool radar_start(uint32_t baud, bool swap_pins, bool invert_uart) {
+  if (!sMtx && !radar_init()) {
+    ESP_LOGE(TAG, "mutex init failed");
+    return false;
   }
-  if (baud == 0) baud = 921600;
+  if (baud == 0) baud = 115200;
+  if (sUartOn) {
+    if (baud == sBaud && swap_pins == sPinsSwapped && invert_uart == sUartInverted) return true;
+    // API 诊断切换只改变 ESP32 本地 UART，不向雷达写永久波特率。
+    radar_stop();
+  }
+
+  const int txPin = swap_pins ? PIN_RADAR_UART_RX : PIN_RADAR_UART_TX;
+  const int rxPin = swap_pins ? PIN_RADAR_UART_TX : PIN_RADAR_UART_RX;
 
   uart_config_t cfg = {};
   cfg.baud_rate = (int)baud;
@@ -308,18 +377,27 @@ bool radar_start(uint32_t baud) {
 
   esp_err_t err = uart_driver_install(RADAR_UART, RADAR_RX_BUF, 512, 0, nullptr, 0);
   if (err != ESP_OK && err != ESP_ERR_INVALID_STATE) {
-    ESP_LOGE(TAG, "uart_driver_install: %s", esp_strerror(err));
+    ESP_LOGE(TAG, "uart_driver_install: %s", esp_err_to_name(err));
     return false;
   }
   err = uart_param_config(RADAR_UART, &cfg);
   if (err != ESP_OK) {
-    ESP_LOGE(TAG, "uart_param_config: %s", esp_strerror(err));
+    ESP_LOGE(TAG, "uart_param_config: %s", esp_err_to_name(err));
+    uart_driver_delete(RADAR_UART);
     return false;
   }
-  err = uart_set_pin(RADAR_UART, PIN_RADAR_UART_TX, PIN_RADAR_UART_RX, UART_PIN_NO_CHANGE,
-                     UART_PIN_NO_CHANGE);
+  const uint32_t inverseMask =
+      invert_uart ? (UART_SIGNAL_RXD_INV | UART_SIGNAL_TXD_INV) : UART_SIGNAL_INV_DISABLE;
+  err = uart_set_line_inverse(RADAR_UART, inverseMask);
   if (err != ESP_OK) {
-    ESP_LOGE(TAG, "uart_set_pin: %s", esp_strerror(err));
+    ESP_LOGE(TAG, "uart_set_line_inverse: %s", esp_err_to_name(err));
+    uart_driver_delete(RADAR_UART);
+    return false;
+  }
+  err = uart_set_pin(RADAR_UART, txPin, rxPin, UART_PIN_NO_CHANGE, UART_PIN_NO_CHANGE);
+  if (err != ESP_OK) {
+    ESP_LOGE(TAG, "uart_set_pin: %s", esp_err_to_name(err));
+    uart_driver_delete(RADAR_UART);
     return false;
   }
   uart_flush(RADAR_UART);
@@ -327,16 +405,40 @@ bool radar_start(uint32_t baud) {
   xSemaphoreTake(sMtx, portMAX_DELAY);
   sUartOn = true;
   sBaud = baud;
+  sPinsSwapped = swap_pins;
+  sUartInverted = invert_uart;
   sState.uart_on = true;
   sState.baud = baud;
+  sState.pins_swapped = swap_pins;
+  sState.uart_inverted = invert_uart;
+  sState.uart_tx_pin = (uint8_t)txPin;
+  sState.uart_rx_pin = (uint8_t)rxPin;
+  sState.link_ok = false;
+  sState.rx_frames = 0;
+  sState.rx_bytes = 0;
+  sState.crc_err = 0;
+  sState.malformed_frames = 0;
+  sState.unknown_frames = 0;
+  sState.discarded_bytes = 0;
+  sState.dropped_bytes = 0;
+  sState.frames_59 = 0;
+  sState.frames_5a = 0;
+  memset(sState.type_frames, 0, sizeof(sState.type_frames));
+  sState.uart_buffered_bytes = 0;
+  sState.last_frame_hex[0] = 0;
+  sState.probe_samples = 0;
+  sState.probe_low_samples = 0;
+  sState.probe_edges = 0;
+  sState.last_frame_us = 0;
+  sState.report_type = 0xFF;
+  strncpy(sState.version, "未读取", sizeof(sState.version) - 1);
   sRxLen = 0;
   xSemaphoreGive(sMtx);
 
-  ESP_LOGI(TAG, "UART1 on TX=%d RX=%d baud=%u", PIN_RADAR_UART_TX, PIN_RADAR_UART_RX,
-           (unsigned)baud);
-  vTaskDelay(pdMS_TO_TICKS(50));
-  radar_cmd_get_version();
-  radar_cmd_sense(true);
+  ESP_LOGI(TAG, "UART1 on TX=%d RX=%d baud=%u swap=%d invert=%d", txPin, rxPin,
+           (unsigned)baud, (int)swap_pins, (int)invert_uart);
+  // MS60 vendor UART protocol is not yet available. Listen passively at boot;
+  // AIR Touch HCI commands remain available only through explicit diagnostics.
   return true;
 }
 
@@ -366,38 +468,85 @@ void radar_set_gpio_out(bool level) {
   sGpioOut = level;
   sState.gpio_out = level;
   sState.last_out_us = esp_timer_get_time();
-  if (!sState.is_detected) updateGesture(sState.det_result, sState.angle_deg, level);
-  sState.present = sState.is_detected || sGpioOut;
+  if (!sState.primary_valid && !sState.multi_valid)
+    updateGesture(sState.det_result, sState.angle_deg, level);
+  sState.present = sState.primary_valid || sState.multi_valid || sGpioOut;
   xSemaphoreGive(sMtx);
 }
 
 void radar_poll() {
   if (!sUartOn || !sMtx) return;
-  uint8_t tmp[256];
-  const int n = uart_read_bytes(RADAR_UART, tmp, sizeof(tmp), 0);
-  if (n <= 0) {
-    xSemaphoreTake(sMtx, portMAX_DELAY);
-    sState.present = sState.is_detected || sGpioOut;
-    // stale clear after 1.5s without frames
-    if (sState.last_frame_us && esp_timer_get_time() - sState.last_frame_us > 1500000) {
-      if (!sGpioOut) {
-        sState.is_detected = 0;
-        if (!(sSwipeUntil > esp_timer_get_time()))
-          strncpy(sState.gesture, "无人", sizeof(sState.gesture) - 1);
-      }
-    }
-    xSemaphoreGive(sMtx);
-    return;
-  }
+  uint8_t tmp[512];
+  const int64_t deadline = esp_timer_get_time() + 3000;
+  uint32_t totalRead = 0;
+
   xSemaphoreTake(sMtx, portMAX_DELAY);
-  sState.rx_bytes += (uint32_t)n;
-  for (int i = 0; i < n; i++) {
-    if (sRxLen < sizeof(sRx)) sRx[sRxLen++] = tmp[i];
+  while (totalRead < 4096 && esp_timer_get_time() < deadline) {
+    size_t buffered = 0;
+    if (uart_get_buffered_data_len(RADAR_UART, &buffered) == ESP_OK)
+      sState.uart_buffered_bytes = (uint32_t)buffered;
+    if (buffered == 0) break;
+    const size_t want = buffered < sizeof(tmp) ? buffered : sizeof(tmp);
+    const int n = uart_read_bytes(RADAR_UART, tmp, want, 0);
+    if (n <= 0) break;
+    totalRead += (uint32_t)n;
+    sState.rx_bytes += (uint32_t)n;
+    for (int i = 0; i < n; i++) {
+      if (sRxLen == sizeof(sRx)) {
+        memmove(sRx, sRx + 1, sizeof(sRx) - 1);
+        sRxLen--;
+        sState.dropped_bytes++;
+      }
+      sRx[sRxLen++] = tmp[i];
+    }
+    consumeRx();
   }
-  consumeRx();
-  sState.present = sState.is_detected || sGpioOut;
+
+  const int64_t now = esp_timer_get_time();
+  if (sState.last_primary_us && now - sState.last_primary_us > 1500000) clearPrimary();
+  if (sState.last_multi_us && now - sState.last_multi_us > 1500000) clearMulti();
+  if (!sState.primary_valid && !sState.multi_valid && !sGpioOut &&
+      !(sSwipeUntil > now))
+    strncpy(sState.gesture, "无人", sizeof(sState.gesture) - 1);
+  sState.present = sState.primary_valid || sState.multi_valid || sGpioOut;
   xSemaphoreGive(sMtx);
 }
+
+bool radar_probe_rx_edges(uint32_t duration_ms) {
+  if (!sUartOn || !sMtx) return false;
+  if (duration_ms < 10) duration_ms = 10;
+  if (duration_ms > 250) duration_ms = 250;
+
+  RadarSnapshot snap;
+  radar_get_snapshot(snap);
+  const gpio_num_t rxPin = (gpio_num_t)snap.uart_rx_pin;
+  uart_flush_input(RADAR_UART);
+  if (!radar_cmd_get_version()) return false;
+
+  uint32_t samples = 0;
+  uint32_t lowSamples = 0;
+  uint32_t edges = 0;
+  int prev = gpio_get_level(rxPin);
+  const int64_t deadline = esp_timer_get_time() + (int64_t)duration_ms * 1000;
+  while (esp_timer_get_time() < deadline) {
+    const int level = gpio_get_level(rxPin);
+    samples++;
+    if (!level) lowSamples++;
+    if (level != prev) {
+      edges++;
+      prev = level;
+    }
+  }
+
+  xSemaphoreTake(sMtx, portMAX_DELAY);
+  sState.probe_samples = samples;
+  sState.probe_low_samples = lowSamples;
+  sState.probe_edges = edges;
+  xSemaphoreGive(sMtx);
+  return true;
+}
+
+bool radar_cmd_set_active_time(uint8_t seconds) { return sendCi(0x90, &seconds, 1); }
 
 bool radar_cmd_sense(bool on) {
   uint8_t p = on ? 1 : 0;
@@ -428,9 +577,11 @@ void radar_get_snapshot(RadarSnapshot &out) {
   }
   xSemaphoreTake(sMtx, portMAX_DELAY);
   out = sState;
-  out.present = sState.is_detected || sGpioOut;
+  out.present = sState.primary_valid || sState.multi_valid || sGpioOut;
   out.gpio_out = sGpioOut;
   out.uart_on = sUartOn;
+  out.pins_swapped = sPinsSwapped;
+  out.uart_inverted = sUartInverted;
   xSemaphoreGive(sMtx);
 }
 
@@ -456,14 +607,30 @@ size_t radar_json_summary(char *buf, size_t buflen) {
   jsonEscape(s.gesture, g, sizeof(g));
   jsonEscape(s.det_text, d, sizeof(d));
   jsonEscape(s.version, v, sizeof(v));
+  const int txLevel = gpio_get_level((gpio_num_t)s.uart_tx_pin);
+  const int rxLevel = gpio_get_level((gpio_num_t)s.uart_rx_pin);
   return (size_t)snprintf(
       buf, buflen,
-      "{\"ok\":true,\"uart\":%s,\"link\":%s,\"baud\":%u,\"gpioOut\":%s,\"present\":%s,"
-      "\"range_mm\":%u,\"angle_deg\":%d,\"det\":\"%s\",\"gesture\":\"%s\",\"objNum\":%u,"
-      "\"version\":\"%s\",\"rxFrames\":%u}",
+      "{\"ok\":true,\"protocol\":\"at6010_hci_unconfirmed\",\"idStable\":false,"
+      "\"uart\":%s,\"link\":%s,\"baud\":%u,\"swap\":%s,\"invert\":%s,"
+      "\"tx\":%u,\"rx\":%u,\"txLevel\":%d,\"rxLevel\":%d,\"gpioOut\":%s,\"present\":%s,"
+      "\"primaryValid\":%s,\"range_mm\":%u,\"angle_deg\":%d,\"det\":\"%s\",\"gesture\":\"%s\","
+      "\"multiValid\":%s,\"declaredObjNum\":%u,\"objNum\":%u,\"truncated\":%s,"
+      "\"version\":\"%s\",\"rxFrames\":%u,\"rxBytes\":%u,\"crcErr\":%u,"
+      "\"malformedFrames\":%u,\"unknownFrames\":%u,\"discardedBytes\":%u,\"droppedBytes\":%u,"
+      "\"frames59\":%u,\"frames5A\":%u,\"uartBufferedBytes\":%u,\"lastFrameHex\":\"%s\","
+      "\"probeSamples\":%u,\"probeLowSamples\":%u,\"probeEdges\":%u}",
       s.uart_on ? "true" : "false", s.link_ok ? "true" : "false", (unsigned)s.baud,
-      s.gpio_out ? "true" : "false", s.present ? "true" : "false", (unsigned)s.range_mm,
-      (int)s.angle_deg, d, g, (unsigned)s.obj_num, v, (unsigned)s.rx_frames);
+      s.pins_swapped ? "true" : "false", s.uart_inverted ? "true" : "false",
+      (unsigned)s.uart_tx_pin, (unsigned)s.uart_rx_pin, txLevel, rxLevel,
+      s.gpio_out ? "true" : "false", s.present ? "true" : "false",
+      s.primary_valid ? "true" : "false", (unsigned)s.range_mm, (int)s.angle_deg, d, g,
+      s.multi_valid ? "true" : "false", (unsigned)s.declared_obj_num, (unsigned)s.obj_num,
+      s.truncated ? "true" : "false", v, (unsigned)s.rx_frames, (unsigned)s.rx_bytes,
+      (unsigned)s.crc_err, (unsigned)s.malformed_frames, (unsigned)s.unknown_frames,
+      (unsigned)s.discarded_bytes, (unsigned)s.dropped_bytes, (unsigned)s.frames_59,
+      (unsigned)s.frames_5a, (unsigned)s.uart_buffered_bytes, s.last_frame_hex,
+      (unsigned)s.probe_samples, (unsigned)s.probe_low_samples, (unsigned)s.probe_edges);
 }
 
 size_t radar_json_live(char *buf, size_t buflen) {
@@ -473,29 +640,47 @@ size_t radar_json_live(char *buf, size_t buflen) {
   jsonEscape(s.gesture, g, sizeof(g));
   jsonEscape(s.det_text, d, sizeof(d));
   jsonEscape(s.version, v, sizeof(v));
+  const int txLevel = gpio_get_level((gpio_num_t)s.uart_tx_pin);
+  const int rxLevel = gpio_get_level((gpio_num_t)s.uart_rx_pin);
 
   size_t n = 0;
   int w = snprintf(
       buf, buflen,
-      "{\"ok\":true,\"uart\":%s,\"link\":%s,\"baud\":%u,\"gpioOut\":%s,\"present\":%s,"
-      "\"isDetected\":%u,\"detResult\":%u,\"det\":\"%s\",\"gesture\":\"%s\","
+      "{\"ok\":true,\"protocol\":\"at6010_hci_unconfirmed\",\"idStable\":false,"
+      "\"uart\":%s,\"link\":%s,\"baud\":%u,\"gpioOut\":%s,\"present\":%s,"
+      "\"primaryValid\":%s,\"isDetected\":%u,\"detResult\":%u,\"det\":\"%s\",\"gesture\":\"%s\","
       "\"range_mm\":%u,\"angle_deg\":%d,\"velo\":%d,\"rbConf\":%u,\"angleConf\":%u,"
-      "\"frameIdx\":%u,\"reportType\":%u,\"br\":%u,\"hr\":%u,\"objNum\":%u,"
+      "\"frameIdx\":%u,\"reportType\":%u,\"br\":%u,\"hr\":%u,"
+      "\"multiValid\":%s,\"declaredObjNum\":%u,\"objNum\":%u,\"truncated\":%s,"
       "\"version\":\"%s\",\"rxFrames\":%u,\"rxBytes\":%u,\"crcErr\":%u,"
-      "\"lastFrameUs\":%lld,\"pins\":{\"tx\":%d,\"rx\":%d,\"out\":\"ENC3_A\"},"
+      "\"malformedFrames\":%u,\"unknownFrames\":%u,\"discardedBytes\":%u,\"droppedBytes\":%u,"
+      "\"frames59\":%u,\"frames5A\":%u,\"uartBufferedBytes\":%u,\"lastFrameHex\":\"%s\","
+      "\"lastFrameUs\":%lld,\"lastPrimaryUs\":%lld,\"lastMultiUs\":%lld,"
+      "\"probeSamples\":%u,\"probeLowSamples\":%u,\"probeEdges\":%u,"
+      "\"pins\":{\"tx\":%u,\"rx\":%u,\"swap\":%s,\"invert\":%s,"
+      "\"txLevel\":%d,\"rxLevel\":%d,\"out\":\"ENC3_A\"},"
       "\"objs\":[",
       s.uart_on ? "true" : "false", s.link_ok ? "true" : "false", (unsigned)s.baud,
-      s.gpio_out ? "true" : "false", s.present ? "true" : "false", (unsigned)s.is_detected,
+      s.gpio_out ? "true" : "false", s.present ? "true" : "false",
+      s.primary_valid ? "true" : "false", (unsigned)s.is_detected,
       (unsigned)s.det_result, d, g, (unsigned)s.range_mm, (int)s.angle_deg, (int)s.velo,
       (unsigned)s.rb_conf, (unsigned)s.angle_conf, (unsigned)s.frame_idx,
-      (unsigned)s.report_type, (unsigned)s.br_val, (unsigned)s.hr_val, (unsigned)s.obj_num, v,
-      (unsigned)s.rx_frames, (unsigned)s.rx_bytes, (unsigned)s.crc_err,
-      (long long)s.last_frame_us, PIN_RADAR_UART_TX, PIN_RADAR_UART_RX);
+      (unsigned)s.report_type, (unsigned)s.br_val, (unsigned)s.hr_val,
+      s.multi_valid ? "true" : "false", (unsigned)s.declared_obj_num, (unsigned)s.obj_num,
+      s.truncated ? "true" : "false", v, (unsigned)s.rx_frames, (unsigned)s.rx_bytes,
+      (unsigned)s.crc_err, (unsigned)s.malformed_frames, (unsigned)s.unknown_frames,
+      (unsigned)s.discarded_bytes, (unsigned)s.dropped_bytes, (unsigned)s.frames_59,
+      (unsigned)s.frames_5a, (unsigned)s.uart_buffered_bytes, s.last_frame_hex,
+      (long long)s.last_frame_us, (long long)s.last_primary_us, (long long)s.last_multi_us,
+      (unsigned)s.probe_samples, (unsigned)s.probe_low_samples, (unsigned)s.probe_edges,
+      (unsigned)s.uart_tx_pin, (unsigned)s.uart_rx_pin,
+      s.pins_swapped ? "true" : "false", s.uart_inverted ? "true" : "false", txLevel,
+      rxLevel);
   if (w < 0) return 0;
   n = (size_t)w;
   for (uint8_t i = 0; i < s.obj_num && i < RADAR_OBJ_MAX && n + 80 < buflen; i++) {
     if (!s.objs[i].valid) continue;
-    w = snprintf(buf + n, buflen - n, "%s{\"id\":%u,\"range_mm\":%u,\"angle_deg\":%d,\"velo\":%d}",
+    w = snprintf(buf + n, buflen - n, "%s{\"slot\":%u,\"range_mm\":%u,\"angle_deg\":%d,\"velo\":%d}",
                  (i ? "," : ""), (unsigned)i, (unsigned)s.objs[i].range_mm, (int)s.objs[i].angle_deg,
                  (int)s.objs[i].velo);
     if (w < 0) break;

@@ -52,6 +52,10 @@ class RobotApi:
     def estop(self) -> dict:
         return self._call("/api/estop", method="POST")
 
+    def shutdown(self) -> dict:
+        """Enter deep sleep after stopping actuators; wake by power cycle or reset."""
+        return self._call("/api/shutdown", method="POST")
+
     def pwm(self, on: bool = True) -> dict:
         return self._call("/api/pwm", {"on": on}, method="POST")
 
@@ -135,6 +139,18 @@ class RobotApi:
     def touch(self) -> dict:
         return self._call("/api/touch")
 
+    def radar(self, live: bool = False) -> dict:
+        return self._call("/api/radar/live" if live else "/api/radar")
+
+    def radar_uart(
+        self, on: bool = True, baud: int = 115200, swap: bool = False, invert: bool = False
+    ) -> dict:
+        return self._call(
+            "/api/radar",
+            {"on": on, "baud": baud, "swap": swap, "invert": invert},
+            method="POST",
+        )
+
     def ota_info(self) -> dict:
         return self._call("/api/ota")
 
@@ -168,15 +184,11 @@ class RobotApi:
 
 
 def main() -> int:
-    host = sys.argv[1] if len(sys.argv) > 1 else "192.168.4.1"
+    host = sys.argv[1] if len(sys.argv) > 1 else "192.168.3.215"
     bot = RobotApi(host)
     print("status:", bot.status())
-    print("catalog:", bot.api())
-    print("oled:", bot.oled("LAN OK"))
-    print("encoders:", bot.encoders())
-    print("camera:", bot.camera())
-    print("lcd:", bot.lcd("status"))
-    print("touch:", bot.touch())
+    print("ota:", bot.ota_info())
+    print("radar:", bot.radar(live=True))
     return 0
 
 

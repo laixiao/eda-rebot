@@ -25,6 +25,8 @@ h2{margin:0 0 10px;font-size:12px;color:var(--muted);font-weight:600;letter-spac
 button,select{font:inherit;background:#21262d;color:var(--fg);border:1px solid var(--line);border-radius:8px;padding:8px 12px;cursor:pointer}
 button.primary{background:#238636;border-color:#2ea043}
 button:hover{border-color:#8b949e}
+.toggle{display:inline-flex;align-items:center;gap:5px;color:var(--muted);font-size:12px;white-space:nowrap}
+.toggle input{accent-color:var(--acc)}
 .kpi{display:grid;grid-template-columns:repeat(auto-fit,minmax(110px,1fr));gap:8px}
 .kpi div{background:#0d1117;border:1px solid var(--line);border-radius:8px;padding:10px}
 .kpi b{display:block;font-size:20px;font-variant-numeric:tabular-nums;margin-top:2px}
@@ -50,12 +52,15 @@ pre{margin:0;white-space:pre-wrap;word-break:break-all;font:11px/1.4 ui-monospac
   <span id="outBadge" class="badge off">OUT</span>
   <button id="btnUart" class="primary" onclick="toggleUart()">开启 UART</button>
   <select id="baud">
-    <option value="921600" selected>921600</option>
-    <option value="115200">115200</option>
+    <option value="115200" selected>115200（卖家工具配置）</option>
+    <option value="921600">921600（通用 HCI 文档）</option>
     <option value="9600">9600</option>
   </select>
+  <label class="toggle" title="交换 ESP32 的 UART TX/RX 引脚，仅用于接线诊断"><input id="swap" type="checkbox">交换 TX/RX</label>
+  <label class="toggle" title="反相 ESP32 UART 收发信号，仅用于电平诊断"><input id="invert" type="checkbox">信号反相</label>
   <button onclick="cmd('version')">读版本</button>
   <button onclick="cmd('poll')">主动查询</button>
+  <button onclick="cmd('probe')">探测 RX</button>
 </header>
 <main>
 <section>
@@ -76,7 +81,7 @@ pre{margin:0;white-space:pre-wrap;word-break:break-all;font:11px/1.4 ui-monospac
   <pre id="detLine">—</pre>
   <h2 style="margin-top:14px">多目标</h2>
   <table>
-    <thead><tr><th>#</th><th>距离</th><th>角度</th><th>速度</th></tr></thead>
+    <thead><tr><th>帧内 slot</th><th>距离</th><th>角度</th><th>速度</th></tr></thead>
     <tbody id="objs"><tr><td colspan="4" style="color:var(--muted)">等待数据…</td></tr></tbody>
   </table>
   <h2 style="margin-top:14px">模块信息</h2>
@@ -85,9 +90,10 @@ pre{margin:0;white-space:pre-wrap;word-break:break-all;font:11px/1.4 ui-monospac
 <section class="full">
   <h2>说明</h2>
   <pre>接线（临时）：雷达 TX→ENC1_A(IO9/ESP RX)，RX→ENC1_B(IO10/ESP TX)，OUT→ENC3_A，VCC/GND→舵机座电源。
-协议：AT6010 HCI · 默认 921600 8N1 · 主动上报头 0x5A · CI 查询头 0x58/0x59。
+UART 启动先按卖家工具配置的 115200 8N1 被动监听，也可本地切换 921600 对照；不会写雷达永久波特率。
+MS60 厂商多目标协议仍需用有效原始帧确认；当前 AT6010 HCI 解码标记为 unconfirmed。
 手势：由靠近/远离/运动/微动及角度突变（扫左/扫右）推断；固件算法因 SDK 而异。
-多目标：分区上报 TYPE=5（最多 3 个）；单目标完整信息 TYPE=0/3 或命令 0x30。</pre>
+多目标：TYPE=5 暂按最多 3 个区域最近目标显示；slot 仅为帧内序号，不是稳定目标 ID。</pre>
 </section>
 </main>
 <script>
@@ -138,14 +144,14 @@ function draw(s){
     ctx.strokeStyle='rgba(61,214,140,0.45)';ctx.lineWidth=2;ctx.stroke();
   }
   // targets
-  const objs=(s.objs&&s.objs.length)?s.objs: (s.present&&s.range_mm?[ {id:0,range_mm:s.range_mm,angle_deg:s.angle_deg} ]:[]);
+  const objs=(s.multiValid&&s.objs&&s.objs.length)?s.objs: (s.primaryValid&&s.range_mm?[ {slot:0,range_mm:s.range_mm,angle_deg:s.angle_deg} ]:[]);
   objs.forEach((o,i)=>{
     const[x,y]=polar(o.range_mm,o.angle_deg,R);
     ctx.beginPath();ctx.arc(x,y,8,0,6.28);
     ctx.fillStyle=i===0?'#3dd68c':'#58a6ff';ctx.fill();
     ctx.strokeStyle='#fff';ctx.lineWidth=1.5;ctx.stroke();
     ctx.fillStyle='#e6edf3';ctx.font='12px sans-serif';
-    ctx.fillText('#'+i+' '+(o.range_mm/1000).toFixed(2)+'m '+o.angle_deg+'°',x+10,y-6);
+    ctx.fillText('slot '+(o.slot??i)+' '+(o.range_mm/1000).toFixed(2)+'m '+o.angle_deg+'°',x+10,y-6);
   });
   // radar origin
   ctx.beginPath();ctx.arc(cx,cy,5,0,6.28);ctx.fillStyle='#f0883e';ctx.fill();
@@ -166,6 +172,11 @@ function setChips(s){
 }
 function render(s){
   last=s;
+  if(s.uart){
+    document.getElementById('baud').value=String(s.baud);
+    document.getElementById('swap').checked=!!(s.pins&&s.pins.swap);
+    document.getElementById('invert').checked=!!(s.pins&&s.pins.invert);
+  }
   document.getElementById('link').textContent=s.uart?(s.link?'链路OK':'等待数据'):'UART关';
   document.getElementById('link').className='badge'+(s.uart?(s.link?'':' warn'):' off');
   document.getElementById('outBadge').textContent=s.gpioOut?'OUT 有人':'OUT 无人';
@@ -180,14 +191,19 @@ function render(s){
     `置信度 range=${s.rbConf} angle=${s.angleConf}  frame=${s.frameIdx}\n`+
     `呼吸=${s.br||0}  心率=${s.hr||0}  velo=${s.velo||0}`;
   const body=document.getElementById('objs');
-  if(s.objs&&s.objs.length){
-    body.innerHTML=s.objs.map(o=>`<tr><td>${o.id}</td><td>${(o.range_mm/1000).toFixed(2)} m</td><td>${o.angle_deg}°</td><td>${o.velo||0}</td></tr>`).join('');
-  }else if(s.present&&s.range_mm){
-    body.innerHTML=`<tr><td>0</td><td>${(s.range_mm/1000).toFixed(2)} m</td><td>${s.angle_deg}°</td><td>${s.velo||0}</td></tr>`;
+  if(s.multiValid&&s.objs&&s.objs.length){
+    body.innerHTML=s.objs.map(o=>`<tr><td>${o.slot}</td><td>${(o.range_mm/1000).toFixed(2)} m</td><td>${o.angle_deg}°</td><td>${o.velo||0}</td></tr>`).join('');
+  }else if(s.primaryValid&&s.range_mm){
+    body.innerHTML=`<tr><td>主目标</td><td>${(s.range_mm/1000).toFixed(2)} m</td><td>${s.angle_deg}°</td><td>${s.velo||0}</td></tr>`;
   }else body.innerHTML='<tr><td colspan="4" style="color:var(--muted)">无目标</td></tr>';
   document.getElementById('meta').textContent=
-    `版本 ${s.version||'-'}\n波特率 ${s.baud}  帧 ${s.rxFrames}  字节 ${s.rxBytes}  CRC错 ${s.crcErr}\n`+
-    `引脚 TX=IO${s.pins&&s.pins.tx} RX=IO${s.pins&&s.pins.rx} OUT=${s.pins&&s.pins.out}`;
+    `协议 ${s.protocol||'unknown'}（原生稳定ID=${!!s.idStable}）\n版本 ${s.version||'-'}\n`+
+    `波特率 ${s.baud}  帧 ${s.rxFrames} (59=${s.frames59||0}, 5A=${s.frames5A||0})  字节 ${s.rxBytes}\n`+
+    `CRC错 ${s.crcErr}  格式错 ${s.malformedFrames||0}  未知帧 ${s.unknownFrames||0}  丢弃 ${s.discardedBytes||0}  溢出 ${s.droppedBytes||0}\n`+
+    `多目标 声明=${s.declaredObjNum||0} 输出=${s.objNum||0} 截断=${!!s.truncated}  UART积压=${s.uartBufferedBytes||0}\n`+
+    `最后帧 ${s.lastFrameHex||'-'}\n`+
+    `引脚 TX=IO${s.pins&&s.pins.tx}(${s.pins&&s.pins.txLevel}) RX=IO${s.pins&&s.pins.rx}(${s.pins&&s.pins.rxLevel}) OUT=${s.pins&&s.pins.out}\n`+
+    `交换=${!!(s.pins&&s.pins.swap)}  反相=${!!(s.pins&&s.pins.invert)}  RX探测: 采样=${s.probeSamples||0} 低电平=${s.probeLowSamples||0} 边沿=${s.probeEdges||0}`;
   setChips(s);
   draw(s);
 }
@@ -196,16 +212,19 @@ async function api(method,url,body){
   if(body!==undefined){opt.headers['Content-Type']='application/json';opt.body=JSON.stringify(body)}
   const r=await fetch(url,opt); const t=await r.text();
   let j; try{j=JSON.parse(t)}catch(e){j={ok:false,raw:t}}
+  if(!r.ok||j.ok===false) throw new Error(j.error||('HTTP '+r.status));
   return j;
 }
 async function refresh(){
-  const s=await api('GET','/api/radar/live');
-  if(s&&s.ok!==false) render(s);
+  try{render(await api('GET','/api/radar/live'))}
+  catch(e){document.getElementById('link').textContent='API错误';document.getElementById('meta').textContent=String(e)}
 }
 async function toggleUart(){
   const on=!last||!last.uart;
   const baud=+document.getElementById('baud').value;
-  await api('POST','/api/radar',{on,baud});
+  const swap=document.getElementById('swap').checked;
+  const invert=document.getElementById('invert').checked;
+  await api('POST','/api/radar',{on,baud,swap,invert});
   refresh();
 }
 async function cmd(c){
