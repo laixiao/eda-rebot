@@ -22,11 +22,8 @@ main{padding:12px;display:grid;gap:12px;grid-template-columns:minmax(280px,1.2fr
 section{background:var(--card);border:1px solid var(--line);border-radius:10px;padding:12px}
 h2{margin:0 0 10px;font-size:12px;color:var(--muted);font-weight:600;letter-spacing:.04em;text-transform:uppercase}
 .row{display:flex;gap:8px;flex-wrap:wrap;align-items:center;margin:6px 0}
-button,select{font:inherit;background:#21262d;color:var(--fg);border:1px solid var(--line);border-radius:8px;padding:8px 12px;cursor:pointer}
-button.primary{background:#238636;border-color:#2ea043}
+button{font:inherit;background:#21262d;color:var(--fg);border:1px solid var(--line);border-radius:8px;padding:8px 12px;cursor:pointer}
 button:hover{border-color:#8b949e}
-.toggle{display:inline-flex;align-items:center;gap:5px;color:var(--muted);font-size:12px;white-space:nowrap}
-.toggle input{accent-color:var(--acc)}
 .kpi{display:grid;grid-template-columns:repeat(auto-fit,minmax(110px,1fr));gap:8px}
 .kpi div{background:#0d1117;border:1px solid var(--line);border-radius:8px;padding:10px}
 .kpi b{display:block;font-size:20px;font-variant-numeric:tabular-nums;margin-top:2px}
@@ -50,17 +47,7 @@ pre{margin:0;white-space:pre-wrap;word-break:break-all;font:11px/1.4 ui-monospac
   <h1>MS60-1211S80M · 60G 雷达</h1>
   <span id="link" class="badge off">UART</span>
   <span id="outBadge" class="badge off">OUT</span>
-  <button id="btnUart" class="primary" onclick="toggleUart()">开启 UART</button>
-  <select id="baud">
-    <option value="115200" selected>115200（卖家工具配置）</option>
-    <option value="921600">921600（通用 HCI 文档）</option>
-    <option value="9600">9600</option>
-  </select>
-  <label class="toggle" title="交换 ESP32 的 UART TX/RX 引脚，仅用于接线诊断"><input id="swap" type="checkbox">交换 TX/RX</label>
-  <label class="toggle" title="反相 ESP32 UART 收发信号，仅用于电平诊断"><input id="invert" type="checkbox">信号反相</label>
-  <button onclick="cmd('version')">读版本</button>
-  <button onclick="cmd('poll')">主动查询</button>
-  <button onclick="cmd('probe')">探测 RX</button>
+  <button onclick="cmd('version')">刷新模块信息</button>
 </header>
 <main>
 <section>
@@ -85,15 +72,18 @@ pre{margin:0;white-space:pre-wrap;word-break:break-all;font:11px/1.4 ui-monospac
     <tbody id="objs"><tr><td colspan="4" style="color:var(--muted)">等待数据…</td></tr></tbody>
   </table>
   <h2 style="margin-top:14px">模块信息</h2>
-  <pre id="meta">—</pre>
+  <pre id="moduleInfo">—</pre>
+  <details style="margin-top:14px"><summary style="cursor:pointer;color:var(--muted)">诊断信息</summary>
+    <pre id="meta" style="margin-top:8px">—</pre>
+  </details>
 </section>
 <section class="full">
   <h2>说明</h2>
   <pre>接线（临时）：雷达 TX→ENC1_A(IO9/ESP RX)，RX→ENC1_B(IO10/ESP TX)，OUT→ENC3_A，VCC/GND→舵机座电源。
-UART 启动先按卖家工具配置的 115200 8N1 被动监听，也可本地切换 921600 对照；不会写雷达永久波特率。
-MS60 厂商多目标协议仍需用有效原始帧确认；当前 AT6010 HCI 解码标记为 unconfirmed。
-手势：由靠近/远离/运动/微动及角度突变（扫左/扫右）推断；固件算法因 SDK 而异。
-多目标：TYPE=5 暂按最多 3 个区域最近目标显示；slot 仅为帧内序号，不是稳定目标 ID。</pre>
+UART 固定使用已验证的 115200 8N1：雷达 TX→IO9，雷达 RX→IO10，正常极性；页面无需配置。
+固件每 200ms 自动发送一次只读 0x30 检测查询，关闭浏览器也会持续采集。
+0x59/0x30 传输、校验及单目标距离/角度已通过实机验证；TYPE=5 多目标仍待完整验收。
+多目标 slot 仅为帧内序号，不是稳定目标 ID。</pre>
 </section>
 </main>
 <script>
@@ -172,16 +162,10 @@ function setChips(s){
 }
 function render(s){
   last=s;
-  if(s.uart){
-    document.getElementById('baud').value=String(s.baud);
-    document.getElementById('swap').checked=!!(s.pins&&s.pins.swap);
-    document.getElementById('invert').checked=!!(s.pins&&s.pins.invert);
-  }
   document.getElementById('link').textContent=s.uart?(s.link?'链路OK':'等待数据'):'UART关';
   document.getElementById('link').className='badge'+(s.uart?(s.link?'':' warn'):' off');
   document.getElementById('outBadge').textContent=s.gpioOut?'OUT 有人':'OUT 无人';
   document.getElementById('outBadge').className='badge'+(s.gpioOut?'':' off');
-  document.getElementById('btnUart').textContent=s.uart?'关闭 UART':'开启 UART';
   document.getElementById('kPresent').innerHTML=s.present?'<span class=ok>有</span>':'<span class=bad>无</span>';
   document.getElementById('kRange').textContent=s.range_mm?(s.range_mm/1000).toFixed(2)+' m':'—';
   document.getElementById('kAngle').textContent=(s.angle_deg!=null?s.angle_deg+'°':'—');
@@ -196,14 +180,16 @@ function render(s){
   }else if(s.primaryValid&&s.range_mm){
     body.innerHTML=`<tr><td>主目标</td><td>${(s.range_mm/1000).toFixed(2)} m</td><td>${s.angle_deg}°</td><td>${s.velo||0}</td></tr>`;
   }else body.innerHTML='<tr><td colspan="4" style="color:var(--muted)">无目标</td></tr>';
+  document.getElementById('moduleInfo').textContent=
+    `链路 ${s.link?'正常':'等待回复'} · 115200 8N1 · RX IO9 / TX IO10\n模块版本 ${s.version||'未读取'}\n`+
+    `检测查询 自动 5 Hz · 多目标稳定ID=${!!s.idStable}`;
   document.getElementById('meta').textContent=
-    `协议 ${s.protocol||'unknown'}（原生稳定ID=${!!s.idStable}）\n版本 ${s.version||'-'}\n`+
+    `协议 ${s.protocol||'unknown'}\n`+
     `波特率 ${s.baud}  帧 ${s.rxFrames} (59=${s.frames59||0}, 5A=${s.frames5A||0})  字节 ${s.rxBytes}\n`+
     `CRC错 ${s.crcErr}  格式错 ${s.malformedFrames||0}  未知帧 ${s.unknownFrames||0}  丢弃 ${s.discardedBytes||0}  溢出 ${s.droppedBytes||0}\n`+
     `多目标 声明=${s.declaredObjNum||0} 输出=${s.objNum||0} 截断=${!!s.truncated}  UART积压=${s.uartBufferedBytes||0}\n`+
     `最后帧 ${s.lastFrameHex||'-'}\n`+
-    `引脚 TX=IO${s.pins&&s.pins.tx}(${s.pins&&s.pins.txLevel}) RX=IO${s.pins&&s.pins.rx}(${s.pins&&s.pins.rxLevel}) OUT=${s.pins&&s.pins.out}\n`+
-    `交换=${!!(s.pins&&s.pins.swap)}  反相=${!!(s.pins&&s.pins.invert)}  RX探测: 采样=${s.probeSamples||0} 低电平=${s.probeLowSamples||0} 边沿=${s.probeEdges||0}`;
+    `引脚 TX=IO${s.pins&&s.pins.tx}(${s.pins&&s.pins.txLevel}) RX=IO${s.pins&&s.pins.rx}(${s.pins&&s.pins.rxLevel}) OUT=${s.pins&&s.pins.out}`;
   setChips(s);
   draw(s);
 }
@@ -218,14 +204,6 @@ async function api(method,url,body){
 async function refresh(){
   try{render(await api('GET','/api/radar/live'))}
   catch(e){document.getElementById('link').textContent='API错误';document.getElementById('meta').textContent=String(e)}
-}
-async function toggleUart(){
-  const on=!last||!last.uart;
-  const baud=+document.getElementById('baud').value;
-  const swap=document.getElementById('swap').checked;
-  const invert=document.getElementById('invert').checked;
-  await api('POST','/api/radar',{on,baud,swap,invert});
-  refresh();
 }
 async function cmd(c){
   await api('POST','/api/radar',{cmd:c});

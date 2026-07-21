@@ -21,7 +21,7 @@ idf.py -p /dev/ttyUSB0 flash monitor
 
 | 路径 | 说明 |
 |---|---|
-| `main/` | 应用与驱动，FW **2.2.6**（含 Web OTA、雷达原始帧诊断、急停、深度睡眠关机） |
+| `main/` | 应用与驱动，FW **2.2.7**（含 Web OTA、雷达自动查询、急停、深度睡眠关机） |
 | `clients/` | Python 调试客户端 |
 
 浏览器打开板子 IP，或 `GET /api`。
@@ -42,11 +42,11 @@ curl -X POST --data-binary @build/eda_robot.bin \
 
 ## MS60-1211S80M 雷达验证
 
-临时接线及资料位于 `../docs/MS60-1211S80M/`。卖家设置工具配置为 115200 8N1，通用 AT6010 HCI 文档则写 921600，因此固件启动只在 115200 被动监听，并允许在 `/radar` 页面本地切换速率对照；不会自动修改雷达模块的永久波特率。
+临时接线及资料位于 `../docs/MS60-1211S80M/`。实机已验证雷达使用 115200 8N1、正常极性，雷达 TX→IO9、RX→IO10。固件启动后固定使用该配置，并每 200ms 自动发送一次只读 `0x30` 检测查询；`/radar` 页面无需配置，关闭浏览器也会持续采集。
 
 ```bash
 python clients/robot_api.py 192.168.3.215
 curl http://192.168.3.215/api/radar/live
 ```
 
-`protocol=at6010_hci_unconfirmed` 表示当前 `0x59/0x5A` 解码仍需真实帧验证。TYPE=5 暂按“最多三个区域最近目标”显示，`slot` 只是帧内序号，不是稳定目标 ID。判断链路时同时检查 `rxBytes`、`frames59`、`frames5A`、`crcErr`、`malformedFrames`、`discardedBytes` 和 `droppedBytes`；仅有收到字节不等于协议已确认。
+`protocol=at6010_ci_0x30_validated` 表示 `0x59/0x30` 传输、校验以及单目标距离/角度已经过实机验证。TYPE=5 多目标仍待完整验收，`slot` 只是帧内序号，不是稳定目标 ID。诊断时可展开页面底部信息，检查 `rxBytes`、`frames59`、`frames5A`、`crcErr`、`malformedFrames`、`discardedBytes` 和 `droppedBytes`。

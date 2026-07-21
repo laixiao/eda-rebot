@@ -142,15 +142,6 @@ class RobotApi:
     def radar(self, live: bool = False) -> dict:
         return self._call("/api/radar/live" if live else "/api/radar")
 
-    def radar_uart(
-        self, on: bool = True, baud: int = 115200, swap: bool = False, invert: bool = False
-    ) -> dict:
-        return self._call(
-            "/api/radar",
-            {"on": on, "baud": baud, "swap": swap, "invert": invert},
-            method="POST",
-        )
-
     def ota_info(self) -> dict:
         return self._call("/api/ota")
 

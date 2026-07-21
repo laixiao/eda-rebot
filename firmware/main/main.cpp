@@ -38,7 +38,7 @@
 #include "esp_system.h"
 
 static const char *TAG = "eda_robot";
-static const char *FW_VERSION = "2.2.6";
+static const char *FW_VERSION = "2.2.7";
 static const int64_t MOTOR_FAILSAFE_US = 1500000;
 static volatile bool otaBusy = false;
 static volatile bool shutdownPending = false;
@@ -466,44 +466,13 @@ static esp_err_t handleRadarLive(httpd_req_t *req) {
   return sendJson(req, 200, buf);
 }
 
-static bool argsHasKey(const ReqArgs &a, const char *key) {
-  char v[8];
-  if (queryGet(a.q, key, v, sizeof(v))) return true;
-  const std::string k = std::string("\"") + key + "\"";
-  return a.body.find(k) != std::string::npos;
-}
-
 static esp_err_t handleRadarPost(httpd_req_t *req) {
   auto a = loadArgs(req);
   const std::string cmd = argStr(a, "cmd", "");
-  if (argsHasKey(a, "on")) {
-    const bool on = argBool(a, "on", true);
-    const uint32_t baud = (uint32_t)argInt(a, "baud", 115200);
-    const bool swapPins = argBool(a, "swap", false);
-    const bool invertUart = argBool(a, "invert", false);
-    if (on) {
-      if (!radar_start(baud, swapPins, invertUart))
-        return sendJson(req, 500, "{\"ok\":false,\"error\":\"radar uart start failed\"}");
-    } else {
-      radar_stop();
-    }
-  }
-  bool commandOk = true;
+  bool commandOk = false;
   if (cmd == "version") commandOk = radar_cmd_get_version();
   else if (cmd == "poll") commandOk = radar_cmd_get_det();
-  else if (cmd == "probe") {
-    const uint32_t ms = (uint32_t)argInt(a, "ms", 100);
-    if (!radar_probe_rx_edges(ms))
-      return sendJson(req, 409, "{\"ok\":false,\"error\":\"radar uart is off\"}");
-  }
-  else if (cmd == "sense_on") commandOk = radar_cmd_sense(true);
-  else if (cmd == "sense_off") commandOk = radar_cmd_sense(false);
-  else if (cmd == "baud") {
-    return sendJson(req, 403,
-                    "{\"ok\":false,\"error\":\"permanent radar baud changes are disabled\"}");
-  } else if (!cmd.empty()) {
-    return sendJson(req, 400, "{\"ok\":false,\"error\":\"unknown radar command\"}");
-  }
+  else return sendJson(req, 400, "{\"ok\":false,\"error\":\"unsupported radar command\"}");
   if (!commandOk)
     return sendJson(req, 500, "{\"ok\":false,\"error\":\"radar UART write failed\"}");
   char buf[1536];
@@ -1372,7 +1341,7 @@ extern "C" void app_main(void) {
 
   radar_init();
   encoders_init();
-  const bool radarBootUart = radar_start(115200, false, false);
+  const bool radarBootUart = radar_start();
   ESP_LOGI(TAG, "radar early UART=%d", radarBootUart);
   board_i2c_init();
 

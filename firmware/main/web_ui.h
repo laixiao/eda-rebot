@@ -13,6 +13,7 @@ static const char INDEX_HTML[] = R"HTML(<!DOCTYPE html>
 body{margin:0;font:14px/1.45 system-ui,Segoe UI,sans-serif;background:var(--bg);color:var(--fg)}
 header{padding:14px 16px;border-bottom:1px solid var(--line);display:flex;gap:12px;flex-wrap:wrap;align-items:center}
 header h1{font-size:16px;margin:0;font-weight:600}
+.action-note{font-size:12px;color:var(--muted)}
 .badge{padding:2px 8px;border-radius:999px;background:#238636;font-size:12px}
 .badge.off{background:#6e7681}
 main{padding:12px;display:grid;gap:12px;grid-template-columns:repeat(auto-fit,minmax(280px,1fr))}
@@ -50,7 +51,9 @@ img.cam{max-width:100%;width:100%;aspect-ratio:4/3;object-fit:contain;background
   <h1>EDA-RobotPro Web Debug</h1>
   <span id="wifi" class="badge off">...</span>
   <button class="danger" onclick="api('POST','/api/estop')">紧急停止</button>
+  <span class="action-note">停止电机、舵机和功放</span>
   <button id="btnShutdown" class="danger" title="进入深度睡眠，需断电重上电或复位恢复" onclick="shutdownDevice()">关机</button>
+  <span class="action-note">关闭外设并休眠，不切断电池</span>
   <button onclick="refresh()">刷新状态</button>
 </header>
 <main>
@@ -72,15 +75,36 @@ img.cam{max-width:100%;width:100%;aspect-ratio:4/3;object-fit:contain;background
 </section>
 <section>
   <h2>舵机 T3-T7 (U16)</h2>
-  <div class="row"><label>通道</label>
-    <select id="servoId"><option value="0">T3 ch11</option><option value="1">T4 ch12</option><option value="2">T5 ch13</option><option value="3">T6 ch14</option><option value="4">T7 ch15</option></select>
-    <label>角度</label><input id="servoAng" type="number" min="0" max="180" value="90"/>
-    <button onclick="setServo()">设置</button>
+  <div class="led-row">
+    <label for="servo0">T3 ch11</label>
+    <input id="servo0" type="range" min="0" max="180" value="90" oninput="onServoSlide(0,this)"/>
+    <span id="servoV0" class="led-pct">90°</span>
+  </div>
+  <div class="led-row">
+    <label for="servo1">T4 ch12</label>
+    <input id="servo1" type="range" min="0" max="180" value="90" oninput="onServoSlide(1,this)"/>
+    <span id="servoV1" class="led-pct">90°</span>
+  </div>
+  <div class="led-row">
+    <label for="servo2">T5 ch13</label>
+    <input id="servo2" type="range" min="0" max="180" value="90" oninput="onServoSlide(2,this)"/>
+    <span id="servoV2" class="led-pct">90°</span>
+  </div>
+  <div class="led-row">
+    <label for="servo3">T6 ch14</label>
+    <input id="servo3" type="range" min="0" max="180" value="90" oninput="onServoSlide(3,this)"/>
+    <span id="servoV3" class="led-pct">90°</span>
+  </div>
+  <div class="led-row">
+    <label for="servo4">T7 ch15</label>
+    <input id="servo4" type="range" min="0" max="180" value="90" oninput="onServoSlide(4,this)"/>
+    <span id="servoV4" class="led-pct">90°</span>
   </div>
   <div class="row">
     <button onclick="setAllServo(0)">全 0°</button>
     <button onclick="setAllServo(90)">全 90°</button>
     <button onclick="setAllServo(180)">全 180°</button>
+    <label>使用前请先手动使能 PWM</label>
   </div>
 </section>
 <section>
@@ -275,11 +299,31 @@ async function shutdownDevice(){
 async function togglePwm(){const s=await api('GET','/api/status');await api('POST','/api/pwm',{on:!s.pwmEnable});refresh()}
 async function toggleStby(){const s=await api('GET','/api/status');await api('POST','/api/stby',{on:!s.motorStby});refresh()}
 async function toggleAmp(){const s=await api('GET','/api/status');await api('POST','/api/amp',{on:!s.ampEnable});refresh()}
-async function setServo(){
-  await api('POST','/api/servo',{id:+servoId.value,angle:+servoAng.value});
+const servoTimers=[0,0,0,0,0];
+function onServoSlide(id,el){
+  const angle=Math.max(0,Math.min(180,+el.value||0));
+  document.getElementById('servoV'+id).textContent=angle+'°';
+  if(servoTimers[id]) clearTimeout(servoTimers[id]);
+  servoTimers[id]=setTimeout(()=>{
+    servoTimers[id]=0;
+    setServo(id,angle);
+  },40);
 }
-async function setAllServo(a){
-  for(let i=0;i<5;i++) await api('POST','/api/servo',{id:i,angle:a});
+async function setServo(id,angle){
+  angle=Math.max(0,Math.min(180,+angle||0));
+  const el=document.getElementById('servo'+id);
+  const lab=document.getElementById('servoV'+id);
+  if(el) el.value=String(angle);
+  if(lab) lab.textContent=angle+'°';
+  try{return await api('POST','/api/servo',{id,angle})}
+  catch(e){alert('舵机设置失败: '+e.message);return null}
+}
+async function setAllServo(angle){
+  for(let i=0;i<5;i++){
+    if(servoTimers[i]){clearTimeout(servoTimers[i]);servoTimers[i]=0}
+    const j=await setServo(i,angle);
+    if(!j||j.ok===false) break;
+  }
 }
 async function setMotor(dir){
   await api('POST','/api/motor',{id:+motorId.value,dir,duty:+motorDuty.value});

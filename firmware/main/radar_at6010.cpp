@@ -15,13 +15,13 @@
 static const char *TAG = "radar";
 static const uart_port_t RADAR_UART = UART_NUM_1;
 static const int RADAR_RX_BUF = 2048;
+static const uint32_t RADAR_BAUD = 115200;
+static const int64_t RADAR_QUERY_INTERVAL_US = 200000;
 
 static SemaphoreHandle_t sMtx = nullptr;
 static bool sUartOn = false;
-static uint32_t sBaud = 115200;
-static bool sPinsSwapped = false;
-static bool sUartInverted = false;
 static bool sGpioOut = false;
+static int64_t sLastQueryUs = 0;
 
 static uint8_t sRx[1024];
 static size_t sRxLen = 0;
@@ -352,23 +352,15 @@ bool radar_init() {
   return sMtx != nullptr;
 }
 
-bool radar_start(uint32_t baud, bool swap_pins, bool invert_uart) {
+bool radar_start() {
   if (!sMtx && !radar_init()) {
     ESP_LOGE(TAG, "mutex init failed");
     return false;
   }
-  if (baud == 0) baud = 115200;
-  if (sUartOn) {
-    if (baud == sBaud && swap_pins == sPinsSwapped && invert_uart == sUartInverted) return true;
-    // API 诊断切换只改变 ESP32 本地 UART，不向雷达写永久波特率。
-    radar_stop();
-  }
-
-  const int txPin = swap_pins ? PIN_RADAR_UART_RX : PIN_RADAR_UART_TX;
-  const int rxPin = swap_pins ? PIN_RADAR_UART_TX : PIN_RADAR_UART_RX;
+  if (sUartOn) return true;
 
   uart_config_t cfg = {};
-  cfg.baud_rate = (int)baud;
+  cfg.baud_rate = (int)RADAR_BAUD;
   cfg.data_bits = UART_DATA_8_BITS;
   cfg.parity = UART_PARITY_DISABLE;
   cfg.stop_bits = UART_STOP_BITS_1;
@@ -386,15 +378,14 @@ bool radar_start(uint32_t baud, bool swap_pins, bool invert_uart) {
     uart_driver_delete(RADAR_UART);
     return false;
   }
-  const uint32_t inverseMask =
-      invert_uart ? (UART_SIGNAL_RXD_INV | UART_SIGNAL_TXD_INV) : UART_SIGNAL_INV_DISABLE;
-  err = uart_set_line_inverse(RADAR_UART, inverseMask);
+  err = uart_set_line_inverse(RADAR_UART, UART_SIGNAL_INV_DISABLE);
   if (err != ESP_OK) {
     ESP_LOGE(TAG, "uart_set_line_inverse: %s", esp_err_to_name(err));
     uart_driver_delete(RADAR_UART);
     return false;
   }
-  err = uart_set_pin(RADAR_UART, txPin, rxPin, UART_PIN_NO_CHANGE, UART_PIN_NO_CHANGE);
+  err = uart_set_pin(RADAR_UART, PIN_RADAR_UART_TX, PIN_RADAR_UART_RX, UART_PIN_NO_CHANGE,
+                     UART_PIN_NO_CHANGE);
   if (err != ESP_OK) {
     ESP_LOGE(TAG, "uart_set_pin: %s", esp_err_to_name(err));
     uart_driver_delete(RADAR_UART);
@@ -404,15 +395,10 @@ bool radar_start(uint32_t baud, bool swap_pins, bool invert_uart) {
 
   xSemaphoreTake(sMtx, portMAX_DELAY);
   sUartOn = true;
-  sBaud = baud;
-  sPinsSwapped = swap_pins;
-  sUartInverted = invert_uart;
   sState.uart_on = true;
-  sState.baud = baud;
-  sState.pins_swapped = swap_pins;
-  sState.uart_inverted = invert_uart;
-  sState.uart_tx_pin = (uint8_t)txPin;
-  sState.uart_rx_pin = (uint8_t)rxPin;
+  sState.baud = RADAR_BAUD;
+  sState.uart_tx_pin = PIN_RADAR_UART_TX;
+  sState.uart_rx_pin = PIN_RADAR_UART_RX;
   sState.link_ok = false;
   sState.rx_frames = 0;
   sState.rx_bytes = 0;
@@ -426,19 +412,15 @@ bool radar_start(uint32_t baud, bool swap_pins, bool invert_uart) {
   memset(sState.type_frames, 0, sizeof(sState.type_frames));
   sState.uart_buffered_bytes = 0;
   sState.last_frame_hex[0] = 0;
-  sState.probe_samples = 0;
-  sState.probe_low_samples = 0;
-  sState.probe_edges = 0;
   sState.last_frame_us = 0;
   sState.report_type = 0xFF;
   strncpy(sState.version, "未读取", sizeof(sState.version) - 1);
   sRxLen = 0;
+  sLastQueryUs = 0;
   xSemaphoreGive(sMtx);
 
-  ESP_LOGI(TAG, "UART1 on TX=%d RX=%d baud=%u swap=%d invert=%d", txPin, rxPin,
-           (unsigned)baud, (int)swap_pins, (int)invert_uart);
-  // MS60 vendor UART protocol is not yet available. Listen passively at boot;
-  // AIR Touch HCI commands remain available only through explicit diagnostics.
+  ESP_LOGI(TAG, "UART1 on TX=%d RX=%d baud=%u", PIN_RADAR_UART_TX, PIN_RADAR_UART_RX,
+           (unsigned)RADAR_BAUD);
   return true;
 }
 
@@ -459,8 +441,6 @@ void radar_stop() {
   io.pull_down_en = GPIO_PULLDOWN_DISABLE;
   gpio_config(&io);
 }
-
-bool radar_running() { return sUartOn; }
 
 void radar_set_gpio_out(bool level) {
   if (!sMtx) return;
@@ -509,66 +489,15 @@ void radar_poll() {
       !(sSwipeUntil > now))
     strncpy(sState.gesture, "无人", sizeof(sState.gesture) - 1);
   sState.present = sState.primary_valid || sState.multi_valid || sGpioOut;
+  const bool queryDue = now - sLastQueryUs >= RADAR_QUERY_INTERVAL_US;
+  if (queryDue) sLastQueryUs = now;
   xSemaphoreGive(sMtx);
-}
-
-bool radar_probe_rx_edges(uint32_t duration_ms) {
-  if (!sUartOn || !sMtx) return false;
-  if (duration_ms < 10) duration_ms = 10;
-  if (duration_ms > 250) duration_ms = 250;
-
-  RadarSnapshot snap;
-  radar_get_snapshot(snap);
-  const gpio_num_t rxPin = (gpio_num_t)snap.uart_rx_pin;
-  uart_flush_input(RADAR_UART);
-  if (!radar_cmd_get_version()) return false;
-
-  uint32_t samples = 0;
-  uint32_t lowSamples = 0;
-  uint32_t edges = 0;
-  int prev = gpio_get_level(rxPin);
-  const int64_t deadline = esp_timer_get_time() + (int64_t)duration_ms * 1000;
-  while (esp_timer_get_time() < deadline) {
-    const int level = gpio_get_level(rxPin);
-    samples++;
-    if (!level) lowSamples++;
-    if (level != prev) {
-      edges++;
-      prev = level;
-    }
-  }
-
-  xSemaphoreTake(sMtx, portMAX_DELAY);
-  sState.probe_samples = samples;
-  sState.probe_low_samples = lowSamples;
-  sState.probe_edges = edges;
-  xSemaphoreGive(sMtx);
-  return true;
-}
-
-bool radar_cmd_set_active_time(uint8_t seconds) { return sendCi(0x90, &seconds, 1); }
-
-bool radar_cmd_sense(bool on) {
-  uint8_t p = on ? 1 : 0;
-  return sendCi(0xD1, &p, 1);
+  if (queryDue && !radar_cmd_get_det()) ESP_LOGW(TAG, "detection query write failed");
 }
 
 bool radar_cmd_get_version() { return sendCi(0xFE, nullptr, 0); }
 
 bool radar_cmd_get_det() { return sendCi(0x30, nullptr, 0); }
-
-bool radar_cmd_set_baud(uint32_t baud) {
-  uint8_t p[4] = {(uint8_t)(baud & 0xFF), (uint8_t)((baud >> 8) & 0xFF),
-                  (uint8_t)((baud >> 16) & 0xFF), (uint8_t)((baud >> 24) & 0xFF)};
-  if (!sendCi(0x19, p, 4)) return false;
-  vTaskDelay(pdMS_TO_TICKS(50));
-  uart_set_baudrate(RADAR_UART, baud);
-  xSemaphoreTake(sMtx, portMAX_DELAY);
-  sBaud = baud;
-  sState.baud = baud;
-  xSemaphoreGive(sMtx);
-  return true;
-}
 
 void radar_get_snapshot(RadarSnapshot &out) {
   if (!sMtx) {
@@ -580,8 +509,6 @@ void radar_get_snapshot(RadarSnapshot &out) {
   out.present = sState.primary_valid || sState.multi_valid || sGpioOut;
   out.gpio_out = sGpioOut;
   out.uart_on = sUartOn;
-  out.pins_swapped = sPinsSwapped;
-  out.uart_inverted = sUartInverted;
   xSemaphoreGive(sMtx);
 }
 
@@ -611,17 +538,15 @@ size_t radar_json_summary(char *buf, size_t buflen) {
   const int rxLevel = gpio_get_level((gpio_num_t)s.uart_rx_pin);
   return (size_t)snprintf(
       buf, buflen,
-      "{\"ok\":true,\"protocol\":\"at6010_hci_unconfirmed\",\"idStable\":false,"
-      "\"uart\":%s,\"link\":%s,\"baud\":%u,\"swap\":%s,\"invert\":%s,"
+      "{\"ok\":true,\"protocol\":\"at6010_ci_0x30_validated\",\"idStable\":false,"
+      "\"uart\":%s,\"link\":%s,\"baud\":%u,"
       "\"tx\":%u,\"rx\":%u,\"txLevel\":%d,\"rxLevel\":%d,\"gpioOut\":%s,\"present\":%s,"
       "\"primaryValid\":%s,\"range_mm\":%u,\"angle_deg\":%d,\"det\":\"%s\",\"gesture\":\"%s\","
       "\"multiValid\":%s,\"declaredObjNum\":%u,\"objNum\":%u,\"truncated\":%s,"
       "\"version\":\"%s\",\"rxFrames\":%u,\"rxBytes\":%u,\"crcErr\":%u,"
       "\"malformedFrames\":%u,\"unknownFrames\":%u,\"discardedBytes\":%u,\"droppedBytes\":%u,"
-      "\"frames59\":%u,\"frames5A\":%u,\"uartBufferedBytes\":%u,\"lastFrameHex\":\"%s\","
-      "\"probeSamples\":%u,\"probeLowSamples\":%u,\"probeEdges\":%u}",
+      "\"frames59\":%u,\"frames5A\":%u,\"uartBufferedBytes\":%u,\"lastFrameHex\":\"%s\"}",
       s.uart_on ? "true" : "false", s.link_ok ? "true" : "false", (unsigned)s.baud,
-      s.pins_swapped ? "true" : "false", s.uart_inverted ? "true" : "false",
       (unsigned)s.uart_tx_pin, (unsigned)s.uart_rx_pin, txLevel, rxLevel,
       s.gpio_out ? "true" : "false", s.present ? "true" : "false",
       s.primary_valid ? "true" : "false", (unsigned)s.range_mm, (int)s.angle_deg, d, g,
@@ -629,8 +554,7 @@ size_t radar_json_summary(char *buf, size_t buflen) {
       s.truncated ? "true" : "false", v, (unsigned)s.rx_frames, (unsigned)s.rx_bytes,
       (unsigned)s.crc_err, (unsigned)s.malformed_frames, (unsigned)s.unknown_frames,
       (unsigned)s.discarded_bytes, (unsigned)s.dropped_bytes, (unsigned)s.frames_59,
-      (unsigned)s.frames_5a, (unsigned)s.uart_buffered_bytes, s.last_frame_hex,
-      (unsigned)s.probe_samples, (unsigned)s.probe_low_samples, (unsigned)s.probe_edges);
+      (unsigned)s.frames_5a, (unsigned)s.uart_buffered_bytes, s.last_frame_hex);
 }
 
 size_t radar_json_live(char *buf, size_t buflen) {
@@ -646,7 +570,7 @@ size_t radar_json_live(char *buf, size_t buflen) {
   size_t n = 0;
   int w = snprintf(
       buf, buflen,
-      "{\"ok\":true,\"protocol\":\"at6010_hci_unconfirmed\",\"idStable\":false,"
+      "{\"ok\":true,\"protocol\":\"at6010_ci_0x30_validated\",\"idStable\":false,"
       "\"uart\":%s,\"link\":%s,\"baud\":%u,\"gpioOut\":%s,\"present\":%s,"
       "\"primaryValid\":%s,\"isDetected\":%u,\"detResult\":%u,\"det\":\"%s\",\"gesture\":\"%s\","
       "\"range_mm\":%u,\"angle_deg\":%d,\"velo\":%d,\"rbConf\":%u,\"angleConf\":%u,"
@@ -656,9 +580,7 @@ size_t radar_json_live(char *buf, size_t buflen) {
       "\"malformedFrames\":%u,\"unknownFrames\":%u,\"discardedBytes\":%u,\"droppedBytes\":%u,"
       "\"frames59\":%u,\"frames5A\":%u,\"uartBufferedBytes\":%u,\"lastFrameHex\":\"%s\","
       "\"lastFrameUs\":%lld,\"lastPrimaryUs\":%lld,\"lastMultiUs\":%lld,"
-      "\"probeSamples\":%u,\"probeLowSamples\":%u,\"probeEdges\":%u,"
-      "\"pins\":{\"tx\":%u,\"rx\":%u,\"swap\":%s,\"invert\":%s,"
-      "\"txLevel\":%d,\"rxLevel\":%d,\"out\":\"ENC3_A\"},"
+      "\"pins\":{\"tx\":%u,\"rx\":%u,\"txLevel\":%d,\"rxLevel\":%d,\"out\":\"ENC3_A\"},"
       "\"objs\":[",
       s.uart_on ? "true" : "false", s.link_ok ? "true" : "false", (unsigned)s.baud,
       s.gpio_out ? "true" : "false", s.present ? "true" : "false",
@@ -672,10 +594,7 @@ size_t radar_json_live(char *buf, size_t buflen) {
       (unsigned)s.discarded_bytes, (unsigned)s.dropped_bytes, (unsigned)s.frames_59,
       (unsigned)s.frames_5a, (unsigned)s.uart_buffered_bytes, s.last_frame_hex,
       (long long)s.last_frame_us, (long long)s.last_primary_us, (long long)s.last_multi_us,
-      (unsigned)s.probe_samples, (unsigned)s.probe_low_samples, (unsigned)s.probe_edges,
-      (unsigned)s.uart_tx_pin, (unsigned)s.uart_rx_pin,
-      s.pins_swapped ? "true" : "false", s.uart_inverted ? "true" : "false", txLevel,
-      rxLevel);
+      (unsigned)s.uart_tx_pin, (unsigned)s.uart_rx_pin, txLevel, rxLevel);
   if (w < 0) return 0;
   n = (size_t)w;
   for (uint8_t i = 0; i < s.obj_num && i < RADAR_OBJ_MAX && n + 80 < buflen; i++) {

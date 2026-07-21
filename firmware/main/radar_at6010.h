@@ -27,8 +27,6 @@ struct RadarSnapshot {
   bool uart_on;
   bool link_ok;
   uint32_t baud;
-  bool pins_swapped;
-  bool uart_inverted;
   uint8_t uart_tx_pin;
   uint8_t uart_rx_pin;
   bool gpio_out;
@@ -67,9 +65,6 @@ struct RadarSnapshot {
   uint32_t type_frames[8];
   uint32_t uart_buffered_bytes;
   char last_frame_hex[161];
-  uint32_t probe_samples;
-  uint32_t probe_low_samples;
-  uint32_t probe_edges;
   int64_t last_frame_us;
   int64_t last_out_us;
   uint8_t trail_len;
@@ -77,17 +72,12 @@ struct RadarSnapshot {
 };
 
 bool radar_init();
-bool radar_start(uint32_t baud = 115200, bool swap_pins = false, bool invert_uart = false);
+bool radar_start();
 void radar_stop();
-bool radar_running();
 void radar_set_gpio_out(bool level);
 void radar_poll();  // call from bg task
-bool radar_probe_rx_edges(uint32_t duration_ms = 100);
-bool radar_cmd_set_active_time(uint8_t seconds);
-bool radar_cmd_sense(bool on);
 bool radar_cmd_get_version();
 bool radar_cmd_get_det();
-bool radar_cmd_set_baud(uint32_t baud);
 void radar_get_snapshot(RadarSnapshot &out);
 size_t radar_json_summary(char *buf, size_t buflen);
 size_t radar_json_live(char *buf, size_t buflen);
