@@ -692,7 +692,7 @@ static esp_err_t handleMotor(httpd_req_t *req) {
   if (id < 0 || id > 3) return sendJson(req, 400, "{\"ok\":false,\"error\":\"id 0..3\"}");
   if (duty < 0) duty = 0;
   if (duty > 100) duty = 100;
-  if (!flagPwm || !flagStby)
+  if (dir != 0 && duty != 0 && (!flagPwm || !flagStby))
     return sendJson(req, 400, "{\"ok\":false,\"error\":\"enable PWM and STBY first\"}");
   if (!motorDrive((uint8_t)id, dir, duty))
     return sendJson(req, 500, "{\"ok\":false,\"error\":\"motor write failed\"}");

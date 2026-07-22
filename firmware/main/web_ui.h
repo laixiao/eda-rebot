@@ -115,8 +115,8 @@ img.cam{max-width:100%;width:100%;aspect-ratio:4/3;object-fit:contain;background
     <label>占空%</label><input id="motorDuty" type="number" min="0" max="100" value="40"/>
   </div>
   <div class="row">
-    <button onpointerdown="startMotor(1)" onpointerup="stopMotorHold()" onpointerleave="stopMotorHold()">按住正转</button>
-    <button onpointerdown="startMotor(-1)" onpointerup="stopMotorHold()" onpointerleave="stopMotorHold()">按住反转</button>
+    <button onpointerdown="startMotor(1)" onpointerup="releaseMotor()" onpointerleave="releaseMotor()">按住正转</button>
+    <button onpointerdown="startMotor(-1)" onpointerup="releaseMotor()" onpointerleave="releaseMotor()">按住反转</button>
     <button onclick="stopMotorHold()">停止</button>
     <button class="danger" onclick="stopAllMotors()">全停</button>
   </div>
@@ -346,15 +346,17 @@ async function setAllServo(angle){
 async function setMotor(dir){
   await api('POST','/api/motor',{id:+motorId.value,dir,duty:+motorDuty.value});
 }
-let motorTimer=0,motorGeneration=0;
+let motorTimer=0,motorGeneration=0,motorHeld=false;
 async function startMotor(dir){
+  motorHeld=true;
   const generation=++motorGeneration;
   stopMotorTimer();
   await setMotor(dir);
-  if(generation===motorGeneration) motorTimer=setInterval(()=>setMotor(dir),500);
+  if(motorHeld&&generation===motorGeneration) motorTimer=setInterval(()=>setMotor(dir),500);
 }
 function stopMotorTimer(){if(motorTimer){clearInterval(motorTimer);motorTimer=0}}
-async function stopMotorHold(){motorGeneration++;stopMotorTimer();await setMotor(0)}
+async function releaseMotor(){if(!motorHeld)return;motorHeld=false;await stopMotorHold()}
+async function stopMotorHold(){motorHeld=false;motorGeneration++;stopMotorTimer();await setMotor(0)}
 async function stopAllMotors(){await api('POST','/api/motor/stop_all')}
 const ledTimers=[0,0,0];
 function onLedSlide(id,el){
