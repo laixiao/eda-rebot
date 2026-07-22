@@ -1,5 +1,5 @@
 {
-  "idf.currentSetup": "/root/.espressif/v5.5.4/esp-idf",
+  "idf.currentSetup": "C:\\esp\\v5.5.4\\esp-idf",
   "idf.customExtraVars": {},
   "clangd.path": "/root/.espressif/tools/esp-clang/esp-19.1.2_20250312/esp-clang/bin/clangd",
   "clangd.arguments": [
