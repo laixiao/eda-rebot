@@ -2,3 +2,4 @@ docs/MS60-1211S80M/60G人存ATRadarSettingTool_V1.2.7z
 docs/MS60-1211S80M/ATRadarSettingTool_V1.2
 **/__pycache__/
 *.py[cod]
+.playwright-mcp

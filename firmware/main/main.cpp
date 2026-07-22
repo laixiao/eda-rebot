@@ -30,6 +30,7 @@
 #include "web_ui.h"
 #include "web_radar_ui.h"
 #include "radar_at6010.h"
+#include "device_log.h"
 #include "esp_psram.h"
 #include "esp_ota_ops.h"
 #include "esp_app_format.h"
@@ -466,6 +467,19 @@ static esp_err_t handleRadarLive(httpd_req_t *req) {
   return sendJson(req, 200, buf);
 }
 
+static esp_err_t handleLogs(httpd_req_t *req) {
+  const std::string q = queryStr(req);
+  char value[32];
+  uint64_t after = 0;
+  size_t limit = 32;
+  if (queryGet(q, "after", value, sizeof(value))) after = strtoull(value, nullptr, 10);
+  if (queryGet(q, "limit", value, sizeof(value))) {
+    const long parsed = strtol(value, nullptr, 10);
+    if (parsed > 0) limit = static_cast<size_t>(parsed);
+  }
+  return sendJson(req, 200, device_log_json(after, limit));
+}
+
 static bool argsHasKey(const ReqArgs &a, const char *key) {
   char v[8];
   if (queryGet(a.q, key, v, sizeof(v))) return true;
@@ -514,6 +528,7 @@ static esp_err_t handleApiIndex(httpd_req_t *req) {
   body += "{\"path\":\"/api/camera\"},{\"path\":\"/api/camera/capture\"},";
   body += "{\"path\":\"/stream\"},{\"path\":\"/api/lcd\"},{\"path\":\"/api/touch\"},";
   body += "{\"path\":\"/api/ota\",\"methods\":[\"GET\",\"POST\"],\"note\":\"upload .bin\"},";
+  body += "{\"path\":\"/api/logs\",\"note\":\"incremental device logs\"},";
   body += "{\"path\":\"/api/radar\"},{\"path\":\"/api/radar/live\"},{\"path\":\"/radar\"}";
   body += "]}";
   return sendJson(req, 200, body);
@@ -1209,6 +1224,8 @@ static void setupHttp() {
   registerUri(server, "/api/radar", HTTP_OPTIONS, handleOptions);
   registerUri(server, "/api/radar/live", HTTP_GET, handleRadarLive);
   registerUri(server, "/api/radar/live", HTTP_OPTIONS, handleOptions);
+  registerUri(server, "/api/logs", HTTP_GET, handleLogs);
+  registerUri(server, "/api/logs", HTTP_OPTIONS, handleOptions);
   registerUri(server, "/api/encoders", HTTP_GET, handleEncoders);
   registerUri(server, "/api/encoders", HTTP_OPTIONS, handleOptions);
   registerUri(server, "/api/mic", HTTP_GET, handleMic);
@@ -1331,6 +1348,7 @@ static void background_task(void *) {
 }
 
 extern "C" void app_main(void) {
+  device_log_init();
   esp_err_t ret = nvs_flash_init();
   if (ret == ESP_ERR_NVS_NO_FREE_PAGES || ret == ESP_ERR_NVS_NEW_VERSION_FOUND) {
     ESP_ERROR_CHECK(nvs_flash_erase());

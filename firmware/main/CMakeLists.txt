@@ -7,6 +7,7 @@ endif()
 idf_component_register(
     SRCS
         "main.cpp"
+        "device_log.cpp"
         "xl9555.cpp"
         "pca9685.cpp"
         "ssd1306.cpp"

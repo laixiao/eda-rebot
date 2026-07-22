@@ -35,6 +35,7 @@ input[type=file]{max-width:100%;color:var(--muted)}
 .progress{height:8px;background:#0d1117;border-radius:4px;overflow:hidden;margin-top:8px}
 .progress>i{display:block;height:100%;width:0;background:var(--acc);transition:width .15s}
 pre{margin:0;white-space:pre-wrap;word-break:break-all;font:12px/1.4 ui-monospace,Consolas,monospace;color:#c9d1d9;max-height:180px;overflow:auto}
+.log-card{grid-column:1/-1}.log-console{height:320px;max-height:55vh;background:#0d1117;border:1px solid var(--line);border-radius:6px;padding:8px;white-space:pre;overflow:auto}.log-meta{font-size:12px;color:var(--muted)}
 .ok{color:var(--acc)}.bad{color:var(--bad)}.warn{color:var(--warn)}
 label{color:var(--muted)}
 img.cam{max-width:100%;width:100%;aspect-ratio:4/3;object-fit:contain;background:#0d1117;border:1px solid var(--line);border-radius:6px;display:block}
@@ -224,6 +225,17 @@ img.cam{max-width:100%;width:100%;aspect-ratio:4/3;object-fit:contain;background
   <pre id="touch">-</pre>
   <div class="row"><button onclick="readTouch()">读触摸</button></div>
 </section>
+<section class="log-card">
+  <h2>设备日志</h2>
+  <div class="row">
+    <button id="logPause" onclick="toggleLogs()">暂停</button>
+    <button onclick="clearLogs()">清空显示</button>
+    <button onclick="copyLogs()">复制</button>
+    <label><input id="logFollow" type="checkbox" checked/> 自动滚动</label>
+    <span id="logState" class="log-meta">连接中...</span>
+  </div>
+  <pre id="deviceLog" class="log-console">等待设备日志...</pre>
+</section>
 <section>
   <h2>Web 烧录 (OTA)</h2>
   <pre id="otaInfo">-</pre>
@@ -297,6 +309,7 @@ async function shutdownDevice(){
   if(!r||r.ok===false){btn.disabled=false;btn.textContent='关机';return}
   clearInterval(refreshTimer);
   clearInterval(otaTimer);
+  clearInterval(logTimer);
   const wifi=document.getElementById('wifi');
   wifi.textContent='已关机';
   wifi.className='badge off';
@@ -462,10 +475,53 @@ async function otaFlash(){
     btn.disabled=false;
   }
 }
+let logSeq=0,logPaused=false,logBusy=false,logLines=[];
+const LOG_LINE_MAX=800;
+async function refreshLogs(){
+  if(logPaused||logBusy)return;
+  logBusy=true;
+  const state=document.getElementById('logState');
+  try{
+    const r=await fetch('/api/logs?after='+logSeq+'&limit=64');
+    if(!r.ok)throw new Error('HTTP '+r.status);
+    const j=await r.json();
+    if(!j.ok)throw new Error(j.error||'日志接口错误');
+    if(logPaused)return;
+    if(j.gap)logLines.push('[网页提示] 部分较早日志已被设备缓冲覆盖');
+    for(const e of (j.entries||[])){
+      logLines.push('['+String(e.ms).padStart(8,' ')+'] '+String(e.text).replace(/[\r\n]+$/,''));
+      logSeq=e.seq;
+    }
+    if(logLines.length>LOG_LINE_MAX)logLines.splice(0,logLines.length-LOG_LINE_MAX);
+    const box=document.getElementById('deviceLog');
+    const nearBottom=box.scrollHeight-box.scrollTop-box.clientHeight<24;
+    box.textContent=logLines.length?logLines.join('\n'):'暂无日志';
+    if(document.getElementById('logFollow').checked&&nearBottom)box.scrollTop=box.scrollHeight;
+    state.textContent='已连接 · seq '+logSeq+' · 覆盖 '+(j.overwritten||0)+' · 截断 '+(j.truncated||0);
+    state.className='log-meta ok';
+  }catch(e){
+    state.textContent='连接失败: '+e.message;
+    state.className='log-meta bad';
+  }finally{logBusy=false}
+}
+function toggleLogs(){
+  logPaused=!logPaused;
+  document.getElementById('logPause').textContent=logPaused?'继续':'暂停';
+  const state=document.getElementById('logState');
+  if(logPaused){state.textContent='已暂停 · seq '+logSeq;state.className='log-meta warn'}else refreshLogs();
+}
+function clearLogs(){logLines=[];document.getElementById('deviceLog').textContent='显示已清空，设备日志仍在收集';}
+async function copyLogs(){
+  const text=document.getElementById('deviceLog').textContent;
+  try{await navigator.clipboard.writeText(text);document.getElementById('logState').textContent='已复制到剪贴板'}
+  catch(e){alert('复制失败，请手动选择日志文本复制');}
+}
 refresh();
 refreshOta();
+refreshLogs();
 const refreshTimer=setInterval(refresh,2000);
 const otaTimer=setInterval(refreshOta,5000);
+const logTimer=setInterval(refreshLogs,500);
 </script>
 </body>
 </html>)HTML";
