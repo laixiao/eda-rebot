@@ -34,7 +34,8 @@ static const int PIN_I2S_AMP_LRC = 38;
 static const int PIN_I2S_AMP_BCLK = 39;
 static const int PIN_I2S_AMP_DIN = 40;
 
-// 摄像头：DC-5M21-5640-803-V1（OV5640）；FPC 脚10由板载 U8 提供 1.2V
+// 摄像头：DC-5M21-5640-B（OV5640）；U7=CAM_2V8、U8=CAM_1V5；SCCB 上拉到 2.8V
+// PWDN/RESETB 经 XL9555 开漏控制（只拉低，高电平靠 10k→CAM_2V8）
 static const int PIN_CAM_XCLK = 15;
 static const int PIN_CAM_PCLK = 1;
 static const int PIN_CAM_VSYNC = 6;
@@ -63,9 +64,10 @@ static const uint8_t XL_ENC3_A = 0;
 static const uint8_t XL_ENC3_B = 1;
 static const uint8_t XL_ENC4_A = 2;
 static const uint8_t XL_ENC4_B = 3;
-static const uint8_t XL_CAM_PWDN = 4;
+static const uint8_t XL_CAM_PWDN = 4; // IO0_4，开漏：低=工作，高阻=掉电(R22→2.8V)
 static const uint8_t XL_STBY = 5;
 static const uint8_t XL_OE = 6;
+static const uint8_t XL_CAM_RST = 7;  // IO0_7，开漏：低=复位，高阻=释放(R21→2.8V)
 static const uint8_t XL_T_CS = 8;
 static const uint8_t XL_LCD_LED = 9;
 static const uint8_t XL_LCD_DC = 10;

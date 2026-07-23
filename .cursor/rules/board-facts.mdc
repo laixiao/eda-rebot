@@ -1,16 +1,16 @@
 ---
-description: 本板电路事实（以 EasyEDA Bridge 实时网表为准，2026-07-18 复查）
+description: 本板电路事实（以 EasyEDA Bridge 实时网表为准，2026-07-22 复查）
 alwaysApply: true
 ---
 
-# 本板电路事实（2026-07-18 Bridge 实时网表）
+# 本板电路事实（2026-07-22 Bridge 实时网表）
 
-工程：`AI通用机器狗_v4` / Board `V1.0.0` / 原理图 `eda-robot` / 图页 UUID `1d774ca900623155`。  
+当前活动工程：`AI通用机器人_v5` / Board `V1.0.0` / 原理图 `EDA-Robot` / 图页 UUID `1d774ca900623155`。  
 **审查以实时网表为准。**
 
-## 规模（2026-07-18）
+## 规模（2026-07-22）
 
-- 约 **102** 个位号器件、**90** 条网络；原理图 DRC API 空列表
+- **102** 个位号器件、**90** 条网络；原理图 DRC 汇总为 **2 条 warning**（API 不返回逐条详情）
 - U1 **IO35/36/37** 无外设网络（Octal PSRAM，禁止使用）
 
 ## 电源树
@@ -35,8 +35,15 @@ U1：IO12=SDA，IO13=SCL。
 | 麦克风 INMP441 U2 | SCK=IO16，WS=IO17，SD=IO18 |
 | 功放 MAX98357 U3 | LRC=IO38，BCLK=IO39，DIN=IO40；SD=`SPK_SD`→XL9555 IO1_6 |
 | ENC1/ENC2 | IO9/IO10，IO21/IO47 |
-| 摄像头 U6 OV2640 FPC | XCLK=IO15，PCLK=IO1，VSYNC=IO6，HREF=IO7，SDA=IO4，SCL=IO5，D0..D7=IO11/14/8/20/41/42/48/19；PWDN→XL9555 IO0_4；RESET 接 EN（固件 `pin_reset=-1`） |
+| 摄像头 U6 OV5640 FPC | DC-5M21-5640 系列 24Pin；XCLK=IO15，PCLK=IO1，VSYNC=IO6，HREF=IO7，SDA=IO4，SCL=IO5，D0..D7=IO11/14/8/20/41/42/48/19；PWDN→XL9555 IO0_4；RESET 接 EN（固件 `pin_reset=-1`） |
 | SPI 显示 U4 | SCK=IO45，MOSI=IO46，MISO=IO3；CS/DC/RST/LED/T_CS/T_IRQ→XL9555 |
+
+### 摄像头供电风险（2026-07-22）
+
+- U6-4=`CAM_2V8`（U7 XC6206-2.8V），U6-10=`CAM_1V2`（U8 XC6206-1.2V），U6-11=`3V3`。
+- OV5640 规格：VDD-A=2.6–3.0V；VDD-D=1.425–1.575V（典型 1.5V）；VDD-IO=1.71–3.0V。
+- 因此 U6-10 的 **1.2V 低于 VDD-D 下限**，U6-11 的 **3.3V 高于 VDD-IO 工作上限**；这是摄像头无法初始化/拍照的主要硬件风险。原理图修订应由用户手动完成，并先按所购模组引脚表再次确认。
+- U6 连接器为 0.5mm/24P **下接触**翻盖座；排线裸金手指必须朝 PCB/连接器下触点方向，并锁紧翻盖。
 
 ## XL9555（U13）
 

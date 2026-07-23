@@ -11,18 +11,32 @@ static const char *TAG = "camera";
 static bool camOk = false;
 static camera_fb_t *heldFb = nullptr;
 
-// PWDN 高=掉电；由 XL9555 IO0_4 驱动（板载电阻建议上拉到 3V3）
-bool cameraPower(XL9555 &xl, bool on) { return xl.setPin(XL_CAM_PWDN, !on); }
+// PWDN 高=掉电。XL9555 供电 3V3，只能开漏：拉低=工作，高阻靠 R22→CAM_2V8
+bool cameraPower(XL9555 &xl, bool on) {
+  if (on) return xl.driveLow(XL_CAM_PWDN);
+  return xl.releasePin(XL_CAM_PWDN);
+}
+
+static bool cameraPulseReset(XL9555 &xl) {
+  if (!xl.driveLow(XL_CAM_RST)) return false;
+  vTaskDelay(pdMS_TO_TICKS(2)); // RESETB 低 ≥1ms
+  if (!xl.releasePin(XL_CAM_RST)) return false;
+  vTaskDelay(pdMS_TO_TICKS(20)); // 释放后等 SCCB 就绪
+  return true;
+}
 
 bool cameraOk() { return camOk; }
 
 bool cameraBegin(XL9555 &xl) {
   if (camOk) return true;
 
-  // 上电时序：先确保掉电，再释放 PWDN，给 OV5640 核电/内部 LDO 留稳定时间
+  // 上电时序：PWDN 高(掉电) → 释放 PWDN → 脉冲 RESETB → 再 init
+  if (!xl.releasePin(XL_CAM_RST)) return false;
   if (!cameraPower(xl, false)) return false;
   vTaskDelay(pdMS_TO_TICKS(20));
   if (!cameraPower(xl, true)) return false;
+  vTaskDelay(pdMS_TO_TICKS(10));
+  if (!cameraPulseReset(xl)) return false;
   vTaskDelay(pdMS_TO_TICKS(300));
 
   const bool hasPsram = esp_psram_is_initialized();
@@ -44,8 +58,8 @@ bool cameraBegin(XL9555 &xl) {
   cfg.pin_href = PIN_CAM_HREF;
   cfg.pin_sccb_sda = PIN_CAM_SDA;
   cfg.pin_sccb_scl = PIN_CAM_SCL;
-  cfg.pin_pwdn = -1;   // 经 XL9555，不用库内 GPIO
-  cfg.pin_reset = -1;  // 硬件接 EN，固件不单独复位
+  cfg.pin_pwdn = -1;   // XL9555 IO0_4 开漏
+  cfg.pin_reset = -1;  // XL9555 IO0_7 开漏
   cfg.pixel_format = PIXFORMAT_JPEG;
   cfg.grab_mode = CAMERA_GRAB_LATEST;
 
@@ -66,7 +80,7 @@ bool cameraBegin(XL9555 &xl) {
 
   esp_err_t err = esp_camera_init(&cfg);
   if (err != ESP_OK) {
-    ESP_LOGE(TAG, "esp_camera_init failed: %s (PSRAM=%d) — expect OV5640, CAM_1V2≈1.2V",
+    ESP_LOGE(TAG, "esp_camera_init failed: %s (PSRAM=%d) — expect OV5640, CAM_1V5/CAM_2V8",
              esp_err_to_name(err), (int)hasPsram);
     cameraPower(xl, false);
     camOk = false;
@@ -106,6 +120,7 @@ void cameraEnd(XL9555 &xl) {
     esp_camera_deinit();
     camOk = false;
   }
+  xl.releasePin(XL_CAM_RST);
   cameraPower(xl, false);
 }
 

@@ -833,7 +833,7 @@ static esp_err_t handleCamera(httpd_req_t *req) {
     if (!ok)
       return sendJson(req, 500,
                       "{\"ok\":false,\"error\":\"camera init failed\",\"hint\":\"SCCB no ACK on IO4/IO5 — "
-                      "check OV5640 FPC, CAM_1V2≈1.2V, CAM_PWDN (XL IO0_4)\"}");
+                      "check OV5640 FPC, CAM_1V5≈1.5V, CAM_2V8≈2.8V, PWDN/RST (XL IO0_4/IO0_7)\"}");
     return sendJson(req, 200, "{\"ok\":true,\"camera\":true}");
   }
   cameraEnd(xl);
