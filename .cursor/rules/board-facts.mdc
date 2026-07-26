@@ -1,32 +1,35 @@
 ---
-description: 本板电路事实（以 EasyEDA Bridge 实时网表为准，2026-07-22 复查）
+description: 本板电路事实（以 EasyEDA Bridge 实时网表为准，2026-07-26 复查）
 alwaysApply: true
 ---
 
-# 本板电路事实（2026-07-22 Bridge 实时网表）
+# 本板电路事实（2026-07-26 Bridge 实时网表）
 
-当前活动工程：`AI通用机器人_v5` / Board `V1.0.0` / 原理图 `EDA-Robot` / 图页 UUID `1d774ca900623155`。  
+当前活动工程：`AI通用机器人_v6` / Board `V1.0.0` / 原理图 `eda-robot` / 图页 `P1` UUID `1d774ca900623155`。  
 **审查以实时网表为准。**
 
-## 规模（2026-07-22）
+## 规模（2026-07-26 本次复查）
 
-- **102** 个位号器件、**90** 条网络；原理图 DRC 汇总为 **2 条 warning**（API 不返回逐条详情）
+- **70** 个位号器件、**42** 条网络；原理图 DRC 本次返回空数组
 - U1 **IO35/36/37** 无外设网络（Octal PSRAM，禁止使用）
+- **已移除**：SPI 屏 U4、第二路 PCA9685 **U23**、舵机 T5–T7、安装孔 M2；探照灯并入 U16
+- **已补回 strapping 下拉**：IO3←R7 10k→GND，IO46←R9 10k→GND，IO45←R15 10k→GND
+- 摄像头 / 电机驱动 / 编码器：仍无
+- 安装孔：仅 **M1** + SCREW1–8（无 M2–M5）
 
 ## 电源树
 
-电池(U9) → VIN → Q5 高边开关 → VBAT → D1 → 8V → U11 → **5V** → U5 LD1117 → **3V3**（统一网名 `3V3`）
+电池座(U9) → VIN → Q5 高边开关 → VBAT → D1 → 8V → U11 → **5V** → U5 LD1117 → **3V3**（统一网名 `3V3`，无 `3.3V`）
 
 ## I2C（OLED_SDA / OLED_SCL）
 
 | 设备 | 地址 | 说明 |
 |---|---|---|
-| XL9555 U13 | 0x20 | A0/A1/A2=GND；INT#→U1 IO2 |
+| XL9555 U13 | 0x20 | A0/A1/A2=GND；INT#→U1 IO2（R4 上拉） |
 | OLED U10 | 0x3C | |
-| PCA9685 U16 | 0x40 | A0..A5=GND；舵机 |
-| PCA9685 U23 | 0x41 | A0=3V3；电机方向 + 探照灯 |
+| PCA9685 U16 | 0x40 | A0..A5=GND；舵机 + 探照灯 |
 
-U1：IO12=SDA，IO13=SCL。
+U1：IO12=SDA，IO13=SCL；R11/R12 上拉。~~U23 0x41 已删除~~。
 
 ## ESP32 外设（U1）
 
@@ -34,58 +37,77 @@ U1：IO12=SDA，IO13=SCL。
 |---|---|
 | 麦克风 INMP441 U2 | SCK=IO16，WS=IO17，SD=IO18 |
 | 功放 MAX98357 U3 | LRC=IO38，BCLK=IO39，DIN=IO40；SD=`SPK_SD`→XL9555 IO1_6 |
-| ENC1/ENC2 | IO9/IO10，IO21/IO47 |
-| 摄像头 U6 OV5640 FPC | DC-5M21-5640 系列 24Pin；XCLK=IO15，PCLK=IO1，VSYNC=IO6，HREF=IO7，SDA=IO4，SCL=IO5，D0..D7=IO11/14/8/20/41/42/48/19；PWDN→XL9555 IO0_4；RESET 接 EN（固件 `pin_reset=-1`） |
-| SPI 显示 U4 | SCK=IO45，MOSI=IO46，MISO=IO3；CS/DC/RST/LED/T_CS/T_IRQ→XL9555 |
+| SPI 显示 U4 | **已移除**（IO3/45/46 仅作 strapping，无外设） |
+| UART0 | RXD0=`RX`，TXD0=`TX`（下载排针 T2：GND/RX/TX） |
+| BOOT/EN | T1：BOOT/EN/3V3；IO0=`BOOT`←R1 10k↑3V3；EN←R3 10k↑3V3 |
+| 60G 雷达 ×1 | 见下节（网名 `Radar-RX` / `Radar-TX` / `Radar-OUT`） |
+| 摄像头 / 电机 | **已移除** |
 
-### 摄像头供电风险（2026-07-22）
+## 60G 雷达 ×1（MS60-1211S80M）— 实时网表 + 手册核对
 
-- U6-4=`CAM_2V8`（U7 XC6206-2.8V），U6-10=`CAM_1V2`（U8 XC6206-1.2V），U6-11=`3V3`。
-- OV5640 规格：VDD-A=2.6–3.0V；VDD-D=1.425–1.575V（典型 1.5V）；VDD-IO=1.71–3.0V。
-- 因此 U6-10 的 **1.2V 低于 VDD-D 下限**，U6-11 的 **3.3V 高于 VDD-IO 工作上限**；这是摄像头无法初始化/拍照的主要硬件风险。原理图修订应由用户手动完成，并先按所购模组引脚表再次确认。
-- U6 连接器为 0.5mm/24P **下接触**翻盖座；排线裸金手指必须朝 PCB/连接器下触点方向，并锁紧翻盖。
+模组手册脚序（自上而下）：**左** OUT/GND/VCC，**右** TX/GND/RX。供电 3.0~5.5V / ~80mA；官方飞线板默认 **3.3V**。座子 U6/U7=`2005WV-3P`（C6837594）。原理图上 U6 在左（x≈945）、U7 在右（x≈985，旋转 180°）。
+
+### 当前网表（不可 1:1 插模组）
+
+| 座（示意位置） | 脚 | 当前网络 | 对端 |
+|---|---|---|---|
+| **U6**（左） | 1 | `Radar-RX` | U1 **IO9** |
+| **U6** | 2 | GND | GND |
+| **U6** | 3 | `Radar-TX` | U1 **IO10** |
+| **U7**（右） | 1 | **3V3** | 3V3 |
+| **U7** | 2 | GND | GND |
+| **U7** | 3 | `Radar-OUT` | XL9555 **IO0_0** |
+
+**严重：** 左座应接 OUT/GND/VCC，现却是 UART；右座应接 TX/GND/RX，现却是 3V3/GND/OUT。1:1 对接会把模组 OUT 接到电源、把 UART 接到左座。VCC 已从 5V 改为 3V3（供电更合理），但左右功能对调仍未修。
+
+### 应改成（与手册一致，供用户手改）
+
+| 座 | 脚 | 网络 | 对端 |
+|---|---|---|---|
+| **U6**（左） | 1 | `Radar-OUT` | XL9555 **IO0_0** |
+| **U6** | 2 | GND | GND |
+| **U6** | 3 | `3V3`（或带开关的 `RADAR_VCC`） | 电源 |
+| **U7**（右） | 1 | `Radar-RX` | U1 **IO9**（←模组 TX） |
+| **U7** | 2 | GND | GND |
+| **U7** | 3 | `Radar-TX` | U1 **IO10**（→模组 RX） |
+
+去耦/通断（建议）：电源脚旁 **100nF+10µF**；可选 `5V`→SGM2551→`RADAR_VCC`，EN←XL9555 **IO0_1**（现 NC）。无开关时固件总开关只停采集、不断电。
+
+固件（已实机验证协议）：UART1 **115200 8N1**，RX=IO9 / TX=IO10，OUT→XL **IO0_0**（`begin` 将 port0 配成 `0x9F`，bit0=输入）。改脚后固件引脚映射无需改。
 
 ## XL9555（U13）
 
 | 脚 | 网络 |
 |---|---|
-| IO0_0..3 | ENC3_A/B，ENC4_A/B |
-| IO0_4 | CAM_PWDN（高=掉电） |
-| IO0_5 | STBY（U19/U22 共接） |
-| IO0_6 | OE#（U16/U23 共接） |
-| IO1_0..5 | T_CS，LCD_LED，LCD_DC，LCD_RST，LCD_CS，T_IRQ |
+| IO0_0 | `Radar-OUT` |
+| IO0_1..5、IO0_7、IO1_0..5、IO1_7 | NC |
+| IO0_6 | `IO0_6` → U16 OE#（R23 10k↑3V3） |
 | IO1_6 | SPK_SD |
 
-## 60G 雷达 MS60-1211S80M（临时飞线）
+## 舵机 / 探照灯（仅 U16 @ 0x40）
 
-| 雷达 | 本板 |
-|---|---|
-| VCC / GND | 舵机座电源（3.0~5.5V） |
-| GPIO-OUT | ENC3_A（XL9555 IO0_0） |
-| TX / RX | ENC1_A=IO9（ESP RX）/ ENC1_B=IO10（ESP TX） |
+- 舵机：**仅 T3/T4** → `SERVO_1`/`SERVO_2` → U16 **LED11/LED12**（T5–T7、LED13–15 已无）
+- 探照灯：U16 LED0=`LED_ALL`，LED1=`LED_1`，LED2=`LED_2`
+  - Q3：G=`LED_ALL`，S=GND，D=`LED_GND`（总地开关）
+  - Q2：G=`LED_1`，S=`LED_GND`；Q1：G=`LED_2`，S=`LED_GND`
+  - 灯座：U12/U14=`KF350-3.5-2P`（5V + 各通道漏极）
+- U16 LED3–10、LED13–15：NC
 
-- 串口协议待厂商文档确认：现有 AIR Touch AT6010 HCI 文档定义 **921600 8N1**、CI 帧头
-  `0x58/0x59`、主动上报 `0x5A`，但 MS60 手册只引用觅感专用指令文档，不能视为同一协议
-- 固件：`/api/radar`、`/api/radar/live`、页面 `/radar`（FW ≥ 2.2.0）；占用 ENC1 时 ENC1 计数禁用
+## U1 Strapping
 
-## 舵机 / 电机 / 探照灯（U16/U23）
-
-- 舵机 T3–T7：`SERVO_1`…`SERVO_5` → U16 **LED11–15**
-- U19 TB6612：MOT1/MOT2；PWMA/PWMB→3V3；STBY→IO0_5  
-  - MOT1：AIN1=`MOTOR1_2`→U23 **LED14**，AIN2=`MOTOR1_1`→**LED15**  
-  - MOT2：BIN1=`MOTOR2_1`→**LED13**，BIN2=`MOTOR2_2`→**LED12**
-- U22 TB6612：MOT3/MOT4  
-  - MOT3：AIN1=`MOTOR3_2`→**LED10**，AIN2=`MOTOR3_1`→**LED11**  
-  - MOT4：BIN1=`MOTOR4_1`→**LED9**，BIN2=`MOTOR4_2`→**LED8**
-- 探照灯：U23 LED0=`LED_1`，LED1=`LED_2`，LED2=`LED_ALL`
-
-固件电机 API：`id 0..3` = MOT1..MOT4。
+| GPIO | 网络 | 保障 |
+|---|---|---|
+| IO0 | BOOT | R1 10k → 3V3 |
+| IO3 | IO3 | R7 10k → GND |
+| IO45 | IO45 | R15 10k → GND（保 VDD_SPI=3.3V） |
+| IO46 | IO46 | R9 10k → GND |
 
 ## 固件约定（`firmware/`，ESP-IDF FW ≥ 2.2.0）
 
 - 构建：`cd firmware && idf.py set-target esp32s3 && idf.py build`（需 ESP-IDF ≥ 5.3）
-- 上电：OE# 高、STBY 低、CAM_PWDN 高、LCD/T_CS 高、功放关；LCD 启动时初始化并开背光
-- `/api/camera?on=1` 上电摄像头；`/api/camera/capture` JPEG；`/stream` MJPEG
-- `/api/lcd` 控 ST7796；`/api/touch` 读 XPT2046
-- `/api/led?id=0..2` 控探照灯；须先 `/api/pwm?on=1`
-- `/api/ota`：GET 分区信息；POST raw `.bin`（`application/octet-stream`）Web 烧录，成功后重启（FW ≥ 2.1.0，双 OTA 分区）
+- 探照灯现挂 **U16 0x40** LED0–2（勿再写 U23 0x41）；`LED_ALL` 为 Q3 总开关
+- 舵机仅通道 LED11/12（SERVO_1/2）
+- `/api/servo` / `/api/led` 须先 `/api/pwm?on=1`
+- `/api/ota`：GET 分区信息；POST raw `.bin` Web 烧录
+- `/api/lcd` `/api/touch`：硬件已删，勿当作本板可用
+- camera / motor / encoder：硬件已删；radar 按上表 IO9/IO10 + XL IO0_0
