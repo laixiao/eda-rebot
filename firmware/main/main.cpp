@@ -1201,7 +1201,8 @@ static bool registerUri(httpd_handle_t s, const char *path, httpd_method_t metho
 static void setupHttp() {
   httpRegistrationOk = true;
   httpd_config_t config = HTTPD_DEFAULT_CONFIG();
-  config.max_uri_handlers = 56;
+  // Explicit GET/POST/OPTIONS routes currently need 56 slots; keep headroom for new APIs.
+  config.max_uri_handlers = 72;
   config.stack_size = 10240;
   config.uri_match_fn = httpd_uri_match_wildcard;
   config.recv_wait_timeout = 120;

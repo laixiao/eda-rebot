@@ -13,13 +13,13 @@ idf.py -p /dev/ttyUSB0 -b 115200 flash
 ======= Window 烧录========
 cd firmware
 
-& 'C:\Espressif\tools\Microsoft.v5.5.4.PowerShell_profile.ps1'
+& 'C:\Espressif\tools\Microsoft.v5.5.5.PowerShell_profile.ps1'
 
-idf.py -p COM6 monitor --no-reset
+idf.py -p COM3 monitor --no-reset
 
 idf.py build
 
-idf.py -p COM6 -b 115200 flash
+idf.py -p COM3 -b 115200 flash
 
 
 

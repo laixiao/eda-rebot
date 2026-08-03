@@ -1,16 +1,16 @@
 ---
-description: 本板电路事实（以 EasyEDA Bridge 实时网表为准，2026-07-22 复查）
+description: 本板电路事实（以 EasyEDA Bridge 实时网表为准，2026-08-02 摄像头复查）
 alwaysApply: true
 ---
 
-# 本板电路事实（2026-07-22 Bridge 实时网表）
+# 本板电路事实（Bridge 实时网表）
 
 当前活动工程：`AI通用机器人_v5` / Board `V1.0.0` / 原理图 `EDA-Robot` / 图页 UUID `1d774ca900623155`。  
 **审查以实时网表为准。**
 
-## 规模（2026-07-22）
+## 规模（2026-08-02）
 
-- **102** 个位号器件、**90** 条网络；原理图 DRC 汇总为 **2 条 warning**（API 不返回逐条详情）
+- **105** 个位号器件、**92** 条网络
 - U1 **IO35/36/37** 无外设网络（Octal PSRAM，禁止使用）
 
 ## 电源树
@@ -35,24 +35,30 @@ U1：IO12=SDA，IO13=SCL。
 | 麦克风 INMP441 U2 | SCK=IO16，WS=IO17，SD=IO18 |
 | 功放 MAX98357 U3 | LRC=IO38，BCLK=IO39，DIN=IO40；SD=`SPK_SD`→XL9555 IO1_6 |
 | ENC1/ENC2 | IO9/IO10，IO21/IO47 |
-| 摄像头 U6 OV5640 FPC | DC-5M21-5640 系列 24Pin；XCLK=IO15，PCLK=IO1，VSYNC=IO6，HREF=IO7，SDA=IO4，SCL=IO5，D0..D7=IO11/14/8/20/41/42/48/19；PWDN→XL9555 IO0_4；RESET 接 EN（固件 `pin_reset=-1`） |
+| 摄像头 U6 OV5640 FPC | DC-5M21-5640-B 24Pin；见下方「摄像头」专节 |
 | SPI 显示 U4 | SCK=IO45，MOSI=IO46，MISO=IO3；CS/DC/RST/LED/T_CS/T_IRQ→XL9555 |
 
-### 摄像头供电风险（2026-07-22）
+### 摄像头（2026-08-02 实时网表，旧 1.2V/3V3 供电问题已改）
 
-- U6-4=`CAM_2V8`（U7 XC6206-2.8V），U6-10=`CAM_1V2`（U8 XC6206-1.2V），U6-11=`3V3`。
-- OV5640 规格：VDD-A=2.6–3.0V；VDD-D=1.425–1.575V（典型 1.5V）；VDD-IO=1.71–3.0V。
-- 因此 U6-10 的 **1.2V 低于 VDD-D 下限**，U6-11 的 **3.3V 高于 VDD-IO 工作上限**；这是摄像头无法初始化/拍照的主要硬件风险。原理图修订应由用户手动完成，并先按所购模组引脚表再次确认。
-- U6 连接器为 0.5mm/24P **下接触**翻盖座；排线裸金手指必须朝 PCB/连接器下触点方向，并锁紧翻盖。
+- 连接器：U6 = `HX 0.5-24PIN XGXJ-H2.0`（C19269981），0.5mm/24P 下接触翻盖座
+- 供电：U7 XC6206-2.8NR → `CAM_2V8`（U6.14/21）；U8 XC6206-**1.5NR** → `CAM_1V5`（U6.15）；U6 **无 3V3**
+- 去耦：`CAM_2V8`=C4 100n + C7 22u；`CAM_1V5`=C16 100n + C8 22u
+- SCCB：SDA=IO4、SCL=IO5；R15/R16 4.7k 上拉到 `CAM_2V8`
+- 控制：PWDN→XL9555 IO0_4（R22 10k→2.8V）；RST→XL9555 **IO0_7**（R21 10k→2.8V）；均为开漏拉低释放
+- XCLK：IO15=`CAM_XCLK_3V3` → R28 1k / R29 4.7k 分压 ≈2.72V → `CAM_XCLK`→U6.12
+- 数据：PCLK=IO1，VSYNC=IO6，HREF=IO7；D0..D7=IO11/14/8/20/41/42/48/19
+- U6 脚位：1/2/24=NC；3..9/11..13=D2/D1/D3/D0/D4/PCLK/D5/D6/XCLK/D7；10/23=GND；14/21=2V8；15=1V5；16=HREF；17=PWDN；18=VSYNC；19=RST；20=SCL；22=SDA
+- 装配：排线裸金手指朝 PCB/下触点，锁紧翻盖
 
 ## XL9555（U13）
 
 | 脚 | 网络 |
 |---|---|
 | IO0_0..3 | ENC3_A/B，ENC4_A/B |
-| IO0_4 | CAM_PWDN（高=掉电） |
-| IO0_5 | STBY（U19/U22 共接） |
-| IO0_6 | OE#（U16/U23 共接） |
+| IO0_4 | CAM_PWDN（高阻=掉电，靠 R22→2.8V） |
+| IO0_5 | 网名 `IO0_5`→U19/U22 STBY（R24 10k↓GND，默认待机） |
+| IO0_6 | 网名 `IO0_6`→U16/U23 OE#（R23 10k↑3V3，默认禁 PWM） |
+| IO0_7 | CAM_RST（高阻=释放，靠 R21→2.8V） |
 | IO1_0..5 | T_CS，LCD_LED，LCD_DC，LCD_RST，LCD_CS，T_IRQ |
 | IO1_6 | SPK_SD |
 
