@@ -39,7 +39,7 @@
 #include "esp_system.h"
 
 static const char *TAG = "eda_robot";
-static const char *FW_VERSION = "2.2.8";
+static const char *FW_VERSION = "2.2.14";
 static const int64_t MOTOR_FAILSAFE_US = 1500000;
 static volatile bool otaBusy = false;
 static volatile bool shutdownPending = false;
@@ -814,31 +814,59 @@ static esp_err_t handleOled(httpd_req_t *req) {
 
 static esp_err_t handleCamera(httpd_req_t *req) {
   auto a = loadArgs(req);
+  bool pwdnH = true, rstH = true;
+  const bool haveLvl = cameraCtrlLevels(xl, pwdnH, rstH);
   if (req->method == HTTP_GET) {
-    char b[160];
+    char b[240];
     snprintf(b, sizeof(b),
-             "{\"ok\":true,\"camera\":%s,\"capture\":\"/api/camera/capture\",\"stream\":\"/stream\"}",
-             cameraOk() ? "true" : "false");
+             "{\"ok\":true,\"camera\":%s,\"pwdn_high\":%s,\"rst_high\":%s,\"levels_ok\":%s,"
+             "\"capture\":\"/api/camera/capture\",\"stream\":\"/stream\","
+             "\"hint\":\"after failed on, PWDN should stay LOW until on=0\"}",
+             cameraOk() ? "true" : "false",
+             haveLvl ? (pwdnH ? "true" : "false") : "null",
+             haveLvl ? (rstH ? "true" : "false") : "null",
+             haveLvl ? "true" : "false");
     return sendJson(req, 200, b);
   }
   bool on = argBool(a, "on", true);
+  const bool holdOnly = argBool(a, "hold", false);
   if (!on && streamSlot && uxSemaphoreGetCount(streamSlot) == 0)
     return sendJson(req, 409, "{\"ok\":false,\"error\":\"stop the active stream before powering camera off\"}");
   if (!cameraMutex || xSemaphoreTake(cameraMutex, pdMS_TO_TICKS(1000)) != pdTRUE)
     return sendJson(req, 503, "{\"ok\":false,\"error\":\"camera busy\"}");
-  bool ok = true;
   if (on) {
-    ok = cameraBegin(xl);
+    bool ok = holdOnly ? cameraHoldPower(xl) : cameraBegin(xl);
+    cameraCtrlLevels(xl, pwdnH, rstH);
+    uint8_t in = 0, out = 0, cfg = 0;
+    const bool dump = xl.dumpPort0(in, out, cfg);
     xSemaphoreGive(cameraMutex);
-    if (!ok)
-      return sendJson(req, 500,
-                      "{\"ok\":false,\"error\":\"camera init failed\",\"hint\":\"SCCB no ACK on IO4/IO5 — "
-                      "check OV5640 FPC, CAM_1V5≈1.5V, CAM_2V8≈2.8V, PWDN/RST (XL IO0_4/IO0_7)\"}");
-    return sendJson(req, 200, "{\"ok\":true,\"camera\":true}");
+    char b[420];
+    if (!ok) {
+      snprintf(b, sizeof(b),
+               "{\"ok\":false,\"error\":\"%s\",\"pwdn_high\":%s,\"rst_high\":%s,"
+               "\"p0_in\":%u,\"p0_out\":%u,\"p0_cfg\":%u,\"dump_ok\":%s,"
+               "\"hint\":\"Do NOT use ohm mode. Measure VOLTAGE U6.17 to GND; expect ~0V while held. "
+               "11.6kΩ is R22 and always looks similar.\"}",
+               holdOnly ? "camera hold power failed (XL cannot pull PWDN low?)" : "camera init failed",
+               pwdnH ? "true" : "false", rstH ? "true" : "false", (unsigned)in, (unsigned)out,
+               (unsigned)cfg, dump ? "true" : "false");
+      return sendJson(req, 500, b);
+    }
+    snprintf(b, sizeof(b),
+             "{\"ok\":true,\"camera\":%s,\"hold\":%s,\"pwdn_high\":%s,\"rst_high\":%s,"
+             "\"p0_in\":%u,\"p0_out\":%u,\"p0_cfg\":%u}",
+             cameraOk() ? "true" : "false", holdOnly ? "true" : "false", pwdnH ? "true" : "false",
+             rstH ? "true" : "false", (unsigned)in, (unsigned)out, (unsigned)cfg);
+    return sendJson(req, 200, b);
   }
   cameraEnd(xl);
+  cameraCtrlLevels(xl, pwdnH, rstH);
   xSemaphoreGive(cameraMutex);
-  return sendJson(req, 200, "{\"ok\":true,\"camera\":false}");
+  char b[160];
+  snprintf(b, sizeof(b),
+           "{\"ok\":true,\"camera\":false,\"pwdn_high\":%s,\"rst_high\":%s}",
+           pwdnH ? "true" : "false", rstH ? "true" : "false");
+  return sendJson(req, 200, b);
 }
 
 static esp_err_t handleCameraCapture(httpd_req_t *req) {

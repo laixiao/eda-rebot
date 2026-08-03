@@ -13,6 +13,8 @@ class XL9555 {
   bool writePort(uint8_t port, uint8_t value);
   bool readPort(uint8_t port, uint8_t &value);
   bool writeConfig(uint8_t port, uint8_t config);
+  /** 读回 port0：in/out/cfg 三寄存器（排查 PWDN 驱动） */
+  bool dumpPort0(uint8_t &in, uint8_t &out, uint8_t &cfg);
   bool setPin(uint8_t pin, bool level);
   bool getPin(uint8_t pin, bool &level);
   // 开漏：输出低 / 改输入高阻（靠外部上拉到 2.8V）；禁止对摄像头脚输出高

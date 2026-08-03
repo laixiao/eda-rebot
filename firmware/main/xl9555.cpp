@@ -102,11 +102,18 @@ bool XL9555::driveLow(uint8_t pin) {
   xSemaphoreTake(mutex_, portMAX_DELAY);
   out_[port] &= ~(1u << bit);
   cfg_[port] &= ~(1u << bit); // output
-  bool ok = writePortUnlocked(port, out_[port]);
+  // 先改方向再写输出，并回读确认（避免仅改 latch、脚仍为输入）
+  bool ok = writeConfigUnlocked(port, cfg_[port]);
+  if (ok) ok = writePortUnlocked(port, out_[port]);
   if (ok) ok = writeConfigUnlocked(port, cfg_[port]);
+  if (ok) ok = writePortUnlocked(port, out_[port]);
+  uint8_t cfgRb = 0xFF, outRb = 0xFF, inRb = 0xFF;
+  if (ok) ok = readReg(0x06 + port, cfgRb);
+  if (ok) ok = readReg(0x02 + port, outRb);
+  if (ok) ok = readReg(0x00 + port, inRb);
   ok_ = ok;
   xSemaphoreGive(mutex_);
-  return ok;
+  return ok && ((cfgRb & (1u << bit)) == 0) && ((outRb & (1u << bit)) == 0);
 }
 
 bool XL9555::releasePin(uint8_t pin) {
@@ -129,4 +136,15 @@ bool XL9555::getPin(uint8_t pin, bool &level) {
   if (!readPort(port, v)) return false;
   level = (v >> bit) & 1;
   return true;
+}
+
+bool XL9555::dumpPort0(uint8_t &in, uint8_t &out, uint8_t &cfg) {
+  if (!mutex_) return false;
+  xSemaphoreTake(mutex_, portMAX_DELAY);
+  bool ok = readReg(0x00, in);
+  if (ok) ok = readReg(0x02, out);
+  if (ok) ok = readReg(0x06, cfg);
+  ok_ = ok;
+  xSemaphoreGive(mutex_);
+  return ok;
 }
