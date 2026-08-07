@@ -13,21 +13,16 @@ class XL9555 {
   bool writePort(uint8_t port, uint8_t value);
   bool readPort(uint8_t port, uint8_t &value);
   bool writeConfig(uint8_t port, uint8_t config);
-  /** 读回 port0：in/out/cfg 三寄存器（排查 PWDN 驱动） */
-  bool dumpPort0(uint8_t &in, uint8_t &out, uint8_t &cfg);
   bool setPin(uint8_t pin, bool level);
   bool getPin(uint8_t pin, bool &level);
-  // 开漏：输出低 / 改输入高阻（靠外部上拉到 2.8V）；禁止对摄像头脚输出高
-  bool driveLow(uint8_t pin);
-  bool releasePin(uint8_t pin);
   bool applySafeDefaults();
 
  private:
   i2c_master_dev_handle_t dev_ = nullptr;
   uint8_t addr_ = 0;
   bool ok_ = false;
-  uint8_t out_[2] = {0x40, 0x00};
-  uint8_t cfg_[2] = {0xFF, 0xFF}; // 1=input, 0=output
+  uint8_t out_[2] = {0x42, 0x00}; // OE 高 + 雷达电源脚高（关）
+  uint8_t cfg_[2] = {0xBD, 0xBF};
   SemaphoreHandle_t mutex_ = nullptr;
 
   bool writeReg(uint8_t reg, uint8_t val);

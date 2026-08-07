@@ -1,52 +1,46 @@
-# EDA Robot Firmware (ESP-IDF)
+# EDA Robot Firmware (ESP-IDF) — v6-1
 
-ESP32-S3-WROOM-1-N16R8 局域网调试固件，原生 **ESP-IDF v5.5** 工程。
+ESP32-S3-WROOM-1-N16R8 局域网调试固件，对应原理图 **AI通用机器人_v6-1**。
 
 ## 构建
 
-**烧录/OTA 前必须有 `main/wifi_config.h`**（真实 SSID/密码）。缺文件时编译直接失败，不会再用 example 的 `your-ssid`。
+**烧录/OTA 前必须有 `main/wifi_config.h`**（真实 SSID/密码）。
 
 ```bash
 cp main/wifi_config.example.h main/wifi_config.h   # 仅首次
 # 编辑 WIFI_SSID / WIFI_PASS
-. $IDF_PATH/export.sh
 cd firmware
 idf.py set-target esp32s3
 idf.py build
-# 烧录前确认：strings build/eda_robot.bin | grep your-ssid 应无输出
-idf.py -p /dev/ttyUSB0 flash monitor
+idf.py -p COMx flash monitor
 ```
 
-## 目录
+## 本板能力（FW 3.0.0）
 
-| 路径 | 说明 |
-|---|---|
-| `main/` | 应用与驱动，FW **2.2.8**（含 Web OTA、雷达采集总开关、急停、深度睡眠关机） |
-| `clients/` | Python 调试客户端 |
+| 模块 | 说明 | API |
+|---|---|---|
+| I2C | XL9555 `0x20`、OLED `0x3C`、PCA9685 `0x40` | `/api/status` |
+| 舵机 T3/T4 | U16 LED11/12；先 `/api/pwm?on=1` | `/api/servo` |
+| 探照灯 | U16 LED1/2/0 → MOSFET；LED_ALL 为公共地 | `/api/led` |
+| 雷达 MS60 | UART IO9/10；供电 XL IO0_1；OUT→IO0_0 | `/api/radar` `power`/`on` |
+| 麦/功放 | I2S；功放 SD→XL IO1_6 | `/api/mic` `/api/amp` `/api/beep` |
+| OLED | | `/api/oled` |
+| OTA | 双分区 | `/api/ota` |
 
-浏览器打开板子 IP，或 `GET /api`。
+未焊接的 I2C 设备会在状态里显示失败，其余功能仍可测。
 
-调试页的“紧急停止”仅关闭执行器输出；“关机”会先急停、关闭外设和 Wi-Fi，再进入深度睡眠。板上没有 MCU 可控的主电源锁存，因此不会切断电池，需断电重上电或按 EN 复位恢复。
+已移除（v5）：摄像头、SPI 屏、电机、编码器、第二路 PCA9685。
 
-## Web 烧录 (OTA)
+## 雷达
 
-首次仍需串口刷入（会写入双 OTA 分区表）。之后可在调试页 **Web 烧录** 上传 `build/eda_robot.bin`，或：
+1. `POST /api/radar {"power":true}` — 打开 Q4 供电  
+2. `POST /api/radar {"on":true}` — 开始采集  
+3. 浏览器 `/radar` 或 `GET /api/radar/live`
+
+## Web 烧录
 
 ```bash
 curl -X POST --data-binary @build/eda_robot.bin \
   -H 'Content-Type: application/octet-stream' \
   http://<板子IP>/api/ota
 ```
-
-`GET /api/ota` 查看当前/下一分区。成功后自动重启。
-
-## MS60-1211S80M 雷达验证
-
-临时接线及资料位于 `../docs/MS60-1211S80M/`。实机已验证雷达使用 115200 8N1、正常极性，雷达 TX→IO9、RX→IO10。固件启动后固定使用该配置，并每 200ms 自动发送一次只读 `0x30` 检测查询；`/radar` 页面无需配置，关闭浏览器也会持续采集。主页面的“雷达采集”总开关可通过 `POST /api/radar {"on":false|true}` 暂停/恢复查询与解析，但不会切断雷达 VCC，UART 和 ENC1 引脚占用保持不变。
-
-```bash
-python clients/robot_api.py 192.168.3.215
-curl http://192.168.3.215/api/radar/live
-```
-
-`protocol=at6010_ci_0x30_validated` 表示 `0x59/0x30` 传输、校验以及单目标距离/角度已经过实机验证。TYPE=5 多目标仍待完整验收，`slot` 只是帧内序号，不是稳定目标 ID。诊断时可展开页面底部信息，检查 `rxBytes`、`frames59`、`frames5A`、`crcErr`、`malformedFrames`、`discardedBytes` 和 `droppedBytes`。

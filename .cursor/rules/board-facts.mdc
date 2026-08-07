@@ -1,97 +1,100 @@
 ---
-description: 本板电路事实（以 EasyEDA Bridge 实时网表为准，2026-08-02 摄像头复查）
+description: 本板电路事实（以 EasyEDA Bridge 实时网表为准，2026-08-03 v6-1 复查）
 alwaysApply: true
 ---
 
 # 本板电路事实（Bridge 实时网表）
 
-当前活动工程：`AI通用机器人_v5` / Board `V1.0.0` / 原理图 `EDA-Robot` / 图页 UUID `1d774ca900623155`。  
-**审查以实时网表为准。**
+当前活动工程：`AI通用机器人_v6-1` / Board `V1.0.0` / 原理图 `EDA-Robot` / 图页 UUID `1d774ca900623155`。  
+**审查以实时网表为准。**（相对 v5：已移除摄像头/SPI 屏/电机/编码器/第二路 PCA9685；雷达改为板载座；探照灯改 MOSFET 驱动。）
 
-## 规模（2026-08-02）
+## 规模（2026-08-03）
 
-- **105** 个位号器件、**92** 条网络
+- **73** 个位号器件、**56** 条网络
 - U1 **IO35/36/37** 无外设网络（Octal PSRAM，禁止使用）
+- 原理图 DRC：**2** 条 warn（API 无逐条详情）
 
 ## 电源树
 
-电池(U9) → VIN → Q5 高边开关 → VBAT → D1 → 8V → U11 → **5V** → U5 LD1117 → **3V3**（统一网名 `3V3`）
+电池(U9) → VIN → Q5 AO4407C 高边（SW1 控制）→ VBAT → D1 SS56 → **8V** → U11 TMI3255 → **5V** → U5 LD1117 → **3V3**（单一网名 `3V3`，无 `3.3V`）
+
+- 8V 额外用途：白光负载 U12/U14、舵机座不走 8V（舵机 T3/T4 为 5V）、T5 测点含 8V/3V3/GND
 
 ## I2C（OLED_SDA / OLED_SCL）
 
 | 设备 | 地址 | 说明 |
 |---|---|---|
-| XL9555 U13 | 0x20 | A0/A1/A2=GND；INT#→U1 IO2 |
+| XL9555 U13 | 0x20 | A0/A1/A2=GND；INT#→U1 IO2（R4↑3V3） |
 | OLED U10 | 0x3C | |
-| PCA9685 U16 | 0x40 | A0..A5=GND；舵机 |
-| PCA9685 U23 | 0x41 | A0=3V3；电机方向 + 探照灯 |
+| PCA9685 U16 | 0x40 | A0..A5=GND；舵机 + 探照灯 PWM |
 
-U1：IO12=SDA，IO13=SCL。
+U1：IO12=SDA，IO13=SCL；R11/R12 4.7k↑3V3。  
+**已无 U23。**
 
 ## ESP32 外设（U1）
 
 | 功能 | 连接 |
 |---|---|
-| 麦克风 INMP441 U2 | SCK=IO16，WS=IO17，SD=IO18 |
-| 功放 MAX98357 U3 | LRC=IO38，BCLK=IO39，DIN=IO40；SD=`SPK_SD`→XL9555 IO1_6 |
-| ENC1/ENC2 | IO9/IO10，IO21/IO47 |
-| 摄像头 U6 OV5640 FPC | DC-5M21-5640-B 24Pin；见下方「摄像头」专节 |
-| SPI 显示 U4 | SCK=IO45，MOSI=IO46，MISO=IO3；CS/DC/RST/LED/T_CS/T_IRQ→XL9555 |
+| 麦克风 INMP441 U2 | SCK=IO16，WS=IO17，SD=IO18；L/R→MIC_LR→R2↓GND |
+| 功放 MAX98357 U3 | LRC=IO38，BCLK=IO39，DIN=IO40；GAIN→R8↓GND；SD=`SPK_SD`→XL9555 IO1_6 + R10↑3V3；VIN=5V |
+| 60G 雷达 UART | IO9=`Radar-RX`，IO10=`Radar-TX` → U6 3P 座 |
+| GPIO 扩展排针 U4 | IO4/5/6/7/41/42 |
+| 下载 | T1=BOOT/EN/3V3；T2=GND/RX/TX（UART0） |
 
-### 摄像头（2026-08-02 实时网表，旧 1.2V/3V3 供电问题已改）
+U1 当前 NC：IO1/8/11/14/15/19/20/21/35/36/37/47/48。
 
-- 连接器：U6 = `HX 0.5-24PIN XGXJ-H2.0`（C19269981），0.5mm/24P 下接触翻盖座
-- 供电：U7 XC6206-2.8NR → `CAM_2V8`（U6.14/21）；U8 XC6206-**1.5NR** → `CAM_1V5`（U6.15）；U6 **无 3V3**
-- 去耦：`CAM_2V8`=C4 100n + C7 22u；`CAM_1V5`=C16 100n + C8 22u
-- SCCB：SDA=IO4、SCL=IO5；R15/R16 4.7k 上拉到 `CAM_2V8`
-- 控制：PWDN→XL9555 IO0_4（R22 10k→2.8V）；RST→XL9555 **IO0_7**（R21 10k→2.8V）；均为开漏拉低释放
-- XCLK：IO15=`CAM_XCLK_3V3` → R28 1k / R29 4.7k 分压 ≈2.72V → `CAM_XCLK`→U6.12
-- 数据：PCLK=IO1，VSYNC=IO6，HREF=IO7；D0..D7=IO11/14/8/20/41/42/48/19
-- U6 脚位：1/2/24=NC；3..9/11..13=D2/D1/D3/D0/D4/PCLK/D5/D6/XCLK/D7；10/23=GND；14/21=2V8；15=1V5；16=HREF；17=PWDN；18=VSYNC；19=RST；20=SCL；22=SDA
-- 装配：排线裸金手指朝 PCB/下触点，锁紧翻盖
+### Strapping
+
+| GPIO | 保障 |
+|---|---|
+| IO0 BOOT | R1 10k↑3V3 |
+| IO3 | R7 10k↓GND |
+| IO45 | R15 10k↓GND |
+| IO46 | R9 10k↓GND |
+
+## 雷达（板载座，非飞线）
+
+| 座 | 网络 |
+|---|---|
+| U6 3P | 1=`Radar-RX`→U1 IO9，2=GND，3=`Radar-TX`→U1 IO10 |
+| U7 3P | 1=`RADAR_VCC`，2=GND，3=`Radar-OUT`→XL9555 IO0_0 |
+
+- 供电：Q4 AO3401（P-MOS）S=3V3、D=`RADAR_VCC`、G=`IO0_1`；R16 10k↑3V3 → **默认关电**（需 XL 拉低 IO0_1 才供电）
+- 命名按 ESP 视角：模块 TX → `Radar-RX`，模块 RX → `Radar-TX`
 
 ## XL9555（U13）
 
 | 脚 | 网络 |
 |---|---|
-| IO0_0..3 | ENC3_A/B，ENC4_A/B |
-| IO0_4 | CAM_PWDN（高阻=掉电，靠 R22→2.8V） |
-| IO0_5 | 网名 `IO0_5`→U19/U22 STBY（R24 10k↓GND，默认待机） |
-| IO0_6 | 网名 `IO0_6`→U16/U23 OE#（R23 10k↑3V3，默认禁 PWM） |
-| IO0_7 | CAM_RST（高阻=释放，靠 R21→2.8V） |
-| IO1_0..5 | T_CS，LCD_LED，LCD_DC，LCD_RST，LCD_CS，T_IRQ |
+| IO0_0 | Radar-OUT |
+| IO0_1 | 雷达电源使能（拉低=开，经 Q4） |
+| IO0_2..4 | 扩展开关 → U8.1..3 |
+| IO0_5 | NC |
+| IO0_6 | U16 OE#（R23 10k↑3V3，默认禁 PWM） |
+| IO0_7 | NC |
+| IO1_0..5 / IO1_7 | NC |
 | IO1_6 | SPK_SD |
 
-## 60G 雷达 MS60-1211S80M（临时飞线）
+## 舵机 / 探照灯（仅 U16）
 
-| 雷达 | 本板 |
-|---|---|
-| VCC / GND | 舵机座电源（3.0~5.5V） |
-| GPIO-OUT | ENC3_A（XL9555 IO0_0） |
-| TX / RX | ENC1_A=IO9（ESP RX）/ ENC1_B=IO10（ESP TX） |
+- 舵机：T3=`SERVO_1`→U16 LED11；T4=`SERVO_2`→U16 LED12（座电源=5V）
+- 探照灯 PWM：LED0=`LED_ALL`，LED1=`LED_1`，LED2=`LED_2`，LED3..5→U8.4..6
+- 功率级（8V 白光）：
+  - U12 / Q1 / D3：`LED_2` 驱 AO3400，低边经 `LED_GND`
+  - U14 / Q2 / D2：`LED_1` 同上
+  - Q3：`LED_ALL` 控 `LED_GND`→GND（总开关）
+  - 门极 R13/R14/R19↓GND，默认关
+- 扩展座 U8：IO0_2/3/4 + LED_3/4/5
+- 机械件 M1=SG90 示意；SCREW1..4→GND，Convert to PCB=yes、Add into BOM=yes
 
-- 串口协议待厂商文档确认：现有 AIR Touch AT6010 HCI 文档定义 **921600 8N1**、CI 帧头
-  `0x58/0x59`、主动上报 `0x5A`，但 MS60 手册只引用觅感专用指令文档，不能视为同一协议
-- 固件：`/api/radar`、`/api/radar/live`、页面 `/radar`（FW ≥ 2.2.0）；占用 ENC1 时 ENC1 计数禁用
+## 相对 v5 已移除（固件若仍调用需停用或改适配）
 
-## 舵机 / 电机 / 探照灯（U16/U23）
+摄像头 OV5640、SPI ST7796/XPT2046、TB6612 电机、ENC1..4 编码器计数、PCA9685 U23、舵机 T5–T7。
 
-- 舵机 T3–T7：`SERVO_1`…`SERVO_5` → U16 **LED11–15**
-- U19 TB6612：MOT1/MOT2；PWMA/PWMB→3V3；STBY→IO0_5  
-  - MOT1：AIN1=`MOTOR1_2`→U23 **LED14**，AIN2=`MOTOR1_1`→**LED15**  
-  - MOT2：BIN1=`MOTOR2_1`→**LED13**，BIN2=`MOTOR2_2`→**LED12**
-- U22 TB6612：MOT3/MOT4  
-  - MOT3：AIN1=`MOTOR3_2`→**LED10**，AIN2=`MOTOR3_1`→**LED11**  
-  - MOT4：BIN1=`MOTOR4_1`→**LED9**，BIN2=`MOTOR4_2`→**LED8**
-- 探照灯：U23 LED0=`LED_1`，LED1=`LED_2`，LED2=`LED_ALL`
+## 固件约定（`firmware/` FW ≥ 3.0.0，对齐 v6-1）
 
-固件电机 API：`id 0..3` = MOT1..MOT4。
-
-## 固件约定（`firmware/`，ESP-IDF FW ≥ 2.2.0）
-
-- 构建：`cd firmware && idf.py set-target esp32s3 && idf.py build`（需 ESP-IDF ≥ 5.3）
-- 上电：OE# 高、STBY 低、CAM_PWDN 高、LCD/T_CS 高、功放关；LCD 启动时初始化并开背光
-- `/api/camera?on=1` 上电摄像头；`/api/camera/capture` JPEG；`/stream` MJPEG
-- `/api/lcd` 控 ST7796；`/api/touch` 读 XPT2046
-- `/api/led?id=0..2` 控探照灯；须先 `/api/pwm?on=1`
-- `/api/ota`：GET 分区信息；POST raw `.bin`（`application/octet-stream`）Web 烧录，成功后重启（FW ≥ 2.1.0，双 OTA 分区）
+- 构建：`cd firmware && idf.py set-target esp32s3 && idf.py build`
+- 上电：OE# 高、雷达 Q4 关、功放关；缺焊 I2C 器件不阻断启动
+- 雷达：`POST /api/radar {"power":true}` 再 `{"on":true}`；UART IO9/10
+- 舵机 id `0..1`；探照灯 id `0/1/2`=LED_1/2/ALL（1/2 需 ALL）
+- 已删：摄像头 / LCD / 电机 / 编码器 / U23 API

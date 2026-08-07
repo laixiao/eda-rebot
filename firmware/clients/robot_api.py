@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""局域网调用机器人头部板 REST API。用法: python robot_api.py 192.168.x.x"""
+"""局域网调用 v6-1 板 REST API。用法: python robot_api.py 192.168.x.x"""
 
 from __future__ import annotations
 
@@ -31,11 +31,7 @@ class RobotApi:
         req = urllib.request.Request(url, data=data, headers=headers, method=method.upper())
         try:
             with urllib.request.urlopen(req, timeout=self.timeout) as resp:
-                ctype = resp.headers.get("Content-Type", "")
-                raw = resp.read()
-                if "image/" in ctype:
-                    return {"ok": True, "content_type": ctype, "bytes": len(raw)}
-                return json.loads(raw.decode("utf-8"))
+                return json.loads(resp.read().decode("utf-8"))
         except urllib.error.HTTPError as e:
             body = e.read().decode("utf-8", errors="replace")
             try:
@@ -53,14 +49,10 @@ class RobotApi:
         return self._call("/api/estop", method="POST")
 
     def shutdown(self) -> dict:
-        """Enter deep sleep after stopping actuators; wake by power cycle or reset."""
         return self._call("/api/shutdown", method="POST")
 
     def pwm(self, on: bool = True) -> dict:
         return self._call("/api/pwm", {"on": on}, method="POST")
-
-    def stby(self, on: bool = True) -> dict:
-        return self._call("/api/stby", {"on": on}, method="POST")
 
     def amp(self, on: bool = True) -> dict:
         return self._call("/api/amp", {"on": on}, method="POST")
@@ -71,16 +63,9 @@ class RobotApi:
     def servos(self, angles: list[int]) -> dict:
         return self._call("/api/servos", {"angles": angles}, method="POST")
 
-    def motor(self, motor_id: int, direction: int, duty: int = 40) -> dict:
-        return self._call(
-            "/api/motor", {"id": motor_id, "dir": direction, "duty": duty}, method="POST"
-        )
-
-    def motor_stop_all(self) -> dict:
-        return self._call("/api/motor/stop_all", method="POST")
-
-    def encoders(self) -> dict:
-        return self._call("/api/encoders")
+    def led(self, led_id: int, duty: int = 100) -> dict:
+        """id 0=LED_1, 1=LED_2, 2=LED_ALL（点亮 1/2 时需同时开 LED_ALL）"""
+        return self._call("/api/led", {"id": led_id, "duty": duty}, method="POST")
 
     def mic(self) -> dict:
         return self._call("/api/mic")
@@ -91,66 +76,19 @@ class RobotApi:
     def oled(self, text: str = "", cmd: str = "text") -> dict:
         return self._call("/api/oled", {"cmd": cmd, "text": text}, method="POST")
 
-    def led(self, led_id: int, duty: int = 100) -> dict:
-        return self._call("/api/led", {"id": led_id, "duty": duty}, method="POST")
-
-    def camera(self, on: bool | None = None) -> dict:
-        if on is None:
-            return self._call("/api/camera")
-        return self._call("/api/camera", {"on": on}, method="POST")
-
-    def camera_capture(self) -> dict:
-        return self._call("/api/camera/capture")
-
-    def lcd(
-        self,
-        cmd: str = "status",
-        color: str | None = None,
-        text: str | None = None,
-        x: int | None = None,
-        y: int | None = None,
-        scale: int | None = None,
-        bg: str | None = None,
-        clear: bool | None = None,
-        w: int | None = None,
-        h: int | None = None,
-    ) -> dict:
-        params: dict[str, Any] = {"cmd": cmd}
-        if color is not None:
-            params["color"] = color
-        if text is not None:
-            params["text"] = text
-        if x is not None:
-            params["x"] = x
-        if y is not None:
-            params["y"] = y
-        if scale is not None:
-            params["scale"] = scale
-        if bg is not None:
-            params["bg"] = bg
-        if clear is not None:
-            params["clear"] = clear
-        if w is not None:
-            params["w"] = w
-        if h is not None:
-            params["h"] = h
-        return self._call("/api/lcd", params, method="POST")
-
-    def touch(self) -> dict:
-        return self._call("/api/touch")
-
     def radar(self, live: bool = False) -> dict:
         return self._call("/api/radar/live" if live else "/api/radar")
 
+    def radar_power(self, on: bool = True) -> dict:
+        return self._call("/api/radar", {"power": on}, method="POST")
+
     def radar_enable(self, on: bool = True) -> dict:
-        """Enable or pause radar acquisition; this does not switch radar power."""
         return self._call("/api/radar", {"on": on}, method="POST")
 
     def ota_info(self) -> dict:
         return self._call("/api/ota")
 
     def ota_flash(self, bin_path: str, timeout: float = 180.0) -> dict:
-        """POST raw firmware .bin to /api/ota (board reboots on success)."""
         import pathlib
 
         data = pathlib.Path(bin_path).read_bytes()
@@ -174,7 +112,6 @@ class RobotApi:
             except json.JSONDecodeError:
                 return {"ok": False, "error": body, "http": e.code}
         except urllib.error.URLError as e:
-            # reboot drops TCP — often means success
             return {"ok": True, "rebooting": True, "note": str(e.reason)}
 
 
@@ -183,7 +120,7 @@ def main() -> int:
     bot = RobotApi(host)
     print("status:", bot.status())
     print("ota:", bot.ota_info())
-    print("radar:", bot.radar(live=True))
+    print("radar:", bot.radar())
     return 0
 
 

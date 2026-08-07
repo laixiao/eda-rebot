@@ -30,9 +30,7 @@ bool XL9555::begin(uint8_t addr) {
   ok_ = false;
   if (!mutex_) mutex_ = xSemaphoreCreateMutex();
   if (!mutex_) return false;
-  if (!board_i2c_add_device(addr, &dev_)) {
-    return false;
-  }
+  if (!board_i2c_add_device(addr, &dev_)) return false;
   uint8_t dummy = 0;
   ok_ = readReg(0x00, dummy);
   if (!ok_) return false;
@@ -41,12 +39,12 @@ bool XL9555::begin(uint8_t addr) {
 }
 
 bool XL9555::applySafeDefaults() {
-  // Port0: ENC3/4=in；PWDN/RST=in(开漏释放)；STBY/OE=out
-  // Port1: T_IRQ/IO1_7=in；其余 LCD/触摸/功放控制=out
-  if (!writeConfig(0, 0x9F)) return false;
-  if (!writeConfig(1, 0xA0)) return false;
-  out_[0] = (1u << XL_OE); // OE 高=禁止 PWM；STBY 低；PWDN/RST 由上拉保持 2.8V
-  out_[1] = (1u << (XL_T_CS - 8)) | (1u << (XL_LCD_RST - 8)) | (1u << (XL_LCD_CS - 8));
+  // Port0: IO0_0 OUT=in；IO0_1 PWR=out 高(关)；IO0_2..5/7=in；IO0_6 OE=out 高(禁 PWM)
+  // Port1: IO1_0..5/7=in；IO1_6 AMP=out 低(关)
+  if (!writeConfig(0, 0xBD)) return false;
+  if (!writeConfig(1, 0xBF)) return false;
+  out_[0] = (1u << XL_OE) | (1u << XL_RADAR_PWR);
+  out_[1] = 0x00;
   if (!writePort(0, out_[0])) return false;
   if (!writePort(1, out_[1])) return false;
   return true;
@@ -86,43 +84,9 @@ bool XL9555::setPin(uint8_t pin, bool level) {
   xSemaphoreTake(mutex_, portMAX_DELAY);
   if (level) out_[port] |= (1u << bit);
   else out_[port] &= ~(1u << bit);
-  // 推挽脚：确保为输出
   cfg_[port] &= ~(1u << bit);
   bool ok = writeConfigUnlocked(port, cfg_[port]);
   if (ok) ok = writePortUnlocked(port, out_[port]);
-  ok_ = ok;
-  xSemaphoreGive(mutex_);
-  return ok;
-}
-
-bool XL9555::driveLow(uint8_t pin) {
-  if (pin > 15 || !mutex_) return false;
-  uint8_t port = pin / 8;
-  uint8_t bit = pin % 8;
-  xSemaphoreTake(mutex_, portMAX_DELAY);
-  out_[port] &= ~(1u << bit);
-  cfg_[port] &= ~(1u << bit); // output
-  // 先改方向再写输出，并回读确认（避免仅改 latch、脚仍为输入）
-  bool ok = writeConfigUnlocked(port, cfg_[port]);
-  if (ok) ok = writePortUnlocked(port, out_[port]);
-  if (ok) ok = writeConfigUnlocked(port, cfg_[port]);
-  if (ok) ok = writePortUnlocked(port, out_[port]);
-  uint8_t cfgRb = 0xFF, outRb = 0xFF, inRb = 0xFF;
-  if (ok) ok = readReg(0x06 + port, cfgRb);
-  if (ok) ok = readReg(0x02 + port, outRb);
-  if (ok) ok = readReg(0x00 + port, inRb);
-  ok_ = ok;
-  xSemaphoreGive(mutex_);
-  return ok && ((cfgRb & (1u << bit)) == 0) && ((outRb & (1u << bit)) == 0);
-}
-
-bool XL9555::releasePin(uint8_t pin) {
-  if (pin > 15 || !mutex_) return false;
-  uint8_t port = pin / 8;
-  uint8_t bit = pin % 8;
-  xSemaphoreTake(mutex_, portMAX_DELAY);
-  cfg_[port] |= (1u << bit); // input / Hi-Z
-  const bool ok = writeConfigUnlocked(port, cfg_[port]);
   ok_ = ok;
   xSemaphoreGive(mutex_);
   return ok;
@@ -136,15 +100,4 @@ bool XL9555::getPin(uint8_t pin, bool &level) {
   if (!readPort(port, v)) return false;
   level = (v >> bit) & 1;
   return true;
-}
-
-bool XL9555::dumpPort0(uint8_t &in, uint8_t &out, uint8_t &cfg) {
-  if (!mutex_) return false;
-  xSemaphoreTake(mutex_, portMAX_DELAY);
-  bool ok = readReg(0x00, in);
-  if (ok) ok = readReg(0x02, out);
-  if (ok) ok = readReg(0x06, cfg);
-  ok_ = ok;
-  xSemaphoreGive(mutex_);
-  return ok;
 }

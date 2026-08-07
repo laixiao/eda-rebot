@@ -12,3 +12,5 @@ bool board_i2c_write(i2c_master_dev_handle_t dev, const uint8_t *data, size_t le
 bool board_i2c_write_read(i2c_master_dev_handle_t dev, const uint8_t *w, size_t wlen, uint8_t *r,
                           size_t rlen, int timeout_ms = 100);
 bool board_i2c_probe(uint8_t addr7);
+/** Send SSD1306-style [0x00,0xAE] to test ACK (more reliable than probe for some OLED). */
+bool board_i2c_oled_ping(uint8_t addr7, uint32_t scl_hz = 100000);

@@ -13,7 +13,7 @@ bool board_i2c_init() {
   cfg.scl_io_num = (gpio_num_t)PIN_I2C_SCL;
   cfg.clk_source = I2C_CLK_SRC_DEFAULT;
   cfg.glitch_ignore_cnt = 7;
-  cfg.flags.enable_internal_pullup = true;
+  cfg.flags.enable_internal_pullup = false; // R11/R12 external 4.7k on board
   esp_err_t err = i2c_new_master_bus(&cfg, &s_bus);
   if (err != ESP_OK) {
     ESP_LOGE(TAG, "i2c_new_master_bus failed: %s", esp_err_to_name(err));
@@ -48,5 +48,14 @@ bool board_i2c_write_read(i2c_master_dev_handle_t dev, const uint8_t *w, size_t 
 
 bool board_i2c_probe(uint8_t addr7) {
   if (!s_bus) return false;
-  return i2c_master_probe(s_bus, addr7, 50) == ESP_OK;
+  return i2c_master_probe(s_bus, addr7, 100) == ESP_OK;
+}
+
+bool board_i2c_oled_ping(uint8_t addr7, uint32_t scl_hz) {
+  i2c_master_dev_handle_t dev = nullptr;
+  if (!board_i2c_add_device(addr7, &dev, scl_hz)) return false;
+  uint8_t buf[2] = {0x00, 0xAE};
+  const bool ok = board_i2c_write(dev, buf, 2, 300);
+  i2c_master_bus_rm_device(dev);
+  return ok;
 }
