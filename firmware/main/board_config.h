@@ -16,9 +16,14 @@ static const int PIN_I2C_SCL = 13;   // OLED_SCL
 static const int PIN_XL9555_INT = 2; // U13 INT#
 
 // 60G 雷达 MS60：板载座 U6 UART / U7 电源+OUT
-// ESP RX ← 雷达 TX；ESP TX → 雷达 RX
-static const int PIN_RADAR_UART_RX = 9;  // Radar-RX
-static const int PIN_RADAR_UART_TX = 10; // Radar-TX
+// 实测（2026-08-09，模块上电后模块端/板端同时量）：
+//   模块 TX 实际落在网名 Radar-TX=IO10（空闲被驱动为 3V 高；IO10 上能收到模块 UART 活动）
+//   模块 RX 落在网名 Radar-RX=IO9（ESP TX 输出驱动）
+// 故固件：RX=IO10 听模块 TX、TX=IO9 发往模块 RX。
+// 注：原注释（模块 TX→Radar-RX=IO9, RX=9）与实际硬件不符（RX=9 时 IO9 收 0 字节），
+//     已按实测修正为 RX=10/TX=9。
+static const int PIN_RADAR_UART_RX = 10; // 听模块 TX（实测网名 Radar-TX=IO10）
+static const int PIN_RADAR_UART_TX = 9;  // 发往模块 RX（实测网名 Radar-RX=IO9）
 static const uint8_t XL_RADAR_OUT = 0;   // IO0_0 ← Radar-OUT
 static const uint8_t XL_RADAR_PWR = 1;   // IO0_1 → Q4（低=开 3V3 供电）
 

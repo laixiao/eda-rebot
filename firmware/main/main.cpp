@@ -34,7 +34,7 @@
 #include "device_log.h"
 
 static const char *TAG = "eda_robot";
-static const char *FW_VERSION = "3.1.0";
+static const char *FW_VERSION = "3.2.4";
 static volatile bool otaBusy = false;
 static volatile bool shutdownPending = false;
 
@@ -282,6 +282,7 @@ static bool setRadarPower(bool on) {
   const bool ok = xl.setPin(XL_RADAR_PWR, !on);
   if (ok) flagRadarPwr = on;
   actuatorUnlock();
+  if (ok) radar_on_power(on);
   return ok;
 }
 
@@ -302,6 +303,59 @@ static bool setSpotDuty(uint8_t id, int dutyPct) {
   return pca.setDuty(SPOT_CH[id], d);
 }
 
+/** 雷达有人 → LED_1 风扇开；无人 → 关。需同时控 LED_ALL（公共地开关）。 */
+static bool fanAutoOn = false;
+static uint8_t fanPresentTicks = 0;
+static uint8_t fanAbsentTicks = 0;
+static const uint8_t FAN_ON_TICKS = 5;    // ~100 ms @20 ms 轮询
+static const uint8_t FAN_OFF_TICKS = 50;  // ~1 s 防抖再关
+
+static bool applyRadarFan(bool on) {
+  if (!pca.present()) return false;
+  if (on) {
+    if (!flagPwm && !setPwmEnable(true)) return false;
+    if (!actuatorLock()) return false;
+    const bool ok = setSpotDuty(2, 100) && setSpotDuty(0, 100);  // LED_ALL + LED_1
+    actuatorUnlock();
+    return ok;
+  }
+  if (!actuatorLock()) return false;
+  const bool ok = setSpotDuty(0, 0) && setSpotDuty(2, 0);
+  actuatorUnlock();
+  return ok;
+}
+
+static void updateRadarFan(bool present) {
+  if (!flagRadarPwr || !radar_enabled()) {
+    if (fanAutoOn) {
+      applyRadarFan(false);
+      fanAutoOn = false;
+      ESP_LOGI(TAG, "radar fan auto off (radar idle)");
+    }
+    fanPresentTicks = fanAbsentTicks = 0;
+    return;
+  }
+  if (present) {
+    fanPresentTicks++;
+    fanAbsentTicks = 0;
+    if (!fanAutoOn && fanPresentTicks >= FAN_ON_TICKS) {
+      if (applyRadarFan(true)) {
+        fanAutoOn = true;
+        ESP_LOGI(TAG, "radar fan ON");
+      }
+    }
+  } else {
+    fanAbsentTicks++;
+    fanPresentTicks = 0;
+    if (fanAutoOn && fanAbsentTicks >= FAN_OFF_TICKS) {
+      if (applyRadarFan(false)) {
+        fanAutoOn = false;
+        ESP_LOGI(TAG, "radar fan OFF");
+      }
+    }
+  }
+}
+
 static bool emergencyStop() {
   if (!actuatorLock()) return false;
   const bool oeOk = xl.setPin(XL_OE, true);
@@ -310,7 +364,11 @@ static bool emergencyStop() {
   const bool pwmOk = pcaAllOffOrAbsent();
   if (oeOk) flagPwm = false;
   if (ampOk) flagAmp = false;
-  if (radarOk) flagRadarPwr = false;
+  if (radarOk) {
+    flagRadarPwr = false;
+    radar_on_power(false);
+  }
+  fanAutoOn = false;
   actuatorUnlock();
   return oeOk && ampOk && radarOk && pwmOk;
 }
@@ -941,6 +999,9 @@ static void background_task(void *) {
     uint8_t p0 = 0;
     if (xl.readPort(0, p0)) radar_set_gpio_out((p0 >> XL_RADAR_OUT) & 1);
     radar_poll();
+    RadarSnapshot rs;
+    radar_get_snapshot(rs);
+    updateRadarFan(rs.present);
     vTaskDelay(pdMS_TO_TICKS(20));
   }
 }

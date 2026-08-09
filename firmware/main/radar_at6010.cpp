@@ -21,6 +21,7 @@ static const int64_t RADAR_QUERY_INTERVAL_US = 200000;
 static SemaphoreHandle_t sMtx = nullptr;
 static bool sUartOn = false;
 static bool sEnabled = true;
+static bool sPowered = false;  // module VCC switched on (Q4 / XL IO0_1)
 static bool sGpioOut = false;
 static int64_t sLastQueryUs = 0;
 
@@ -39,15 +40,23 @@ static uint16_t ciChecksum(const uint8_t *data, size_t n) {
   return (uint16_t)sum;
 }
 
-static void rememberFrame(const uint8_t *data, size_t n) {
+static void bytesToHex(const uint8_t *data, size_t n, char *out, size_t outCap) {
   static const char HEX[] = "0123456789ABCDEF";
-  const size_t maxBytes = (sizeof(sState.last_frame_hex) - 1) / 2;
+  const size_t maxBytes = (outCap > 0) ? (outCap - 1) / 2 : 0;
   if (n > maxBytes) n = maxBytes;
   for (size_t i = 0; i < n; i++) {
-    sState.last_frame_hex[i * 2] = HEX[data[i] >> 4];
-    sState.last_frame_hex[i * 2 + 1] = HEX[data[i] & 0x0F];
+    out[i * 2] = HEX[data[i] >> 4];
+    out[i * 2 + 1] = HEX[data[i] & 0x0F];
   }
-  sState.last_frame_hex[n * 2] = 0;
+  out[n * 2] = 0;
+}
+
+static void rememberFrame(const uint8_t *data, size_t n) {
+  bytesToHex(data, n, sState.last_frame_hex, sizeof(sState.last_frame_hex));
+}
+
+static void rememberRxPeek(const uint8_t *data, size_t n) {
+  bytesToHex(data, n, sState.rx_peek_hex, sizeof(sState.rx_peek_hex));
 }
 
 static void clearPrimary() {
@@ -416,6 +425,7 @@ bool radar_start() {
   memset(sState.type_frames, 0, sizeof(sState.type_frames));
   sState.uart_buffered_bytes = 0;
   sState.last_frame_hex[0] = 0;
+  sState.rx_peek_hex[0] = 0;
   sState.last_frame_us = 0;
   sState.report_type = 0xFF;
   strncpy(sState.version, "未读取", sizeof(sState.version) - 1);
@@ -476,6 +486,14 @@ bool radar_enabled() {
   return enabled;
 }
 
+bool radar_powered() {
+  if (!sMtx) return false;
+  xSemaphoreTake(sMtx, portMAX_DELAY);
+  const bool p = sPowered;
+  xSemaphoreGive(sMtx);
+  return p;
+}
+
 void radar_set_gpio_out(bool level) {
   if (!sMtx) return;
   xSemaphoreTake(sMtx, portMAX_DELAY);
@@ -485,6 +503,35 @@ void radar_set_gpio_out(bool level) {
   if (sEnabled && !sState.primary_valid && !sState.multi_valid)
     updateGesture(sState.det_result, sState.angle_deg, level);
   sState.present = sEnabled && (sState.primary_valid || sState.multi_valid || sGpioOut);
+  xSemaphoreGive(sMtx);
+}
+
+void radar_on_power(bool powered) {
+  if (!sUartOn) return;
+  if (powered) vTaskDelay(pdMS_TO_TICKS(500));  // MS60 boot
+  uart_flush_input(RADAR_UART);
+  if (!sMtx) return;
+  xSemaphoreTake(sMtx, portMAX_DELAY);
+  sPowered = powered;
+  sRxLen = 0;
+  sLastQueryUs = 0;
+  sState.link_ok = false;
+  sState.rx_frames = 0;
+  sState.rx_bytes = 0;
+  sState.crc_err = 0;
+  sState.malformed_frames = 0;
+  sState.unknown_frames = 0;
+  sState.discarded_bytes = 0;
+  sState.dropped_bytes = 0;
+  sState.frames_59 = 0;
+  sState.frames_5a = 0;
+  sState.uart_buffered_bytes = 0;
+  sState.last_frame_hex[0] = 0;
+  sState.rx_peek_hex[0] = 0;
+  clearPrimary();
+  clearMulti();
+  sState.present = false;
+  strncpy(sState.gesture, powered ? "等待数据" : "断电", sizeof(sState.gesture) - 1);
   xSemaphoreGive(sMtx);
 }
 
@@ -510,6 +557,7 @@ void radar_poll() {
     if (n <= 0) break;
     totalRead += (uint32_t)n;
     sState.rx_bytes += (uint32_t)n;
+    rememberRxPeek(tmp, (size_t)n);
     for (int i = 0; i < n; i++) {
       if (sRxLen == sizeof(sRx)) {
         memmove(sRx, sRx + 1, sizeof(sRx) - 1);
@@ -522,6 +570,7 @@ void radar_poll() {
   }
 
   const int64_t now = esp_timer_get_time();
+  const bool powered = sPowered;
   if (sState.last_primary_us && now - sState.last_primary_us > 1500000) clearPrimary();
   if (sState.last_multi_us && now - sState.last_multi_us > 1500000) clearMulti();
   if (!sState.primary_valid && !sState.multi_valid && !sGpioOut &&
@@ -531,13 +580,16 @@ void radar_poll() {
   const bool queryDue = now - sLastQueryUs >= RADAR_QUERY_INTERVAL_US;
   if (queryDue) sLastQueryUs = now;
   xSemaphoreGive(sMtx);
-  if (queryDue && !radar_cmd_get_det()) ESP_LOGW(TAG, "detection query write failed");
+  // 模块未通电时不发送查询：避免把 ESP 自发的 0x30 帧误当模块回环/回显，
+  // 也让 power=false 时 IO10(TX) 保持静默，便于示波器分辨信号来源。
+  if (powered && queryDue && !radar_cmd_get_det())
+    ESP_LOGW(TAG, "detection query write failed");
 }
 
 bool radar_cmd_get_version() { return sendCi(0xFE, nullptr, 0); }
 
 bool radar_cmd_get_det() {
-  if (!radar_enabled()) return false;
+  if (!radar_enabled() || !sPowered) return false;
   return sendCi(0x30, nullptr, 0);
 }
 
@@ -588,7 +640,8 @@ size_t radar_json_summary(char *buf, size_t buflen) {
       "\"multiValid\":%s,\"declaredObjNum\":%u,\"objNum\":%u,\"truncated\":%s,"
       "\"version\":\"%s\",\"rxFrames\":%u,\"rxBytes\":%u,\"crcErr\":%u,"
       "\"malformedFrames\":%u,\"unknownFrames\":%u,\"discardedBytes\":%u,\"droppedBytes\":%u,"
-      "\"frames59\":%u,\"frames5A\":%u,\"uartBufferedBytes\":%u,\"lastFrameHex\":\"%s\"}",
+      "\"frames59\":%u,\"frames5A\":%u,\"uartBufferedBytes\":%u,\"lastFrameHex\":\"%s\","
+      "\"rxPeekHex\":\"%s\"}",
       s.enabled ? "true" : "false", s.uart_on ? "true" : "false",
       s.link_ok ? "true" : "false", (unsigned)s.baud,
       (unsigned)s.uart_tx_pin, (unsigned)s.uart_rx_pin, txLevel, rxLevel,
@@ -598,7 +651,7 @@ size_t radar_json_summary(char *buf, size_t buflen) {
       s.truncated ? "true" : "false", v, (unsigned)s.rx_frames, (unsigned)s.rx_bytes,
       (unsigned)s.crc_err, (unsigned)s.malformed_frames, (unsigned)s.unknown_frames,
       (unsigned)s.discarded_bytes, (unsigned)s.dropped_bytes, (unsigned)s.frames_59,
-      (unsigned)s.frames_5a, (unsigned)s.uart_buffered_bytes, s.last_frame_hex);
+      (unsigned)s.frames_5a, (unsigned)s.uart_buffered_bytes, s.last_frame_hex, s.rx_peek_hex);
 }
 
 size_t radar_json_live(char *buf, size_t buflen) {

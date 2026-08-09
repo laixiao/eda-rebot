@@ -1,0 +1,8 @@
+PWR OFF -> True
+PWR ON  -> True
+t+5s  link=False rxBytes=0 rxLevel=0 frames59=0 frames5A=0 version=Œ¥∂¡»° peek=
+t+10s  link=False rxBytes=0 rxLevel=0 frames59=0 frames5A=0 version=Œ¥∂¡»° peek=
+t+15s  link=False rxBytes=0 rxLevel=0 frames59=0 frames5A=0 version=Œ¥∂¡»° peek=
+t+20s  link=False rxBytes=0 rxLevel=0 frames59=0 frames5A=0 version=Œ¥∂¡»° peek=
+t+25s  link=False rxBytes=0 rxLevel=0 frames59=0 frames5A=0 version=Œ¥∂¡»° peek=
+t+30s  link=False rxBytes=0 rxLevel=0 frames59=0 frames5A=0 version=Œ¥∂¡»° peek=

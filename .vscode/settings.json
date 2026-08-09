@@ -8,5 +8,7 @@
     "--compile-commands-dir=/root/ssd/eda-rebot/firmware/build"
   ],
   "idf.flashType": "UART",
-  "idf.port": "/dev/ttyUSB0"
+  "idf.port": "/dev/ttyUSB0",
+  "idf.portWin": "COM3",
+  "cmake.sourceDirectory": "C:/Users/25150/Desktop/eda-rebot/firmware"
 }

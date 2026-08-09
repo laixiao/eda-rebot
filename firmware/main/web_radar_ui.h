@@ -80,8 +80,8 @@ pre{margin:0;white-space:pre-wrap;word-break:break-all;font:11px/1.4 ui-monospac
 </section>
 <section class="full">
   <h2>说明</h2>
-  <pre>接线（临时）：雷达 TX→ENC1_A(IO9/ESP RX)，RX→ENC1_B(IO10/ESP TX)，OUT→ENC3_A，VCC/GND→舵机座电源。
-UART 固定使用已验证的 115200 8N1：雷达 TX→IO9，雷达 RX→IO10，正常极性；页面无需配置。
+  <pre>接线（v6-1 板载座）：U7=VCC/GND/OUT，U6=UART 两线（网名与模块脚交叉，固件已对调）。
+UART 115200 8N1：固件 ESP RX=IO10(Radar-TX 网)，ESP TX=IO9(Radar-RX 网)。
 固件每 200ms 自动发送一次只读 0x30 检测查询，关闭浏览器也会持续采集。
 主页面“雷达采集”总开关只暂停查询和数据解析，不切断雷达 VCC，UART 仍保持就绪。
 0x59/0x30 传输、校验及单目标距离/角度已通过实机验证；TYPE=5 多目标仍待完整验收。
@@ -185,7 +185,7 @@ function render(s){
     body.innerHTML=`<tr><td>主目标</td><td>${(s.range_mm/1000).toFixed(2)} m</td><td>${s.angle_deg}°</td><td>${s.velo||0}</td></tr>`;
   }else body.innerHTML='<tr><td colspan="4" style="color:var(--muted)">无目标</td></tr>';
   document.getElementById('moduleInfo').textContent=
-    `链路 ${s.link?'正常':'等待回复'} · 115200 8N1 · RX IO9 / TX IO10\n模块版本 ${s.version||'未读取'}\n`+
+    `链路 ${s.link?'正常':'等待回复'} · 115200 8N1 · RX IO10 / TX IO9\n模块版本 ${s.version||'未读取'}\n`+
     `检测查询 ${s.enabled?'自动 5 Hz':'已暂停'} · 多目标稳定ID=${!!s.idStable}`;
   document.getElementById('meta').textContent=
     `协议 ${s.protocol||'unknown'}\n`+

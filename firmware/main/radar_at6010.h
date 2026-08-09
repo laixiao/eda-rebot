@@ -66,6 +66,7 @@ struct RadarSnapshot {
   uint32_t type_frames[8];
   uint32_t uart_buffered_bytes;
   char last_frame_hex[161];
+  char rx_peek_hex[97];  // last ≤48 raw RX bytes (even if discarded)
   int64_t last_frame_us;
   int64_t last_out_us;
   uint8_t trail_len;
@@ -77,7 +78,9 @@ bool radar_start();
 void radar_stop();
 void radar_set_enabled(bool enabled);
 bool radar_enabled();
+bool radar_powered();  // whether module VCC is switched on (Q4 / XL IO0_1)
 void radar_set_gpio_out(bool level);
+void radar_on_power(bool powered);  // flush UART / clear RX after module power change
 void radar_poll();  // call from bg task
 bool radar_cmd_get_version();
 bool radar_cmd_get_det();

@@ -1,0 +1,9 @@
+ensure power ON -> True
+t+10s link=False rx=10 rxBytes=0 rxLevel=1 txLevel=0 f59=0 f5A=0 ver=未读取 peek=
+t+20s link=False rx=10 rxBytes=0 rxLevel=1 txLevel=0 f59=0 f5A=0 ver=未读取 peek=
+t+30s link=False rx=10 rxBytes=0 rxLevel=1 txLevel=0 f59=0 f5A=0 ver=未读取 peek=
+t+40s link=False rx=10 rxBytes=0 rxLevel=1 txLevel=0 f59=0 f5A=0 ver=未读取 peek=
+t+50s link=False rx=10 rxBytes=0 rxLevel=1 txLevel=0 f59=0 f5A=0 ver=未读取 peek=
+t+60s link=False rx=10 rxBytes=0 rxLevel=1 txLevel=0 f59=0 f5A=0 ver=未读取 peek=
+cmd=version -> {'ok': True, 'protocol': 'at6010_ci_0x30_validated', 'idStable': False, 'enabled': True, 'uart': True, 'link': False, 'baud': 115200, 'tx': 9, 'rx': 10, 'txLevel': 0, 'rxLevel': 1, 'gpioOut': False, 'present': False, 'primaryValid': False, 'range_mm': 0, 'angle_deg': 0, 'det': '—', 'gesture': '无人', 'multiValid': False, 'declaredObjNum': 0, 'objNum': 0, 'truncated': False, 'version': '未读取', 'rxFrames': 0, 'rxBytes': 0, 'crcErr': 0, 'malformedFrames': 0, 'unknownFrames': 0, 'discardedBytes': 0, 'droppedBytes': 0, 'frames59': 0, 'frames5A': 0, 'uartBufferedBytes': 0, 'lastFrameHex': '', 'rxPeekHex': ''}
+after ver: link=False rxBytes=0 rxLevel=1 f59=0 ver=未读取
