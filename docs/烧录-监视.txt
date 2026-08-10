@@ -42,5 +42,10 @@ Web 烧录 OTA（FW ≥ 2.1.0，无需再接线）
 注意：分区表从单应用改为双 OTA 的那一次，必须串口全量烧录（含 partition-table）。
 此后日常升级只用 Web/OTA。
 
+语音模型（FW ≥ 3.5.0）：新增 model 分区。首次启用或改过分区表须串口全量：
+  idf.py -p COM3 -b 115200 flash
+（写入 partition-table + app + model）。之后仅改 app 仍可用 Web OTA。
+用法：说「你好小智」→ 短鸣 →「开风扇」/「关风扇」（恢复上次强度并关雷达联动）。
+
 当前板子IP
 http://192.168.137.178/   （FW 3.2.3；雷达 UART 固件已对调）

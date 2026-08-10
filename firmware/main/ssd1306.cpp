@@ -4,6 +4,7 @@
 #include "font_cjk.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
+#include <stdio.h>
 #include <string.h>
 
 void SSD1306::releaseDev() {
@@ -95,8 +96,8 @@ void SSD1306::putAscii(uint8_t col, uint8_t page, char c) {
   }
 }
 
-void SSD1306::putAscii12(uint8_t col, uint8_t page, char c) {
-  // Scale 5x7 → 7x12 (nearest neighbor)
+void SSD1306::putAscii11(uint8_t col, uint8_t page, char c) {
+  // Scale 5x7 → 7x11 (nearest neighbor)
   if (page > 6 || col > 121) return;
   const uint8_t uc = (uint8_t)c;
   if (uc < 32 || uc > 127) c = '?';
@@ -107,8 +108,8 @@ void SSD1306::putAscii12(uint8_t col, uint8_t page, char c) {
     const uint8_t sx = (uint8_t)((dx * 5) / 7);
     const uint8_t src = glyph[sx];
     uint8_t hi = 0, lo = 0;
-    for (uint8_t dy = 0; dy < 12; dy++) {
-      const uint8_t sy = (uint8_t)((dy * 7) / 12);
+    for (uint8_t dy = 0; dy < 11; dy++) {
+      const uint8_t sy = (uint8_t)((dy * 7) / 11);
       if (!(src & (1u << sy))) continue;
       if (dy < 8)
         hi |= (uint8_t)(1u << dy);
@@ -118,6 +119,40 @@ void SSD1306::putAscii12(uint8_t col, uint8_t page, char c) {
     buf_[top + dx] = hi;
     buf_[bot + dx] = lo;
   }
+}
+
+void SSD1306::setPixel(uint8_t x, uint8_t y, bool on) {
+  if (x >= 128 || y >= 64) return;
+  size_t i = (size_t)(y / 8) * 128 + x;
+  const uint8_t bit = (uint8_t)(1u << (y & 7));
+  if (on)
+    buf_[i] |= bit;
+  else
+    buf_[i] &= (uint8_t)~bit;
+}
+
+void SSD1306::fillRect(uint8_t x, uint8_t y, uint8_t w, uint8_t h, bool on) {
+  for (uint8_t dy = 0; dy < h; dy++) {
+    for (uint8_t dx = 0; dx < w; dx++) setPixel((uint8_t)(x + dx), (uint8_t)(y + dy), on);
+  }
+}
+
+void SSD1306::drawProgressBar(uint8_t x, uint8_t y, uint8_t w, uint8_t h, int pct) {
+  if (w < 4 || h < 4) return;
+  if (pct < 0) pct = 0;
+  if (pct > 100) pct = 100;
+  // outline
+  for (uint8_t i = 0; i < w; i++) {
+    setPixel((uint8_t)(x + i), y, true);
+    setPixel((uint8_t)(x + i), (uint8_t)(y + h - 1), true);
+  }
+  for (uint8_t j = 0; j < h; j++) {
+    setPixel(x, (uint8_t)(y + j), true);
+    setPixel((uint8_t)(x + w - 1), (uint8_t)(y + j), true);
+  }
+  const uint8_t innerW = (uint8_t)(w - 2);
+  const uint8_t fillW = (uint8_t)((innerW * pct) / 100);
+  if (fillW > 0) fillRect((uint8_t)(x + 1), (uint8_t)(y + 1), fillW, (uint8_t)(h - 2), true);
 }
 
 void SSD1306::putCjk(uint8_t col, uint8_t page, const uint8_t glyph[32]) {
@@ -179,7 +214,7 @@ void SSD1306::drawText(uint8_t col, uint8_t page, const char *text) {
 void SSD1306::drawTextLarge(uint8_t col, uint8_t page, const char *text) {
   if (!text) return;
   while (*text && col + 7 <= 128) {
-    putAscii12(col, page, *text++);
+    putAscii11(col, page, *text++);
     col = (uint8_t)(col + 8);
   }
 }
@@ -193,42 +228,31 @@ bool SSD1306::printfLines(const char *l0, const char *l1, const char *l2, const 
   return show();
 }
 
-bool SSD1306::showIp(const char *ip, const char *footer) {
+bool SSD1306::showHome(const char *ip, int fanPct) {
   clear();
-  drawText(0, 0, "IP");
-  if (!ip || !ip[0]) {
-    drawTextLarge(0, 2, "---");
-    if (footer && footer[0]) drawText(0, 6, footer);
-    return show();
+  // Top: 11px IP (pages 0–1)
+  if (ip && ip[0]) {
+    const size_t len = strlen(ip);
+    constexpr int kAdvance = 8;
+    int col = (128 - (int)len * kAdvance) / 2;
+    if (col < 0) col = 0;
+    drawTextLarge((uint8_t)col, 0, ip);
+  } else {
+    drawText(0, 0, "WiFi...");
   }
 
-  const size_t len = strlen(ip);
-  // 12px glyph advance 8px → max 16 chars/line (full IPv4 fits)
-  constexpr size_t kAdvance = 8;
-  constexpr size_t kMaxPerLine = 16;
-  if (len <= kMaxPerLine) {
-    const uint8_t col = (uint8_t)((128 - (int)len * (int)kAdvance) / 2);
-    drawTextLarge(col, 2, ip);
-  } else {
-    int split = -1;
-    for (size_t i = 0; i < len; i++) {
-      if (ip[i] != '.') continue;
-      if (i + 1 <= kMaxPerLine && len - (i + 1) <= kMaxPerLine) split = (int)(i + 1);
-    }
-    if (split < 0) split = (int)kMaxPerLine;
-    char line0[20] = {0};
-    char line1[20] = {0};
-    const size_t n0 = (size_t)split < sizeof(line0) - 1 ? (size_t)split : sizeof(line0) - 1;
-    memcpy(line0, ip, n0);
-    const size_t rem = len - (size_t)split;
-    const size_t n1 = rem < sizeof(line1) - 1 ? rem : sizeof(line1) - 1;
-    memcpy(line1, ip + split, n1);
-    const uint8_t c0 = (uint8_t)((128 - (int)strlen(line0) * (int)kAdvance) / 2);
-    const uint8_t c1 = (uint8_t)((128 - (int)strlen(line1) * (int)kAdvance) / 2);
-    drawTextLarge(c0, 2, line0);
-    drawTextLarge(c1, 4, line1);
-  }
-  if (footer && footer[0]) drawText(0, 6, footer);
+  if (fanPct < 0) fanPct = 0;
+  if (fanPct > 100) fanPct = 100;
+
+  // Mid: FAN label + percent (page 2 = y16, below 11px IP)
+  drawText(0, 2, "FAN");
+  char pct[8];
+  snprintf(pct, sizeof(pct), "%d%%", fanPct);
+  const uint8_t pctW = (uint8_t)(strlen(pct) * 6);
+  drawText((uint8_t)(128 - pctW), 2, pct);
+
+  // Bottom: intensity bar (y=28, h=12 → pages 3–4)
+  drawProgressBar(2, 28, 124, 12, fanPct);
   return show();
 }
 

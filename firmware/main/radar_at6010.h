@@ -76,11 +76,12 @@ struct RadarSnapshot {
 bool radar_init();
 bool radar_start();
 void radar_stop();
+/** @deprecated 已无独立采集；保留接口，实际随供电：开电=查询，关电=停。 */
 void radar_set_enabled(bool enabled);
-bool radar_enabled();
+bool radar_enabled();  // 等同于已供电且在查询
 bool radar_powered();  // whether module VCC is switched on (Q4 / XL IO0_1)
 void radar_set_gpio_out(bool level);
-void radar_on_power(bool powered);  // flush UART / clear RX；关电时同步关采集
+void radar_on_power(bool powered);  // flush UART / clear RX；开电自动查询，关电停止
 void radar_poll();  // call from bg task
 bool radar_cmd_get_version();
 bool radar_cmd_get_det();

@@ -20,7 +20,7 @@ static const int64_t RADAR_QUERY_INTERVAL_US = 200000;
 
 static SemaphoreHandle_t sMtx = nullptr;
 static bool sUartOn = false;
-static bool sEnabled = true;
+static bool sEnabled = false;
 static bool sPowered = false;  // module VCC switched on (Q4 / XL IO0_1)
 static bool sGpioOut = false;
 static int64_t sLastQueryUs = 0;
@@ -355,7 +355,7 @@ bool radar_init() {
   strncpy(sState.gesture, "—", sizeof(sState.gesture) - 1);
   strncpy(sState.det_text, "—", sizeof(sState.det_text) - 1);
   strncpy(sState.version, "未读取", sizeof(sState.version) - 1);
-  sState.enabled = true;
+  sState.enabled = false;
   sState.baud = 115200;
   sState.uart_tx_pin = PIN_RADAR_UART_TX;
   sState.uart_rx_pin = PIN_RADAR_UART_RX;
@@ -406,8 +406,8 @@ bool radar_start() {
 
   xSemaphoreTake(sMtx, portMAX_DELAY);
   sUartOn = true;
-  sEnabled = true;
-  sState.enabled = true;
+  sEnabled = false;
+  sState.enabled = false;
   sState.uart_on = true;
   sState.baud = RADAR_BAUD;
   sState.uart_tx_pin = PIN_RADAR_UART_TX;
@@ -456,26 +456,23 @@ void radar_stop() {
   gpio_config(&io);
 }
 
+/** 独立采集已移除；查询跟随供电。保留空操作以兼容旧调用。 */
 void radar_set_enabled(bool enabled) {
+  (void)enabled;
   if (!sMtx || !sUartOn) return;
   xSemaphoreTake(sMtx, portMAX_DELAY);
-  if (sEnabled == enabled) {
-    xSemaphoreGive(sMtx);
-    return;
+  const bool want = sPowered;
+  if (sEnabled != want) {
+    sEnabled = want;
+    sState.enabled = want;
+    if (!want) {
+      clearPrimary();
+      clearMulti();
+      sState.present = false;
+      strncpy(sState.gesture, "断电", sizeof(sState.gesture) - 1);
+    }
   }
-  sEnabled = enabled;
-  sState.enabled = enabled;
-  clearPrimary();
-  clearMulti();
-  sState.present = false;
-  sState.link_ok = false;
-  sState.trail_len = 0;
-  memset(sState.trail, 0, sizeof(sState.trail));
-  sRxLen = 0;
-  sLastQueryUs = 0;
-  strncpy(sState.gesture, enabled ? "等待数据" : "采集已关闭", sizeof(sState.gesture) - 1);
   xSemaphoreGive(sMtx);
-  uart_flush_input(RADAR_UART);
 }
 
 bool radar_enabled() {
@@ -513,11 +510,9 @@ void radar_on_power(bool powered) {
   if (!sMtx) return;
   xSemaphoreTake(sMtx, portMAX_DELAY);
   sPowered = powered;
-  // 关供电无模块可采：同步关采集，避免 UI 仍显示「采集已开」
-  if (!powered) {
-    sEnabled = false;
-    sState.enabled = false;
-  }
+  // 供电开即自动查询；关供电则停止（已无独立「采集」开关）
+  sEnabled = powered;
+  sState.enabled = powered;
   sRxLen = 0;
   sLastQueryUs = 0;
   sState.link_ok = false;

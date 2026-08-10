@@ -15,6 +15,7 @@ idf_component_register(
         "board_i2c.cpp"
         "board_i2s.cpp"
         "radar_at6010.cpp"
+        "voice_sr.cpp"
     INCLUDE_DIRS
         "."
     EMBED_FILES
@@ -36,4 +37,5 @@ idf_component_register(
         esp_driver_gpio
         esp_driver_i2s
         esp_driver_uart
+        espressif__esp-sr
 )

@@ -39,6 +39,8 @@ pre{margin:0;white-space:pre-wrap;word-break:break-all;font:12px/1.4 ui-monospac
 .radar-card{display:flex;flex-direction:column;gap:12px}
 .radar-head{display:flex;flex-wrap:wrap;gap:10px 16px;align-items:center;justify-content:space-between}
 .radar-head h2{margin:0}
+.radar-head-left{display:flex;flex-wrap:wrap;gap:8px 10px;align-items:center;min-width:0}
+.radar-status{display:flex;flex-wrap:wrap;gap:6px;align-items:center}
 .radar-actions{margin:0}
 .radar-body{display:grid;grid-template-columns:minmax(240px,380px) 1fr;gap:14px;align-items:start}
 @media(max-width:900px){.radar-body{grid-template-columns:1fr}}
@@ -84,6 +86,13 @@ label{color:var(--muted)}
 .switch input:checked+.track{background:#238636}
 .switch input:checked+.track::after{transform:translateX(20px)}
 .switch input:disabled+.track{opacity:.45}
+.radar-actions .switch{padding:6px 10px;border-radius:8px;border:1px solid transparent;gap:8px}
+.radar-actions .switch-pwr{background:#3b2208;border-color:#9e6a03;color:#f0c674}
+.radar-actions .switch-pwr input:checked+.track{background:#d29922}
+.radar-actions .switch-acq{background:#0d2d4a;border-color:#1f6feb;color:#79c0ff}
+.radar-actions .switch-acq input:checked+.track{background:#1f6feb}
+.radar-actions .switch-fan{background:#0d3b24;border-color:#238636;color:#3fb950}
+.radar-actions .switch-fan input:checked+.track{background:#238636}
 </style>
 </head>
 <body>
@@ -209,27 +218,25 @@ label{color:var(--muted)}
 </section>
 <section class="span-all radar-card" id="radarPanel">
   <div class="radar-head">
-    <h2>60G 雷达 · LED_1 风扇</h2>
+    <div class="radar-head-left">
+      <h2>60G 雷达 · LED_1 风扇</h2>
+      <div class="radar-status" title="链路 / 供电 / OUT">
+        <span id="rdLink" class="badge off">等待数据</span>
+        <span id="rdPwr" class="badge off">未供电</span>
+        <span id="rdOut" class="badge off">OUT 低</span>
+      </div>
+    </div>
     <div class="row radar-actions">
-      <span id="rdLink" class="badge off">UART</span>
-      <span id="rdAcq" class="badge off">采集</span>
-      <span id="rdOut" class="badge off">OUT</span>
-      <label class="switch" title="Q4 雷达 3V3">
+      <label class="switch switch-pwr" title="Q4 雷达 3V3（开电即查询）">
         <input id="swRadarPwr" type="checkbox" onchange="setRadarPower(this.checked)"/>
         <span class="track"></span>
         <span id="labRadarPwr">供电</span>
       </label>
-      <label class="switch" title="UART 采集查询">
-        <input id="swRadarAcq" type="checkbox" onchange="setRadarAcq(this.checked)"/>
-        <span class="track"></span>
-        <span id="labRadarAcq">采集</span>
-      </label>
-      <label class="switch" title="雷达有人 → LED_1">
+      <label class="switch switch-fan" title="雷达有人 → LED_1（2s×3次确认）">
         <input id="swFanAuto" type="checkbox" onchange="setFanAuto(this.checked)"/>
         <span class="track"></span>
         <span id="labFanAuto">控风扇</span>
       </label>
-      <button onclick="radarCmd('version')">模块信息</button>
     </div>
   </div>
   <div class="radar-body">
@@ -249,6 +256,10 @@ label{color:var(--muted)}
         <div class="fan-title">风扇联动</div>
         <div id="fanStatus" class="fan-line">加载中...</div>
       </div>
+      <div class="fan-box" style="margin-top:8px">
+        <div class="fan-title">语音控风扇</div>
+        <div id="voiceStatus" class="fan-line">加载中...</div>
+      </div>
       <div>
         <h2 style="margin:0 0 6px">目标</h2>
         <table>
@@ -262,6 +273,9 @@ label{color:var(--muted)}
       </details>
       <details>
         <summary style="cursor:pointer;color:var(--muted);font-size:12px">模块 / 诊断</summary>
+        <div class="row" style="margin-top:6px">
+          <button onclick="radarCmd('version')" title="向 MS60 发 0xFE 读 SDK/硬件版本">读模块版本</button>
+        </div>
         <pre id="moduleInfo" style="margin-top:6px">—</pre>
         <pre id="rdMeta" style="margin-top:6px">—</pre>
       </details>
@@ -306,7 +320,7 @@ function renderFlags(s){
   }
 }
 function phaseLabel(p){
-  return ({disabled:'未启用',idle:'待命',arming:'开灯确认中',on:'风扇已开',holdoff:'关灯确认中'}[p])||p||'—';
+  return ({disabled:'未启用',idle:'待命',arming:'确认有人中',on:'风扇已开',holdoff:'确认无人中'}[p])||p||'—';
 }
 const ledTimers=[0,0,0];
 function renderFan(f){
@@ -317,10 +331,11 @@ function renderFan(f){
   if(sw && document.activeElement!==sw) sw.checked=!!f.auto;
   if(lab) lab.textContent=f.auto?'控风扇 开':'控风扇';
   let prog='';
+  const need=f.need||f.confirm||3;
   if(f.phase==='arming')
-    prog=`开 ${f.progress}/${f.need}`;
+    prog=`有人 ${f.progress||0}/${need}（每2s）`;
   else if(f.phase==='holdoff')
-    prog=`关 ${f.progress}/${f.offNeed||f.need}`;
+    prog=`无人 ${f.progress||0}/${need}（每2s）`;
   else if(f.phase==='on')
     prog='保持开';
   else if(f.phase==='idle')
@@ -329,8 +344,19 @@ function renderFan(f){
     prog='联动关';
   box.innerHTML=
     `<b>${phaseLabel(f.phase)}</b> · LED_1 ${f.on?'<span class=ok>开</span>':'关'} · ${prog}<br>`+
+    `强度 ${f.intensity??0}% · 记忆 ${f.savedIntensity??'—'}%（${f.savedLed1??'—'}/${f.savedLedAll??'—'}）<br>`+
     `判定：${f.reason||'—'}<br>`+
     `上次：${f.lastAction||'—'}`;
+}
+function renderVoice(v){
+  const box=document.getElementById('voiceStatus');
+  if(!box) return;
+  if(!v){box.textContent='—';return}
+  const st=v.ok?(v.listening?'聆听命令中':(v.paused?'暂停(录音中)':'待命')):'未就绪';
+  box.innerHTML=
+    `<b>${st}</b><br>`+
+    `唤醒：你好小智 → 开风扇 / 关风扇<br>`+
+    `${v.last||'—'}`;
 }
 function syncLedsFromStatus(s){
   const leds=s.leds||[];
@@ -358,20 +384,14 @@ async function refresh(){
     `I2C: ${(s.i2c||[]).map(x=>'0x'+Number(x).toString(16)).join(', ')||'无（模块未焊/未上电）'}`;
   renderFlags(s);
   renderFan(s.fan);
+  renderVoice(s.voice);
   syncLedsFromStatus(s);
   const rd=await api('GET','/api/radar');
   if(rd){
     const pwr=document.getElementById('swRadarPwr');
     const labP=document.getElementById('labRadarPwr');
-    const acq=document.getElementById('swRadarAcq');
-    const labA=document.getElementById('labRadarAcq');
     if(pwr && document.activeElement!==pwr) pwr.checked=!!rd.power;
     if(labP) labP.textContent=rd.power?'供电 开':'供电';
-    if(acq){
-      if(document.activeElement!==acq) acq.checked=!!rd.enabled;
-      acq.disabled=!rd.power;
-    }
-    if(labA) labA.textContent=rd.enabled?'采集 开':(rd.power?'采集':'采集（需供电）');
   }
 }
 async function setFanAuto(on){
@@ -388,23 +408,6 @@ async function setRadarPower(on){
   if(sw) sw.disabled=true;
   try{
     const j=await api('POST','/api/radar',{power:!!on});
-    if(!j||j.ok===false){if(sw) sw.checked=!on}
-  }finally{if(sw) sw.disabled=false}
-  refresh();
-}
-async function setRadarAcq(on){
-  const sw=document.getElementById('swRadarAcq');
-  if(on){
-    const r=await api('GET','/api/radar');
-    if(!r||!r.power){
-      if(sw) sw.checked=false;
-      alert('请先开供电');
-      return;
-    }
-  }
-  if(sw) sw.disabled=true;
-  try{
-    const j=await api('POST','/api/radar',{on:!!on});
     if(!j||j.ok===false){if(sw) sw.checked=!on}
   }finally{if(sw) sw.disabled=false}
   refresh();
@@ -703,7 +706,8 @@ function drawRadar(s){
     }
     ctx.strokeStyle='rgba(61,214,140,0.45)';ctx.lineWidth=2;ctx.stroke();
   }
-  const objs=s.enabled?((s.multiValid&&s.objs&&s.objs.length)?s.objs:(s.primaryValid&&s.range_mm?[{slot:0,range_mm:s.range_mm,angle_deg:s.angle_deg}]:[])):[];
+  const powered=!!(s.power||s.enabled);
+  const objs=powered?((s.multiValid&&s.objs&&s.objs.length)?s.objs:(s.primaryValid&&s.range_mm?[{slot:0,range_mm:s.range_mm,angle_deg:s.angle_deg}]:[])):[];
   objs.forEach((o,i)=>{
     const[x,y]=polar(o.range_mm,o.angle_deg,R);
     ctx.beginPath();ctx.arc(x,y,8,0,6.28);
@@ -715,37 +719,42 @@ function drawRadar(s){
   ctx.beginPath();ctx.arc(cx,cy,5,0,6.28);ctx.fillStyle='#f0883e';ctx.fill();
 }
 function setRadarChips(s){
-  const flags=s.enabled?[
+  const powered=!!(s.power||s.enabled);
+  const flags=powered?[
     [s.gpioOut,'GPIO OUT'],[s.present,'活体/存在'],[s.detResult&1,'靠近'],[s.detResult&2,'远离'],
     [s.detResult&4,'运动'],[s.detResult&8,'微动'],[s.detResult&16,'呼吸'],
     [s.gesture&&s.gesture.indexOf('扫')>=0,s.gesture||'手势']
-  ]:[[false,'采集已关闭']];
+  ]:[[false,'未供电']];
   document.getElementById('rdChips').innerHTML=flags.map(([on,lab])=>
     `<span class="chip ${on?'on':''} ${lab&&String(lab).indexOf('扫')>=0&&on?'hot':''}">${lab}</span>`).join('');
 }
 function renderRadarLive(s){
+  const powered=!!(s.power||s.enabled);
   document.getElementById('rdLink').textContent=s.uart?(s.link?'链路OK':'等待数据'):'UART关';
   document.getElementById('rdLink').className='badge'+(s.uart?(s.link?'':' warn'):' off');
-  document.getElementById('rdAcq').textContent=s.enabled?'采集中':'采集已关闭';
-  document.getElementById('rdAcq').className='badge'+(s.enabled?'':' off');
+  const pwrEl=document.getElementById('rdPwr');
+  if(pwrEl){
+    pwrEl.textContent=powered?'供电中':'未供电';
+    pwrEl.className='badge'+(powered?'':' off');
+  }
   document.getElementById('rdOut').textContent=s.gpioOut?'OUT 高':'OUT 低';
   document.getElementById('rdOut').className='badge'+(s.gpioOut?'':' off');
-  document.getElementById('kPresent').innerHTML=!s.enabled?'<span class=warn>停用</span>':(s.present?'<span class=ok>有</span>':'<span class=bad>无</span>');
-  document.getElementById('kRange').textContent=s.enabled&&s.range_mm?(s.range_mm/1000).toFixed(2)+' m':'—';
-  document.getElementById('kAngle').textContent=s.enabled&&s.angle_deg!=null?s.angle_deg+'°':'—';
-  document.getElementById('kGest').textContent=s.enabled?(s.gesture||'—'):'采集已关闭';
+  document.getElementById('kPresent').innerHTML=!powered?'<span class=warn>未供电</span>':(s.present?'<span class=ok>有</span>':'<span class=bad>无</span>');
+  document.getElementById('kRange').textContent=powered&&s.range_mm?(s.range_mm/1000).toFixed(2)+' m':'—';
+  document.getElementById('kAngle').textContent=powered&&s.angle_deg!=null?s.angle_deg+'°':'—';
+  document.getElementById('kGest').textContent=powered?(s.gesture||'—'):'未供电';
   document.getElementById('detLine').textContent=
     `det=${s.det||'-'} result=0x${(s.detResult||0).toString(16)} type=${s.reportType}  `+
     `置信度 r=${s.rbConf} a=${s.angleConf} frame=${s.frameIdx}  呼吸=${s.br||0} 心率=${s.hr||0}`;
   const body=document.getElementById('objs');
-  if(s.enabled&&s.multiValid&&s.objs&&s.objs.length){
+  if(powered&&s.multiValid&&s.objs&&s.objs.length){
     body.innerHTML=s.objs.map(o=>`<tr><td>${o.slot}</td><td>${(o.range_mm/1000).toFixed(2)} m</td><td>${o.angle_deg}°</td><td>${o.velo||0}</td></tr>`).join('');
-  }else if(s.enabled&&s.primaryValid&&s.range_mm){
+  }else if(powered&&s.primaryValid&&s.range_mm){
     body.innerHTML=`<tr><td>主目标</td><td>${(s.range_mm/1000).toFixed(2)} m</td><td>${s.angle_deg}°</td><td>${s.velo||0}</td></tr>`;
   }else body.innerHTML='<tr><td colspan="4" style="color:var(--muted)">无目标</td></tr>';
   document.getElementById('moduleInfo').textContent=
     `链路 ${s.link?'正常':'等待'} · RX IO10 / TX IO9 · 版本 ${s.version||'未读'}\n`+
-    `查询 ${s.enabled?'自动 5 Hz':'已暂停'} · 多目标稳定ID=${!!s.idStable}`;
+    `查询 ${powered?'自动 5 Hz':'未供电'} · 多目标稳定ID=${!!s.idStable}`;
   document.getElementById('rdMeta').textContent=
     `协议 ${s.protocol||'-'} 波特率 ${s.baud} 帧 ${s.rxFrames} (59=${s.frames59||0}) 字节 ${s.rxBytes}\n`+
     `CRC错 ${s.crcErr} 格式错 ${s.malformedFrames||0} 未知 ${s.unknownFrames||0} 丢弃 ${s.discardedBytes||0}\n`+

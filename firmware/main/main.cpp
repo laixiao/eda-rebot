@@ -33,9 +33,10 @@
 #include "radar_at6010.h"
 #include "font_cjk.h"
 #include "device_log.h"
+#include "voice_sr.h"
 
 static const char *TAG = "eda_robot";
-static const char *FW_VERSION = "3.4.2";
+static const char *FW_VERSION = "3.5.1";
 static volatile bool otaBusy = false;
 static volatile bool shutdownPending = false;
 
@@ -322,7 +323,9 @@ static bool recStart() {
     xSemaphoreGive(audioMutex);
     return false;
   }
+  voice_sr_pause();
   if (!ensureRecBuf()) {
+    voice_sr_resume();
     xSemaphoreGive(audioMutex);
     return false;
   }
@@ -330,6 +333,7 @@ static bool recStart() {
   recActive = true;
   if (xTaskCreate(recTask, "rec", 4096, nullptr, 5, &recTaskHandle) != pdPASS) {
     recActive = false;
+    voice_sr_resume();
     ok = false;
   } else {
     ok = true;
@@ -342,6 +346,7 @@ static bool recStop() {
   if (!recActive) return true;
   recActive = false;
   for (int i = 0; i < 100 && recTaskHandle; i++) vTaskDelay(pdMS_TO_TICKS(20));
+  voice_sr_resume();
   return !recActive;
 }
 
@@ -469,7 +474,7 @@ static bool parseWavPcm16(uint8_t *buf, size_t len, int16_t **pcm, size_t *nSamp
   return true;
 }
 
-/** Q4 P-MOS：拉低 IO0_1 = 开雷达 3V3；关电时 radar_on_power 会同步关采集 */
+/** Q4 P-MOS：拉低 IO0_1 = 开雷达 3V3；开电即自动查询 */
 static bool setRadarPower(bool on) {
   if (!actuatorLock()) return false;
   const bool ok = xl.setPin(XL_RADAR_PWR, !on);
@@ -488,84 +493,142 @@ static bool servoAngle(uint8_t id, int angle) {
   return pca.setPulseUs(SERVO_CH[id], us);
 }
 
+/** 风扇强度：LED_1 × LED_ALL（两者共同决定有效占空比）。 */
+static int fanIntensityPct() {
+  int a = spotDutyPct[0];
+  int b = spotDutyPct[2];
+  if (a < 0) a = 0;
+  if (b < 0) b = 0;
+  if (a > 100) a = 100;
+  if (b > 100) b = 100;
+  return (a * b) / 100;
+}
+
+static int oledLastFanPct = -1;
+static char oledLastIp[16] = {0};
+
+static void oledShowHome(bool force = false) {
+  const int fan = fanIntensityPct();
+  if (!force && fan == oledLastFanPct && strncmp(oledLastIp, ipStr, sizeof(oledLastIp)) == 0) return;
+  if (!oled.present() || !oledMutex) return;
+  if (xSemaphoreTake(oledMutex, pdMS_TO_TICKS(50)) != pdTRUE) return;
+  oled.showHome(ipStr[0] ? ipStr : nullptr, fan);
+  oledLastFanPct = fan;
+  strncpy(oledLastIp, ipStr, sizeof(oledLastIp) - 1);
+  oledLastIp[sizeof(oledLastIp) - 1] = 0;
+  xSemaphoreGive(oledMutex);
+}
+
+/** 上次有效风扇强度（关之前记住；语音/手动开时恢复）。 */
+static int fanSavedLed1 = 100;
+static int fanSavedLedAll = 100;
+
+static void fanRememberIfOn() {
+  if (spotDutyPct[0] > 0 && spotDutyPct[2] > 0) {
+    fanSavedLed1 = spotDutyPct[0];
+    fanSavedLedAll = spotDutyPct[2];
+  }
+}
+
 static bool setSpotDuty(uint8_t id, int dutyPct) {
   if (id >= SPOT_COUNT) return false;
   if (dutyPct < 0) dutyPct = 0;
   if (dutyPct > 100) dutyPct = 100;
   uint16_t d = (uint16_t)((dutyPct * 4095L) / 100);
   const bool ok = pca.setDuty(SPOT_CH[id], d);
-  if (ok) spotDutyPct[id] = dutyPct;
+  if (ok) {
+    spotDutyPct[id] = dutyPct;
+    if (id == 0 || id == 2) {
+      fanRememberIfOn();
+      oledShowHome(false);
+    }
+  }
   return ok;
 }
 
 /** 雷达 → 仅控 LED_1（风扇）；开时顺带拉高 LED_ALL（公共地），关时只关 LED_1。 */
-static bool fanAutoEnable = false;  // Web「雷达控 LED_1」，默认关
+static bool fanAutoEnable = false;  // Web「控风扇」，默认关
 static bool fanAutoOn = false;
-static uint8_t fanPresentTicks = 0;
-static uint8_t fanAbsentTicks = 0;
-static uint8_t fanOnNeedTicks = 3;
-static const uint8_t FAN_OFF_TICKS = 35;  // ~700 ms @20 ms，关稍快减少拖尾
+static const int64_t FAN_SAMPLE_US = 2000000;  // 每 2s 取样
+static const uint8_t FAN_CONFIRM = 3;          // 连续 3 次相同再切换
+static int64_t fanLastSampleUs = 0;
+static uint8_t fanConfirmCount = 0;
+static bool fanSamplePresent = false;
 static char fanReason[64] = "未启用";
 static char fanPhase[24] = "disabled";  // disabled/idle/arming/on/holdoff
 static char fanLastAction[96] = "—";
-static uint32_t fanProgressLogTick = 0;
 
-/** 按手势/运动/存在分级：运动更快开，纯存在稍稳。返回是否视为「有触发」。 */
-static bool classifyFanTrigger(const RadarSnapshot &rs, char *reason, size_t n, uint8_t *onNeed) {
-  if (!rs.enabled) {
-    snprintf(reason, n, "采集关闭");
-    *onNeed = 3;
+static void fanSetPhase(const char *phase) { snprintf(fanPhase, sizeof(fanPhase), "%s", phase); }
+
+/** 关掉雷达联动（语音/手动控风扇时避免抢控）。 */
+static void fanDisableAuto(const char *why) {
+  fanAutoEnable = false;
+  fanAutoOn = false;
+  fanConfirmCount = 0;
+  fanLastSampleUs = 0;
+  fanSetPhase("disabled");
+  snprintf(fanReason, sizeof(fanReason), "%s", why ? why : "未启用");
+}
+
+/**
+ * 手动/语音开关风扇：开=恢复上次 LED_1×LED_ALL；关=先记住再只关 LED_1。
+ * 同时关闭雷达控风扇。
+ */
+static bool applyManualFan(bool on, const char *src) {
+  if (!pca.present()) return false;
+  fanDisableAuto(src && strstr(src, "语音") ? "语音接管" : "手动接管");
+  if (on) {
+    if (!flagPwm && !setPwmEnable(true)) return false;
+    if (!actuatorLock()) return false;
+    int a = fanSavedLedAll > 0 ? fanSavedLedAll : 100;
+    int b = fanSavedLed1 > 0 ? fanSavedLed1 : 100;
+    bool ok = setSpotDuty(2, a);
+    if (ok) ok = setSpotDuty(0, b);
+    actuatorUnlock();
+    if (ok) {
+      snprintf(fanLastAction, sizeof(fanLastAction), "开风扇 %d%%（%s）", fanIntensityPct(),
+               src ? src : "?");
+      ESP_LOGI(TAG, "fan: MANUAL ON intensity=%d src=%s", fanIntensityPct(), src ? src : "?");
+    }
+    return ok;
+  }
+  if (!actuatorLock()) return false;
+  fanRememberIfOn();
+  const bool ok = setSpotDuty(0, 0);
+  actuatorUnlock();
+  if (ok) {
+    snprintf(fanLastAction, sizeof(fanLastAction), "关风扇（%s，已记强度 %d/%d）", src ? src : "?",
+             fanSavedLed1, fanSavedLedAll);
+    ESP_LOGI(TAG, "fan: MANUAL OFF saved=%d/%d src=%s", fanSavedLed1, fanSavedLedAll,
+             src ? src : "?");
+  }
+  return ok;
+}
+
+/** 明确有人：主目标 / is_detected / 明显运动。不含单独呼吸、微动、OUT。 */
+static bool classifyFanPresent(const RadarSnapshot &rs, char *reason, size_t n) {
+  if (!flagRadarPwr) {
+    snprintf(reason, n, "雷达未供电");
     return false;
   }
-  // 手势（扫左/扫右）优先
-  if (rs.gesture[0] && (strstr(rs.gesture, "扫") != nullptr)) {
+  if (rs.gesture[0] && strstr(rs.gesture, "扫") != nullptr) {
     snprintf(reason, n, "手势:%.20s", rs.gesture);
-    *onNeed = 2;  // ~40 ms
     return true;
   }
-  // 靠近/远离/挥动·运动
   if (rs.det_result & 0x07) {
     const char *src = rs.det_text[0] ? rs.det_text : rs.gesture;
-    snprintf(reason, n, "姿态:%.20s", src);
-    *onNeed = 2;
+    snprintf(reason, n, "运动:%.20s", src);
     return true;
   }
-  // 微动
-  if (rs.det_result & 0x08) {
-    snprintf(reason, n, "微动");
-    *onNeed = 3;  // ~60 ms
-    return true;
-  }
-  // 呼吸存在
-  if (rs.det_result & 0x10) {
-    snprintf(reason, n, "呼吸存在");
-    *onNeed = 4;  // ~80 ms
-    return true;
-  }
-  // UART 主目标 / 检测到人
   if (rs.primary_valid || rs.is_detected) {
     if (rs.range_mm > 0)
-      snprintf(reason, n, "人存在 %u.%um", (unsigned)(rs.range_mm / 1000),
+      snprintf(reason, n, "人 %u.%um", (unsigned)(rs.range_mm / 1000),
                (unsigned)((rs.range_mm % 1000) / 100));
     else
-      snprintf(reason, n, "人存在");
-    *onNeed = 3;
-    return true;
-  }
-  // 多目标有效
-  if (rs.multi_valid && rs.obj_num > 0) {
-    snprintf(reason, n, "多目标×%u", (unsigned)rs.obj_num);
-    *onNeed = 3;
-    return true;
-  }
-  // 硬件 OUT（偏慢，避免误触发）
-  if (rs.gpio_out) {
-    snprintf(reason, n, "OUT脚有人");
-    *onNeed = 5;  // ~100 ms
+      snprintf(reason, n, "检测到人");
     return true;
   }
   snprintf(reason, n, "无人");
-  *onNeed = 3;
   return false;
 }
 
@@ -574,7 +637,6 @@ static bool applyRadarFan(bool on) {
   if (on) {
     if (!flagPwm && !setPwmEnable(true)) return false;
     if (!actuatorLock()) return false;
-    // 仅业务控 LED_1；LED_ALL 为公共地，点亮 LED_1 时必须有通路
     bool ok = true;
     if (spotDutyPct[2] < 100) ok = setSpotDuty(2, 100);
     if (ok) ok = setSpotDuty(0, 100);
@@ -582,20 +644,13 @@ static bool applyRadarFan(bool on) {
     return ok;
   }
   if (!actuatorLock()) return false;
-  const bool ok = setSpotDuty(0, 0);  // 关时只关 LED_1，不动 LED_ALL/LED_2
+  fanRememberIfOn();
+  const bool ok = setSpotDuty(0, 0);
   actuatorUnlock();
   return ok;
 }
 
-static void fanSetPhase(const char *phase) { snprintf(fanPhase, sizeof(fanPhase), "%s", phase); }
-
 static void updateRadarFan(const RadarSnapshot &rs) {
-  char reason[64];
-  uint8_t onNeed = 3;
-  const bool active = classifyFanTrigger(rs, reason, sizeof(reason), &onNeed);
-  snprintf(fanReason, sizeof(fanReason), "%s", reason);
-  fanOnNeedTicks = onNeed;
-
   if (!fanAutoEnable) {
     if (fanAutoOn) {
       if (applyRadarFan(false)) {
@@ -604,70 +659,75 @@ static void updateRadarFan(const RadarSnapshot &rs) {
         ESP_LOGI(TAG, "fan: OFF (auto disabled)");
       }
     }
-    fanPresentTicks = fanAbsentTicks = 0;
+    fanConfirmCount = 0;
     fanSetPhase("disabled");
+    snprintf(fanReason, sizeof(fanReason), "未启用");
     return;
   }
 
-  if (!flagRadarPwr || !radar_enabled()) {
+  if (!flagRadarPwr) {
     if (fanAutoOn) {
       if (applyRadarFan(false)) {
         fanAutoOn = false;
-        snprintf(fanLastAction, sizeof(fanLastAction), "关 LED_1：雷达未供电/未采集");
-        ESP_LOGI(TAG, "fan: OFF (radar idle)");
+        snprintf(fanLastAction, sizeof(fanLastAction), "关 LED_1：雷达未供电");
+        ESP_LOGI(TAG, "fan: OFF (radar power off)");
       }
     }
-    fanPresentTicks = fanAbsentTicks = 0;
+    fanConfirmCount = 0;
     fanSetPhase("idle");
-    snprintf(fanReason, sizeof(fanReason), "%s", !flagRadarPwr ? "雷达未供电" : "采集关闭");
+    snprintf(fanReason, sizeof(fanReason), "雷达未供电");
     return;
   }
 
-  if (active) {
-    fanPresentTicks = (uint8_t)((fanPresentTicks < 250) ? fanPresentTicks + 1 : 250);
-    fanAbsentTicks = 0;
-    if (!fanAutoOn) {
-      fanSetPhase("arming");
-      if (fanPresentTicks >= onNeed) {
-        if (applyRadarFan(true)) {
-          fanAutoOn = true;
-          fanSetPhase("on");
-          snprintf(fanLastAction, sizeof(fanLastAction), "开 LED_1：%s", reason);
-          ESP_LOGI(TAG, "fan: ON reason=%s", reason);
-        }
-      } else if ((fanPresentTicks % 2) == 0 || fanPresentTicks == 1) {
-        // 控制台进度：开倒计时
-        if (fanProgressLogTick != fanPresentTicks) {
-          fanProgressLogTick = fanPresentTicks;
-          ESP_LOGI(TAG, "fan: arming %u/%u (%s)", (unsigned)fanPresentTicks, (unsigned)onNeed,
-                   reason);
-        }
-      }
-    } else {
+  const int64_t now = esp_timer_get_time();
+  if (fanLastSampleUs != 0 && (now - fanLastSampleUs) < FAN_SAMPLE_US) {
+    if (fanAutoOn)
       fanSetPhase("on");
+    else if (fanConfirmCount > 0 && fanSamplePresent)
+      fanSetPhase("arming");
+    else if (fanConfirmCount > 0 && !fanSamplePresent)
+      fanSetPhase("holdoff");
+    else
+      fanSetPhase("idle");
+    return;
+  }
+  fanLastSampleUs = now;
+
+  char reason[64];
+  const bool present = classifyFanPresent(rs, reason, sizeof(reason));
+  snprintf(fanReason, sizeof(fanReason), "%s", reason);
+
+  if (fanConfirmCount == 0 || present != fanSamplePresent) {
+    fanSamplePresent = present;
+    fanConfirmCount = 1;
+  } else {
+    fanConfirmCount = (uint8_t)((fanConfirmCount < 250) ? fanConfirmCount + 1 : 250);
+  }
+
+  if (fanConfirmCount < FAN_CONFIRM) {
+    fanSetPhase(fanSamplePresent ? (fanAutoOn ? "on" : "arming")
+                                 : (fanAutoOn ? "holdoff" : "idle"));
+    ESP_LOGI(TAG, "fan: sample %s %u/%u (%s)", fanSamplePresent ? "present" : "absent",
+             (unsigned)fanConfirmCount, (unsigned)FAN_CONFIRM, reason);
+    return;
+  }
+
+  if (fanSamplePresent && !fanAutoOn) {
+    if (applyRadarFan(true)) {
+      fanAutoOn = true;
+      fanSetPhase("on");
+      snprintf(fanLastAction, sizeof(fanLastAction), "开 LED_1：%s", reason);
+      ESP_LOGI(TAG, "fan: ON reason=%s", reason);
+    }
+  } else if (!fanSamplePresent && fanAutoOn) {
+    if (applyRadarFan(false)) {
+      fanAutoOn = false;
+      fanSetPhase("idle");
+      snprintf(fanLastAction, sizeof(fanLastAction), "关 LED_1：%s", reason);
+      ESP_LOGI(TAG, "fan: OFF reason=%s", reason);
     }
   } else {
-    fanAbsentTicks = (uint8_t)((fanAbsentTicks < 250) ? fanAbsentTicks + 1 : 250);
-    fanPresentTicks = 0;
-    if (fanAutoOn) {
-      fanSetPhase("holdoff");
-      if (fanAbsentTicks >= FAN_OFF_TICKS) {
-        if (applyRadarFan(false)) {
-          fanAutoOn = false;
-          fanSetPhase("idle");
-          snprintf(fanLastAction, sizeof(fanLastAction), "关 LED_1：%s（持续无人）", reason);
-          ESP_LOGI(TAG, "fan: OFF reason=%s", reason);
-        }
-      } else if ((fanAbsentTicks % 5) == 0 || fanAbsentTicks == 1) {
-        if (fanProgressLogTick != (1000u + fanAbsentTicks)) {
-          fanProgressLogTick = 1000u + fanAbsentTicks;
-          ESP_LOGI(TAG, "fan: holdoff %u/%u (%s)", (unsigned)fanAbsentTicks,
-                   (unsigned)FAN_OFF_TICKS, reason);
-        }
-      }
-    } else {
-      fanSetPhase("idle");
-    }
+    fanSetPhase(fanAutoOn ? "on" : "idle");
   }
 }
 
@@ -685,12 +745,14 @@ static bool emergencyStop() {
     radar_on_power(false);
   }
   fanAutoOn = false;
-  fanPresentTicks = fanAbsentTicks = 0;
+  fanConfirmCount = 0;
+  fanLastSampleUs = 0;
   fanSetPhase(fanAutoEnable ? "idle" : "disabled");
   snprintf(fanReason, sizeof(fanReason), "急停");
   snprintf(fanLastAction, sizeof(fanLastAction), "关 LED_1：急停");
   spotDutyPct[0] = spotDutyPct[1] = spotDutyPct[2] = 0;
   actuatorUnlock();
+  oledShowHome(true);
   return oeOk && ampOk && radarOk && pwmOk;
 }
 
@@ -766,14 +828,6 @@ static esp_err_t handleRadarPost(httpd_req_t *req) {
   if (argsHasKey(a, "power")) {
     if (!setRadarPower(argBool(a, "power", true)))
       return sendJson(req, 500, "{\"ok\":false,\"error\":\"radar power write failed\"}");
-  }
-  if (argsHasKey(a, "on")) {
-    const bool wantOn = argBool(a, "on", true);
-    if (wantOn && !flagRadarPwr)
-      return sendJson(req, 409, "{\"ok\":false,\"error\":\"radar power is off; turn power on first\"}");
-    radar_set_enabled(wantOn);
-  }
-  if (argsHasKey(a, "power") || argsHasKey(a, "on")) {
     char buf[1536];
     radar_json_summary(buf, sizeof(buf));
     std::string body = buf;
@@ -785,14 +839,28 @@ static esp_err_t handleRadarPost(httpd_req_t *req) {
     }
     return sendJson(req, 200, body);
   }
+  // 旧客户端若仍传 on=：忽略（供电开即查询）
+  if (argsHasKey(a, "on")) {
+    char buf[1536];
+    radar_json_summary(buf, sizeof(buf));
+    std::string body = buf;
+    if (!body.empty() && body.back() == '}') {
+      body.pop_back();
+      body += ",\"power\":";
+      body += flagRadarPwr ? "true" : "false";
+      body += ",\"note\":\"acquire removed; use power only\"";
+      body += '}';
+    }
+    return sendJson(req, 200, body);
+  }
   const std::string cmd = argStr(a, "cmd", "");
   bool commandOk = false;
   if (cmd == "version") commandOk = radar_cmd_get_version();
   else if (cmd == "poll") commandOk = radar_cmd_get_det();
-  else return sendJson(req, 400, "{\"ok\":false,\"error\":\"use power/on/cmd=version|poll\"}");
+  else return sendJson(req, 400, "{\"ok\":false,\"error\":\"use power or cmd=version|poll\"}");
   if (!commandOk) {
-    if (cmd == "poll" && !radar_enabled())
-      return sendJson(req, 409, "{\"ok\":false,\"error\":\"radar acquisition is disabled\"}");
+    if (cmd == "poll" && !flagRadarPwr)
+      return sendJson(req, 409, "{\"ok\":false,\"error\":\"radar power is off\"}");
     return sendJson(req, 500, "{\"ok\":false,\"error\":\"radar UART write failed\"}");
   }
   char buf[1536];
@@ -814,7 +882,8 @@ static esp_err_t handleApiIndex(httpd_req_t *req) {
   body += "{\"path\":\"/api/servo\",\"note\":\"id 0..1 = T3/T4\"},";
   body += "{\"path\":\"/api/servos\"},";
   body += "{\"path\":\"/api/led\",\"note\":\"id 0=LED_1 1=LED_2 2=LED_ALL; need LED_ALL for 1/2\"},";
-  body += "{\"path\":\"/api/fan\",\"note\":\"radar→LED_1 auto; GET status / POST auto=0|1\"},";
+  body += "{\"path\":\"/api/fan\",\"note\":\"radar auto OR power=1|0 (last intensity; disables auto)\"},";
+  body += "{\"path\":\"/api/voice\",\"note\":\"GET ESP-SR; wake=你好小智; cmds=开/关风扇\"},";
   body += "{\"path\":\"/api/i2c\",\"note\":\"?full=1 for bus scan\"},";
   body += "{\"path\":\"/api/mic\",\"note\":\"RMS sample\"},";
   body += "{\"path\":\"/api/rec\",\"note\":\"POST on=1|0 record; GET status; GET /api/rec/wav\"},";
@@ -823,7 +892,7 @@ static esp_err_t handleApiIndex(httpd_req_t *req) {
   body += "{\"path\":\"/api/beep\"},{\"path\":\"/api/oled\"},";
   body += "{\"path\":\"/api/ota\",\"methods\":[\"GET\",\"POST\"]},";
   body += "{\"path\":\"/api/logs\"},";
-  body += "{\"path\":\"/api/radar\",\"note\":\"power + acquire on/off\"},";
+  body += "{\"path\":\"/api/radar\",\"note\":\"power on/off (auto query when powered)\"},";
   body += "{\"path\":\"/api/radar/live\"},{\"path\":\"/radar\"}";
   body += "]}";
   return sendJson(req, 200, body);
@@ -846,46 +915,60 @@ static void jsonEscLite(const char *in, char *out, size_t n) {
 }
 
 static void fanJsonInto(char *buf, size_t buflen) {
-  const uint8_t need = fanAutoOn ? FAN_OFF_TICKS : fanOnNeedTicks;
-  const uint8_t cur = fanAutoOn ? fanAbsentTicks : fanPresentTicks;
   char r[72], a[112];
   jsonEscLite(fanReason, r, sizeof(r));
   jsonEscLite(fanLastAction, a, sizeof(a));
   snprintf(buf, buflen,
            "{\"auto\":%s,\"on\":%s,\"phase\":\"%s\",\"reason\":\"%s\",\"lastAction\":\"%s\","
-           "\"progress\":%u,\"need\":%u,\"offNeed\":%u,\"led1\":%d}",
+           "\"progress\":%u,\"need\":%u,\"offNeed\":%u,\"sampleMs\":2000,\"confirm\":%u,"
+           "\"samplePresent\":%s,\"led1\":%d,\"ledAll\":%d,\"intensity\":%d,"
+           "\"savedLed1\":%d,\"savedLedAll\":%d,\"savedIntensity\":%d}",
            fanAutoEnable ? "true" : "false", fanAutoOn ? "true" : "false", fanPhase, r, a,
-           (unsigned)cur, (unsigned)need, (unsigned)FAN_OFF_TICKS, spotDutyPct[0]);
+           (unsigned)fanConfirmCount, (unsigned)FAN_CONFIRM, (unsigned)FAN_CONFIRM,
+           (unsigned)FAN_CONFIRM, fanSamplePresent ? "true" : "false", spotDutyPct[0],
+           spotDutyPct[2], fanIntensityPct(), fanSavedLed1, fanSavedLedAll,
+           (fanSavedLed1 * fanSavedLedAll) / 100);
 }
 
 static esp_err_t handleFanGet(httpd_req_t *req) {
-  char fan[480];
+  char fan[560];
   fanJsonInto(fan, sizeof(fan));
-  char buf[520];
+  char buf[600];
   snprintf(buf, sizeof(buf), "{\"ok\":true,\"fan\":%s}", fan);
   return sendJson(req, 200, buf);
 }
 
 static esp_err_t handleFanPost(httpd_req_t *req) {
   auto a = loadArgs(req);
-  if (!argsHasKey(a, "auto") && !argsHasKey(a, "on"))
-    return sendJson(req, 400, "{\"ok\":false,\"error\":\"need auto or on bool\"}");
-  const bool en = argsHasKey(a, "auto") ? argBool(a, "auto", false) : argBool(a, "on", false);
-  fanAutoEnable = en;
-  if (!en && fanAutoOn) {
-    if (applyRadarFan(false)) {
-      fanAutoOn = false;
-      snprintf(fanLastAction, sizeof(fanLastAction), "关 LED_1：用户关闭联动");
-      ESP_LOGI(TAG, "fan: OFF (user disabled auto)");
-    }
+  const bool hasPower = argsHasKey(a, "power");
+  const bool hasAuto = argsHasKey(a, "auto") || (!hasPower && argsHasKey(a, "on"));
+  if (!hasPower && !hasAuto)
+    return sendJson(req, 400, "{\"ok\":false,\"error\":\"need auto or power bool\"}");
+
+  if (hasPower) {
+    const bool on = argBool(a, "power", false);
+    if (!applyManualFan(on, "API"))
+      return sendJson(req, 500, "{\"ok\":false,\"error\":\"fan power failed\"}");
   }
-  fanPresentTicks = fanAbsentTicks = 0;
-  fanSetPhase(en ? "idle" : "disabled");
-  if (!en) snprintf(fanReason, sizeof(fanReason), "未启用");
-  ESP_LOGI(TAG, "fan: auto=%d", en ? 1 : 0);
-  char fan[480];
+  if (hasAuto) {
+    const bool en = argsHasKey(a, "auto") ? argBool(a, "auto", false) : argBool(a, "on", false);
+    fanAutoEnable = en;
+    if (!en && fanAutoOn) {
+      if (applyRadarFan(false)) {
+        fanAutoOn = false;
+        snprintf(fanLastAction, sizeof(fanLastAction), "关 LED_1：用户关闭联动");
+        ESP_LOGI(TAG, "fan: OFF (user disabled auto)");
+      }
+    }
+    fanConfirmCount = 0;
+    fanLastSampleUs = 0;
+    fanSetPhase(en ? "idle" : "disabled");
+    if (!en) snprintf(fanReason, sizeof(fanReason), "未启用");
+    ESP_LOGI(TAG, "fan: auto=%d", en ? 1 : 0);
+  }
+  char fan[560];
   fanJsonInto(fan, sizeof(fan));
-  char buf[520];
+  char buf[600];
   snprintf(buf, sizeof(buf), "{\"ok\":true,\"fan\":%s}", fan);
   return sendJson(req, 200, buf);
 }
@@ -897,22 +980,24 @@ static esp_err_t handleStatus(httpd_req_t *req) {
 
   const bool psramOk = esp_psram_is_initialized();
   const size_t psramBytes = psramOk ? esp_psram_get_size() : 0;
-  char fan[480];
+  char fan[560];
   fanJsonInto(fan, sizeof(fan));
-  char buf[1100];
+  char voice[200];
+  voice_sr_status(voice, sizeof(voice));
+  char buf[1400];
   snprintf(buf, sizeof(buf),
            "{\"ok\":true,\"fw\":\"%s\",\"board\":\"v6-1\",\"ip\":\"%s\",\"rssi\":%d,"
            "\"psram\":%s,\"psramBytes\":%u,"
            "\"xl9555\":%s,\"oled\":%s,\"pca9685\":%s,\"i2s\":%s,"
            "\"pwmEnable\":%s,\"ampEnable\":%s,\"volume\":%u,\"radarPower\":%s,\"otaBusy\":%s,"
-           "\"leds\":[%d,%d,%d],\"fan\":%s,\"i2c\":%s}",
+           "\"leds\":[%d,%d,%d],\"fan\":%s,\"voice\":%s,\"i2c\":%s}",
            FW_VERSION, ipStr, rssi, psramOk ? "true" : "false", (unsigned)psramBytes,
            xl.present() ? "true" : "false", oled.present() ? "true" : "false",
            pca.present() ? "true" : "false", i2sReady ? "true" : "false",
            flagPwm ? "true" : "false", flagAmp ? "true" : "false",
            (unsigned)board_i2s_get_volume(),
            flagRadarPwr ? "true" : "false", otaBusy ? "true" : "false", spotDutyPct[0],
-           spotDutyPct[1], spotDutyPct[2], fan, i2cScanJson().c_str());
+           spotDutyPct[1], spotDutyPct[2], fan, voice, i2cScanJson().c_str());
   return sendJson(req, 200, buf);
 }
 
@@ -1067,6 +1152,34 @@ static esp_err_t handleLed(httpd_req_t *req) {
   char b[96];
   snprintf(b, sizeof(b), "{\"ok\":true,\"id\":%d,\"duty\":%d,\"pwmEnable\":true}", id, duty);
   return sendJson(req, 200, b);
+}
+
+static esp_err_t handleVoiceGet(httpd_req_t *req) {
+  char voice[200];
+  voice_sr_status(voice, sizeof(voice));
+  char buf[240];
+  snprintf(buf, sizeof(buf), "{\"ok\":true,\"voice\":%s}", voice);
+  return sendJson(req, 200, buf);
+}
+
+static void onVoiceSrCmd(int cmd_id) {
+  if (cmd_id == 0) {
+    // 唤醒提示音（短 beep）；失败忽略
+    if (i2sReady) {
+      const bool was = flagAmp;
+      if (!was) setAmp(true);
+      board_i2s_beep(80);
+      if (!was) setAmp(false);
+    }
+    return;
+  }
+  if (cmd_id == VOICE_SR_CMD_FAN_ON) {
+    applyManualFan(true, "语音");
+    return;
+  }
+  if (cmd_id == VOICE_SR_CMD_FAN_OFF) {
+    applyManualFan(false, "语音");
+  }
 }
 
 static esp_err_t handleMic(httpd_req_t *req) {
@@ -1473,6 +1586,8 @@ static void setupHttp() {
   registerUri(server, "/api/fan", HTTP_GET, handleFanGet);
   registerUri(server, "/api/fan", HTTP_POST, handleFanPost);
   registerUri(server, "/api/fan", HTTP_OPTIONS, handleOptions);
+  registerUri(server, "/api/voice", HTTP_GET, handleVoiceGet);
+  registerUri(server, "/api/voice", HTTP_OPTIONS, handleOptions);
   registerUri(server, "/api/i2c", HTTP_GET, handleI2c);
   registerUri(server, "/api/i2c", HTTP_OPTIONS, handleOptions);
   registerUri(server, "/api/mic", HTTP_GET, handleMic);
@@ -1516,16 +1631,6 @@ static void setupHttp() {
 }
 
 // ---- WiFi ----
-static void oledShowIpStatus(const char *footer) {
-  if (!oled.present() || !oledMutex) return;
-  if (xSemaphoreTake(oledMutex, pdMS_TO_TICKS(100)) != pdTRUE) return;
-  if (ipStr[0])
-    oled.showIp(ipStr, footer);
-  else
-    oled.printfLines("WiFi...", WIFI_SSID, "连接中", footer ? footer : FW_VERSION);
-  xSemaphoreGive(oledMutex);
-}
-
 static void wifi_event_handler(void *, esp_event_base_t base, int32_t id, void *data) {
   if (base == WIFI_EVENT && id == WIFI_EVENT_STA_START) {
     esp_wifi_connect();
@@ -1533,14 +1638,14 @@ static void wifi_event_handler(void *, esp_event_base_t base, int32_t id, void *
     const bool hadIp = ipStr[0] != 0;
     wifiOk = false;
     ipStr[0] = 0;
-    if (hadIp) oledShowIpStatus(FW_VERSION);
+    if (hadIp) oledShowHome(true);
     esp_wifi_connect();
   } else if (base == IP_EVENT && id == IP_EVENT_STA_GOT_IP) {
     ip_event_got_ip_t *event = (ip_event_got_ip_t *)data;
     snprintf(ipStr, sizeof(ipStr), IPSTR, IP2STR(&event->ip_info.ip));
     wifiOk = true;
     ESP_LOGI(TAG, "Got IP: %s", ipStr);
-    oledShowIpStatus(FW_VERSION);
+    oledShowHome(true);
   }
 }
 
@@ -1574,6 +1679,7 @@ static void background_task(void *) {
     RadarSnapshot rs;
     radar_get_snapshot(rs);
     updateRadarFan(rs);
+    oledShowHome(false);
     vTaskDelay(pdMS_TO_TICKS(20));
   }
 }
@@ -1621,6 +1727,10 @@ extern "C" void app_main(void) {
 
   i2sReady = board_i2s_init();
   ESP_LOGI(TAG, "I2S=%d", i2sReady);
+  if (i2sReady) {
+    const bool vok = voice_sr_start(onVoiceSrCmd);
+    ESP_LOGI(TAG, "voice_sr=%d (wake=你好小智)", vok ? 1 : 0);
+  }
 
   wifi_init();
 
@@ -1628,6 +1738,10 @@ extern "C" void app_main(void) {
   if (!wifiOk && okOled && xSemaphoreTake(oledMutex, pdMS_TO_TICKS(100)) == pdTRUE) {
     oled.printfLines("WiFi FAIL", WIFI_SSID, "检查热点", FW_VERSION);
     xSemaphoreGive(oledMutex);
+    oledLastFanPct = fanIntensityPct();
+    oledLastIp[0] = 0;
+  } else if (wifiOk) {
+    oledShowHome(true);
   }
 
   if (xTaskCreate(background_task, "bg", 4096, nullptr, 5, nullptr) != pdPASS) {

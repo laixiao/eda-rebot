@@ -9,7 +9,7 @@
 | 原理图图页 UUID | `1d774ca900623155` |
 | 主控 | `U1 ESP32-S3-WROOM-1-N16R8`（16MB Flash + 8MB Octal PSRAM） |
 | 最新实时网表基线 | 2026-08-09：**73** 位号、**56** 网络（PCB↔SCH 零差异） |
-| 固件 | `firmware/` ESP-IDF **FW 3.4.2**（对齐 v6-1；录音/扬声器数字音量） |
+| 固件 | `firmware/` ESP-IDF **FW 3.5.0**（对齐 v6-1；语音控风扇 / 录音/扬声器数字音量） |
 | DRC | 原理图 DRC 2 warn（无详情）；布线时电源平面用 `3V3` |
 
 详细且持续更新的电路事实见 `.cursor/rules/board-facts.mdc`。审查时以 EasyEDA 实时网表为最终依据。

@@ -82,6 +82,14 @@ class RobotApi:
         """雷达自动控 LED_1（风扇）；默认固件侧为关"""
         return self._call("/api/fan", {"auto": on}, method="POST")
 
+    def fan_power(self, on: bool = True) -> dict:
+        """手动开/关风扇（恢复上次强度；同时关闭雷达联动）"""
+        return self._call("/api/fan", {"power": on}, method="POST")
+
+    def voice(self) -> dict:
+        """板端语音：唤醒「你好小智」→「开风扇」「关风扇」"""
+        return self._call("/api/voice")
+
     def mic(self) -> dict:
         return self._call("/api/mic")
 
@@ -133,7 +141,8 @@ class RobotApi:
         return self._call("/api/radar", {"power": on}, method="POST")
 
     def radar_enable(self, on: bool = True) -> dict:
-        return self._call("/api/radar", {"on": on}, method="POST")
+        """Deprecated: acquisition follows power. Maps to radar_power()."""
+        return self.radar_power(on)
 
     def ota_info(self) -> dict:
         return self._call("/api/ota")
