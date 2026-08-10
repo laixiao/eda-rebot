@@ -80,7 +80,7 @@ void radar_set_enabled(bool enabled);
 bool radar_enabled();
 bool radar_powered();  // whether module VCC is switched on (Q4 / XL IO0_1)
 void radar_set_gpio_out(bool level);
-void radar_on_power(bool powered);  // flush UART / clear RX after module power change
+void radar_on_power(bool powered);  // flush UART / clear RX；关电时同步关采集
 void radar_poll();  // call from bg task
 bool radar_cmd_get_version();
 bool radar_cmd_get_det();

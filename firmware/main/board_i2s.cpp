@@ -9,6 +9,20 @@ static const char *TAG = "i2s";
 static i2s_chan_handle_t s_mic_rx = nullptr;
 static i2s_chan_handle_t s_amp_tx = nullptr;
 static bool s_ok = false;
+static uint8_t s_volume = 100;
+
+void board_i2s_set_volume(uint8_t pct) {
+  if (pct > 100) pct = 100;
+  s_volume = pct;
+}
+
+uint8_t board_i2s_get_volume() { return s_volume; }
+
+static inline int16_t apply_volume(int16_t s) {
+  if (s_volume >= 100) return s;
+  if (s_volume == 0) return 0;
+  return (int16_t)(((int32_t)s * (int32_t)s_volume) / 100);
+}
 
 static void cleanup_channels() {
   if (s_mic_rx) {
@@ -108,9 +122,55 @@ bool board_i2s_mic_rms(int32_t &rms, int32_t &peak) {
   return true;
 }
 
+bool board_i2s_mic_read_pcm16(int16_t *out, size_t max_samples, size_t *got) {
+  if (!s_mic_rx || !out || max_samples == 0) return false;
+  if (got) *got = 0;
+  // INMP441：32-bit 槽位内 24-bit，与 RMS 路径一致右移后钳到 int16
+  int32_t raw[256];
+  size_t filled = 0;
+  while (filled < max_samples) {
+    const size_t want = (max_samples - filled) > 256 ? 256 : (max_samples - filled);
+    size_t n_bytes = 0;
+    if (i2s_channel_read(s_mic_rx, raw, want * sizeof(int32_t), &n_bytes, 100) != ESP_OK)
+      break;
+    const size_t n = n_bytes / sizeof(int32_t);
+    if (n == 0) break;
+    for (size_t i = 0; i < n; i++) {
+      int32_t v = raw[i] >> 14;
+      if (v > 32767) v = 32767;
+      if (v < -32768) v = -32768;
+      out[filled++] = (int16_t)v;
+    }
+  }
+  if (got) *got = filled;
+  return filled > 0;
+}
+
+bool board_i2s_play_pcm16(const int16_t *mono, size_t n_samples) {
+  if (!s_amp_tx || !mono || n_samples == 0) return false;
+  int16_t frames[256 * 2];
+  size_t done = 0;
+  while (done < n_samples) {
+    const size_t count = (n_samples - done) > 256 ? 256 : (n_samples - done);
+    for (size_t i = 0; i < count; i++) {
+      const int16_t s = apply_volume(mono[done + i]);
+      frames[i * 2] = s;
+      frames[i * 2 + 1] = s;
+    }
+    size_t written = 0;
+    const size_t bytes = count * 2 * sizeof(int16_t);
+    if (i2s_channel_write(s_amp_tx, frames, bytes, &written, 250) != ESP_OK || written != bytes)
+      return false;
+    done += count;
+  }
+  memset(frames, 0, sizeof(frames));
+  size_t written = 0;
+  return i2s_channel_write(s_amp_tx, frames, sizeof(frames), &written, 250) == ESP_OK;
+}
+
 bool board_i2s_beep(uint16_t ms) {
   if (!s_amp_tx) return false;
-  const int rate = 16000;
+  const int rate = BOARD_I2S_RATE;
   const int freq = 1000;
   const size_t n = (size_t)rate * ms / 1000;
   int16_t frames[256 * 2];
@@ -119,7 +179,7 @@ bool board_i2s_beep(uint16_t ms) {
     const size_t count = (n - done) > 256 ? 256 : (n - done);
     for (size_t i = 0; i < count; i++) {
       float t = (float)(done + i) / rate;
-      int16_t s = (int16_t)(8000.0f * sinf(2.0f * (float)M_PI * freq * t));
+      int16_t s = apply_volume((int16_t)(8000.0f * sinf(2.0f * (float)M_PI * freq * t)));
       frames[i * 2] = s;
       frames[i * 2 + 1] = s;
     }

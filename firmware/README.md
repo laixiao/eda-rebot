@@ -15,7 +15,14 @@ idf.py build
 idf.py -p COMx flash monitor
 ```
 
-## 本板能力（FW 3.0.0）
+若缺少 `main/font_cjk.bin`（约 3800 字 OLED 字库），在 `firmware/` 下执行：
+
+```bash
+python scripts/pack_font_cjk.py
+```
+
+然后重新 `idf.py build`。
+## 本板能力（FW 3.4.2）
 
 | 模块 | 说明 | API |
 |---|---|---|
@@ -23,7 +30,7 @@ idf.py -p COMx flash monitor
 | 舵机 T3/T4 | U16 LED11/12；先 `/api/pwm?on=1` | `/api/servo` |
 | 探照灯 | U16 LED1/2/0 → MOSFET；LED_ALL 为公共地 | `/api/led` |
 | 雷达 MS60 | UART IO9/10；供电 XL IO0_1；OUT→IO0_0 | `/api/radar` `power`/`on` |
-| 麦/功放 | I2S；功放 SD→XL IO1_6 | `/api/mic` `/api/amp` `/api/beep` |
+| 录音/扬声器 | I2S；功放 SD→XL IO1_6；数字音量 0..100 | `/api/rec` `/api/play` `/api/play/upload` `/api/amp` `/api/beep` |
 | OLED | | `/api/oled` |
 | OTA | 双分区 | `/api/ota` |
 
@@ -33,9 +40,9 @@ idf.py -p COMx flash monitor
 
 ## 雷达
 
-1. `POST /api/radar {"power":true}` — 打开 Q4 供电  
-2. `POST /api/radar {"on":true}` — 开始采集  
-3. 浏览器 `/radar` 或 `GET /api/radar/live`
+1. `POST /api/radar {"power":true}` — 打开 Q4 供电
+2. `POST /api/radar {"on":true}` — 开始采集（须已供电；关供电会同步关采集）
+3. 浏览器首页「设备日志」右侧雷达调试区，或 `GET /api/radar/live`（`/radar` 会跳转首页）
 
 ## Web 烧录
 

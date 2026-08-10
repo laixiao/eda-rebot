@@ -9,7 +9,7 @@
 | 原理图图页 UUID | `1d774ca900623155` |
 | 主控 | `U1 ESP32-S3-WROOM-1-N16R8`（16MB Flash + 8MB Octal PSRAM） |
 | 最新实时网表基线 | 2026-08-09：**73** 位号、**56** 网络（PCB↔SCH 零差异） |
-| 固件 | `firmware/` ESP-IDF **FW 3.0.0**（对齐 v6-1；已去摄像头/LCD/电机） |
+| 固件 | `firmware/` ESP-IDF **FW 3.4.2**（对齐 v6-1；录音/扬声器数字音量） |
 | DRC | 原理图 DRC 2 warn（无详情）；布线时电源平面用 `3V3` |
 
 详细且持续更新的电路事实见 `.cursor/rules/board-facts.mdc`。审查时以 EasyEDA 实时网表为最终依据。
@@ -41,9 +41,9 @@
 
 | 模块 | 已核实连接 | 固件 API（需核对是否已适配 v6-1） |
 |---|---|---|
-| I2S 麦克风 U2 | SCK=IO16、WS=IO17、SD=IO18 | `/api/mic` |
-| I2S 功放 U3 | LRC=IO38、BCLK=IO39、DIN=IO40、SD→XL IO1_6 | `/api/amp` `/api/beep` |
-| 60G 雷达 | UART→IO9/10；OUT→XL IO0_0；VCC←Q4←XL IO0_1 | `/api/radar` `/radar` |
+| I2S 麦克风 U2 | SCK=IO16、WS=IO17、SD=IO18 | `/api/rec` 录音；`/api/mic` RMS |
+| I2S 功放 U3 | LRC=IO38、BCLK=IO39、DIN=IO40、SD→XL IO1_6 | `/api/play` `/api/play/upload` `/api/amp`（`volume` 0..100）`/api/beep` |
+| 60G 雷达 | UART→IO9/10；OUT→XL IO0_0；VCC←Q4←XL IO0_1 | `/api/radar`；首页日志右侧调试 |
 | 舵机 T3–T4 | U16 LED11–12 | `/api/servo`（先 `/api/pwm?on=1`） |
 | 探照灯 | U16 LED0/1/2 + Q3/Q2/Q1；LED3–5→U8 | `/api/led` |
 | OLED U10 | I2C 0x3C | `/api/oled` |

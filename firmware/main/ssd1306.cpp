@@ -95,6 +95,31 @@ void SSD1306::putAscii(uint8_t col, uint8_t page, char c) {
   }
 }
 
+void SSD1306::putAscii12(uint8_t col, uint8_t page, char c) {
+  // Scale 5x7 → 7x12 (nearest neighbor)
+  if (page > 6 || col > 121) return;
+  const uint8_t uc = (uint8_t)c;
+  if (uc < 32 || uc > 127) c = '?';
+  const uint8_t *glyph = FONT5X7 + ((uint8_t)c - 32) * 5;
+  size_t top = (size_t)page * 128 + col;
+  size_t bot = (size_t)(page + 1) * 128 + col;
+  for (uint8_t dx = 0; dx < 7; dx++) {
+    const uint8_t sx = (uint8_t)((dx * 5) / 7);
+    const uint8_t src = glyph[sx];
+    uint8_t hi = 0, lo = 0;
+    for (uint8_t dy = 0; dy < 12; dy++) {
+      const uint8_t sy = (uint8_t)((dy * 7) / 12);
+      if (!(src & (1u << sy))) continue;
+      if (dy < 8)
+        hi |= (uint8_t)(1u << dy);
+      else
+        lo |= (uint8_t)(1u << (dy - 8));
+    }
+    buf_[top + dx] = hi;
+    buf_[bot + dx] = lo;
+  }
+}
+
 void SSD1306::putCjk(uint8_t col, uint8_t page, const uint8_t glyph[32]) {
   if (page > 6 || col > 112) return;
   size_t top = (size_t)page * 128 + col;
@@ -151,12 +176,59 @@ void SSD1306::drawText(uint8_t col, uint8_t page, const char *text) {
   }
 }
 
+void SSD1306::drawTextLarge(uint8_t col, uint8_t page, const char *text) {
+  if (!text) return;
+  while (*text && col + 7 <= 128) {
+    putAscii12(col, page, *text++);
+    col = (uint8_t)(col + 8);
+  }
+}
+
 bool SSD1306::printfLines(const char *l0, const char *l1, const char *l2, const char *l3) {
   clear();
   drawText(0, 0, l0);
   drawText(0, 2, l1);
   drawText(0, 4, l2);
   drawText(0, 6, l3);
+  return show();
+}
+
+bool SSD1306::showIp(const char *ip, const char *footer) {
+  clear();
+  drawText(0, 0, "IP");
+  if (!ip || !ip[0]) {
+    drawTextLarge(0, 2, "---");
+    if (footer && footer[0]) drawText(0, 6, footer);
+    return show();
+  }
+
+  const size_t len = strlen(ip);
+  // 12px glyph advance 8px → max 16 chars/line (full IPv4 fits)
+  constexpr size_t kAdvance = 8;
+  constexpr size_t kMaxPerLine = 16;
+  if (len <= kMaxPerLine) {
+    const uint8_t col = (uint8_t)((128 - (int)len * (int)kAdvance) / 2);
+    drawTextLarge(col, 2, ip);
+  } else {
+    int split = -1;
+    for (size_t i = 0; i < len; i++) {
+      if (ip[i] != '.') continue;
+      if (i + 1 <= kMaxPerLine && len - (i + 1) <= kMaxPerLine) split = (int)(i + 1);
+    }
+    if (split < 0) split = (int)kMaxPerLine;
+    char line0[20] = {0};
+    char line1[20] = {0};
+    const size_t n0 = (size_t)split < sizeof(line0) - 1 ? (size_t)split : sizeof(line0) - 1;
+    memcpy(line0, ip, n0);
+    const size_t rem = len - (size_t)split;
+    const size_t n1 = rem < sizeof(line1) - 1 ? rem : sizeof(line1) - 1;
+    memcpy(line1, ip + split, n1);
+    const uint8_t c0 = (uint8_t)((128 - (int)strlen(line0) * (int)kAdvance) / 2);
+    const uint8_t c1 = (uint8_t)((128 - (int)strlen(line1) * (int)kAdvance) / 2);
+    drawTextLarge(c0, 2, line0);
+    drawTextLarge(c1, 4, line1);
+  }
+  if (footer && footer[0]) drawText(0, 6, footer);
   return show();
 }
 

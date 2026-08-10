@@ -15,6 +15,7 @@
 #include "esp_http_server.h"
 #include "esp_timer.h"
 #include "esp_psram.h"
+#include "esp_heap_caps.h"
 #include "esp_ota_ops.h"
 #include "esp_app_format.h"
 #include "esp_partition.h"
@@ -34,9 +35,19 @@
 #include "device_log.h"
 
 static const char *TAG = "eda_robot";
-static const char *FW_VERSION = "3.2.4";
+static const char *FW_VERSION = "3.4.2";
 static volatile bool otaBusy = false;
 static volatile bool shutdownPending = false;
+
+// 录音 / 播放（16 kHz mono PCM16，缓冲于 PSRAM）
+static constexpr size_t REC_MAX_SAMPLES = (size_t)BOARD_I2S_RATE * 12;  // ~12 s
+static constexpr size_t PLAY_UPLOAD_MAX = 512 * 1024;
+static int16_t *recBuf = nullptr;
+static size_t recSamples = 0;
+static volatile bool recActive = false;
+static volatile bool playBusy = false;
+static TaskHandle_t recTaskHandle = nullptr;
+static SemaphoreHandle_t audioMutex = nullptr;
 
 static XL9555 xl;
 static PCA9685 pca;
@@ -45,6 +56,7 @@ static SSD1306 oled;
 static bool flagPwm = false;
 static bool flagAmp = false;
 static bool flagRadarPwr = false;
+static int spotDutyPct[SPOT_COUNT] = {0, 0, 0};
 static bool i2sReady = false;
 static bool wifiOk = false;
 static char ipStr[16] = {0};
@@ -276,7 +288,188 @@ static bool setAmp(bool on) {
   return ok;
 }
 
-/** Q4 P-MOS：拉低 IO0_1 = 开雷达 3V3 */
+static bool ensureRecBuf() {
+  if (recBuf) return true;
+  recBuf = (int16_t *)heap_caps_malloc(REC_MAX_SAMPLES * sizeof(int16_t),
+                                       MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+  if (!recBuf)
+    recBuf = (int16_t *)heap_caps_malloc(REC_MAX_SAMPLES * sizeof(int16_t), MALLOC_CAP_8BIT);
+  return recBuf != nullptr;
+}
+
+static void recTask(void *) {
+  ESP_LOGI(TAG, "rec: start");
+  while (recActive && recSamples < REC_MAX_SAMPLES) {
+    size_t got = 0;
+    const size_t room = REC_MAX_SAMPLES - recSamples;
+    if (!board_i2s_mic_read_pcm16(recBuf + recSamples, room > 512 ? 512 : room, &got) || got == 0) {
+      vTaskDelay(pdMS_TO_TICKS(5));
+      continue;
+    }
+    recSamples += got;
+  }
+  recActive = false;
+  ESP_LOGI(TAG, "rec: stop samples=%u", (unsigned)recSamples);
+  recTaskHandle = nullptr;
+  vTaskDelete(nullptr);
+}
+
+static bool recStart() {
+  if (!i2sReady || !board_i2s_ready()) return false;
+  if (!audioMutex || xSemaphoreTake(audioMutex, pdMS_TO_TICKS(200)) != pdTRUE) return false;
+  bool ok = false;
+  if (playBusy || recActive) {
+    xSemaphoreGive(audioMutex);
+    return false;
+  }
+  if (!ensureRecBuf()) {
+    xSemaphoreGive(audioMutex);
+    return false;
+  }
+  recSamples = 0;
+  recActive = true;
+  if (xTaskCreate(recTask, "rec", 4096, nullptr, 5, &recTaskHandle) != pdPASS) {
+    recActive = false;
+    ok = false;
+  } else {
+    ok = true;
+  }
+  xSemaphoreGive(audioMutex);
+  return ok;
+}
+
+static bool recStop() {
+  if (!recActive) return true;
+  recActive = false;
+  for (int i = 0; i < 100 && recTaskHandle; i++) vTaskDelay(pdMS_TO_TICKS(20));
+  return !recActive;
+}
+
+static bool playPcmWithAmp(const int16_t *mono, size_t n) {
+  if (!mono || n == 0 || !i2sReady) return false;
+  if (!audioMutex || xSemaphoreTake(audioMutex, pdMS_TO_TICKS(200)) != pdTRUE) return false;
+  if (recActive || playBusy) {
+    xSemaphoreGive(audioMutex);
+    return false;
+  }
+  playBusy = true;
+  xSemaphoreGive(audioMutex);
+
+  const bool wasOn = flagAmp;
+  bool ok = true;
+  if (!wasOn) {
+    ok = setAmp(true);
+    if (ok) vTaskDelay(pdMS_TO_TICKS(8));
+  }
+  if (ok) ok = board_i2s_play_pcm16(mono, n);
+  if (!wasOn) {
+    if (!setAmp(false)) ok = false;
+  }
+
+  if (audioMutex) xSemaphoreTake(audioMutex, portMAX_DELAY);
+  playBusy = false;
+  if (audioMutex) xSemaphoreGive(audioMutex);
+  return ok;
+}
+
+static void writeWavHeader(uint8_t *h, uint32_t dataBytes, uint32_t rate) {
+  const uint32_t chunk = 36 + dataBytes;
+  memcpy(h, "RIFF", 4);
+  h[4] = chunk;
+  h[5] = chunk >> 8;
+  h[6] = chunk >> 16;
+  h[7] = chunk >> 24;
+  memcpy(h + 8, "WAVEfmt ", 8);
+  h[16] = 16;
+  h[17] = h[18] = h[19] = 0;  // fmt size
+  h[20] = 1;
+  h[21] = 0;  // PCM
+  h[22] = 1;
+  h[23] = 0;  // mono
+  h[24] = rate;
+  h[25] = rate >> 8;
+  h[26] = rate >> 16;
+  h[27] = rate >> 24;
+  const uint32_t byteRate = rate * 2;
+  h[28] = byteRate;
+  h[29] = byteRate >> 8;
+  h[30] = byteRate >> 16;
+  h[31] = byteRate >> 24;
+  h[32] = 2;
+  h[33] = 0;  // block align
+  h[34] = 16;
+  h[35] = 0;  // bits
+  memcpy(h + 36, "data", 4);
+  h[40] = dataBytes;
+  h[41] = dataBytes >> 8;
+  h[42] = dataBytes >> 16;
+  h[43] = dataBytes >> 24;
+}
+
+/** 解析 WAV：返回 PCM16 mono 指针与样点数；仅 PCM、16-bit、BOARD_I2S_RATE；立体声则下混。 */
+static bool parseWavPcm16(uint8_t *buf, size_t len, int16_t **pcm, size_t *nSamples, bool *owned) {
+  *pcm = nullptr;
+  *nSamples = 0;
+  *owned = false;
+  if (!buf || len < 44 || memcmp(buf, "RIFF", 4) || memcmp(buf + 8, "WAVE", 4)) return false;
+
+  size_t pos = 12;
+  uint16_t audioFmt = 0, channels = 0, bits = 0;
+  uint32_t rate = 0;
+  uint8_t *data = nullptr;
+  uint32_t dataLen = 0;
+
+  while (pos + 8 <= len) {
+    const char *id = (const char *)(buf + pos);
+    uint32_t sz = (uint32_t)buf[pos + 4] | ((uint32_t)buf[pos + 5] << 8) |
+                 ((uint32_t)buf[pos + 6] << 16) | ((uint32_t)buf[pos + 7] << 24);
+    pos += 8;
+    if (sz > len - pos) break;
+    if (!memcmp(id, "fmt ", 4) && sz >= 16) {
+      audioFmt = (uint16_t)buf[pos] | ((uint16_t)buf[pos + 1] << 8);
+      channels = (uint16_t)buf[pos + 2] | ((uint16_t)buf[pos + 3] << 8);
+      rate = (uint32_t)buf[pos + 4] | ((uint32_t)buf[pos + 5] << 8) |
+             ((uint32_t)buf[pos + 6] << 16) | ((uint32_t)buf[pos + 7] << 24);
+      bits = (uint16_t)buf[pos + 14] | ((uint16_t)buf[pos + 15] << 8);
+    } else if (!memcmp(id, "data", 4)) {
+      data = buf + pos;
+      dataLen = sz;
+      break;
+    }
+    pos += (size_t)((sz + 1) & ~1u);
+  }
+
+  if (!data || audioFmt != 1 || bits != 16 || rate != (uint32_t)BOARD_I2S_RATE) return false;
+  if (channels != 1 && channels != 2) return false;
+
+  const size_t frameBytes = (size_t)channels * 2;
+  if (frameBytes == 0 || dataLen < frameBytes) return false;
+  const size_t frames = dataLen / frameBytes;
+
+  if (channels == 1) {
+    *pcm = (int16_t *)data;
+    *nSamples = frames;
+    *owned = false;
+    return true;
+  }
+
+  int16_t *mono = (int16_t *)heap_caps_malloc(frames * sizeof(int16_t),
+                                              MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+  if (!mono) mono = (int16_t *)malloc(frames * sizeof(int16_t));
+  if (!mono) return false;
+  const int16_t *src = (const int16_t *)data;
+  for (size_t i = 0; i < frames; i++) {
+    const int32_t L = src[i * 2];
+    const int32_t R = src[i * 2 + 1];
+    mono[i] = (int16_t)((L + R) / 2);
+  }
+  *pcm = mono;
+  *nSamples = frames;
+  *owned = true;
+  return true;
+}
+
+/** Q4 P-MOS：拉低 IO0_1 = 开雷达 3V3；关电时 radar_on_power 会同步关采集 */
 static bool setRadarPower(bool on) {
   if (!actuatorLock()) return false;
   const bool ok = xl.setPin(XL_RADAR_PWR, !on);
@@ -300,63 +493,186 @@ static bool setSpotDuty(uint8_t id, int dutyPct) {
   if (dutyPct < 0) dutyPct = 0;
   if (dutyPct > 100) dutyPct = 100;
   uint16_t d = (uint16_t)((dutyPct * 4095L) / 100);
-  return pca.setDuty(SPOT_CH[id], d);
+  const bool ok = pca.setDuty(SPOT_CH[id], d);
+  if (ok) spotDutyPct[id] = dutyPct;
+  return ok;
 }
 
-/** 雷达有人 → LED_1 风扇开；无人 → 关。需同时控 LED_ALL（公共地开关）。 */
+/** 雷达 → 仅控 LED_1（风扇）；开时顺带拉高 LED_ALL（公共地），关时只关 LED_1。 */
+static bool fanAutoEnable = false;  // Web「雷达控 LED_1」，默认关
 static bool fanAutoOn = false;
 static uint8_t fanPresentTicks = 0;
 static uint8_t fanAbsentTicks = 0;
-static const uint8_t FAN_ON_TICKS = 5;    // ~100 ms @20 ms 轮询
-static const uint8_t FAN_OFF_TICKS = 50;  // ~1 s 防抖再关
+static uint8_t fanOnNeedTicks = 3;
+static const uint8_t FAN_OFF_TICKS = 35;  // ~700 ms @20 ms，关稍快减少拖尾
+static char fanReason[64] = "未启用";
+static char fanPhase[24] = "disabled";  // disabled/idle/arming/on/holdoff
+static char fanLastAction[96] = "—";
+static uint32_t fanProgressLogTick = 0;
+
+/** 按手势/运动/存在分级：运动更快开，纯存在稍稳。返回是否视为「有触发」。 */
+static bool classifyFanTrigger(const RadarSnapshot &rs, char *reason, size_t n, uint8_t *onNeed) {
+  if (!rs.enabled) {
+    snprintf(reason, n, "采集关闭");
+    *onNeed = 3;
+    return false;
+  }
+  // 手势（扫左/扫右）优先
+  if (rs.gesture[0] && (strstr(rs.gesture, "扫") != nullptr)) {
+    snprintf(reason, n, "手势:%.20s", rs.gesture);
+    *onNeed = 2;  // ~40 ms
+    return true;
+  }
+  // 靠近/远离/挥动·运动
+  if (rs.det_result & 0x07) {
+    const char *src = rs.det_text[0] ? rs.det_text : rs.gesture;
+    snprintf(reason, n, "姿态:%.20s", src);
+    *onNeed = 2;
+    return true;
+  }
+  // 微动
+  if (rs.det_result & 0x08) {
+    snprintf(reason, n, "微动");
+    *onNeed = 3;  // ~60 ms
+    return true;
+  }
+  // 呼吸存在
+  if (rs.det_result & 0x10) {
+    snprintf(reason, n, "呼吸存在");
+    *onNeed = 4;  // ~80 ms
+    return true;
+  }
+  // UART 主目标 / 检测到人
+  if (rs.primary_valid || rs.is_detected) {
+    if (rs.range_mm > 0)
+      snprintf(reason, n, "人存在 %u.%um", (unsigned)(rs.range_mm / 1000),
+               (unsigned)((rs.range_mm % 1000) / 100));
+    else
+      snprintf(reason, n, "人存在");
+    *onNeed = 3;
+    return true;
+  }
+  // 多目标有效
+  if (rs.multi_valid && rs.obj_num > 0) {
+    snprintf(reason, n, "多目标×%u", (unsigned)rs.obj_num);
+    *onNeed = 3;
+    return true;
+  }
+  // 硬件 OUT（偏慢，避免误触发）
+  if (rs.gpio_out) {
+    snprintf(reason, n, "OUT脚有人");
+    *onNeed = 5;  // ~100 ms
+    return true;
+  }
+  snprintf(reason, n, "无人");
+  *onNeed = 3;
+  return false;
+}
 
 static bool applyRadarFan(bool on) {
   if (!pca.present()) return false;
   if (on) {
     if (!flagPwm && !setPwmEnable(true)) return false;
     if (!actuatorLock()) return false;
-    const bool ok = setSpotDuty(2, 100) && setSpotDuty(0, 100);  // LED_ALL + LED_1
+    // 仅业务控 LED_1；LED_ALL 为公共地，点亮 LED_1 时必须有通路
+    bool ok = true;
+    if (spotDutyPct[2] < 100) ok = setSpotDuty(2, 100);
+    if (ok) ok = setSpotDuty(0, 100);
     actuatorUnlock();
     return ok;
   }
   if (!actuatorLock()) return false;
-  const bool ok = setSpotDuty(0, 0) && setSpotDuty(2, 0);
+  const bool ok = setSpotDuty(0, 0);  // 关时只关 LED_1，不动 LED_ALL/LED_2
   actuatorUnlock();
   return ok;
 }
 
-static void updateRadarFan(bool present) {
-  if (!flagRadarPwr || !radar_enabled()) {
+static void fanSetPhase(const char *phase) { snprintf(fanPhase, sizeof(fanPhase), "%s", phase); }
+
+static void updateRadarFan(const RadarSnapshot &rs) {
+  char reason[64];
+  uint8_t onNeed = 3;
+  const bool active = classifyFanTrigger(rs, reason, sizeof(reason), &onNeed);
+  snprintf(fanReason, sizeof(fanReason), "%s", reason);
+  fanOnNeedTicks = onNeed;
+
+  if (!fanAutoEnable) {
     if (fanAutoOn) {
-      applyRadarFan(false);
-      fanAutoOn = false;
-      ESP_LOGI(TAG, "radar fan auto off (radar idle)");
-    }
-    fanPresentTicks = fanAbsentTicks = 0;
-    return;
-  }
-  if (present) {
-    fanPresentTicks++;
-    fanAbsentTicks = 0;
-    if (!fanAutoOn && fanPresentTicks >= FAN_ON_TICKS) {
-      if (applyRadarFan(true)) {
-        fanAutoOn = true;
-        ESP_LOGI(TAG, "radar fan ON");
-      }
-    }
-  } else {
-    fanAbsentTicks++;
-    fanPresentTicks = 0;
-    if (fanAutoOn && fanAbsentTicks >= FAN_OFF_TICKS) {
       if (applyRadarFan(false)) {
         fanAutoOn = false;
-        ESP_LOGI(TAG, "radar fan OFF");
+        snprintf(fanLastAction, sizeof(fanLastAction), "关 LED_1：联动已关闭");
+        ESP_LOGI(TAG, "fan: OFF (auto disabled)");
       }
+    }
+    fanPresentTicks = fanAbsentTicks = 0;
+    fanSetPhase("disabled");
+    return;
+  }
+
+  if (!flagRadarPwr || !radar_enabled()) {
+    if (fanAutoOn) {
+      if (applyRadarFan(false)) {
+        fanAutoOn = false;
+        snprintf(fanLastAction, sizeof(fanLastAction), "关 LED_1：雷达未供电/未采集");
+        ESP_LOGI(TAG, "fan: OFF (radar idle)");
+      }
+    }
+    fanPresentTicks = fanAbsentTicks = 0;
+    fanSetPhase("idle");
+    snprintf(fanReason, sizeof(fanReason), "%s", !flagRadarPwr ? "雷达未供电" : "采集关闭");
+    return;
+  }
+
+  if (active) {
+    fanPresentTicks = (uint8_t)((fanPresentTicks < 250) ? fanPresentTicks + 1 : 250);
+    fanAbsentTicks = 0;
+    if (!fanAutoOn) {
+      fanSetPhase("arming");
+      if (fanPresentTicks >= onNeed) {
+        if (applyRadarFan(true)) {
+          fanAutoOn = true;
+          fanSetPhase("on");
+          snprintf(fanLastAction, sizeof(fanLastAction), "开 LED_1：%s", reason);
+          ESP_LOGI(TAG, "fan: ON reason=%s", reason);
+        }
+      } else if ((fanPresentTicks % 2) == 0 || fanPresentTicks == 1) {
+        // 控制台进度：开倒计时
+        if (fanProgressLogTick != fanPresentTicks) {
+          fanProgressLogTick = fanPresentTicks;
+          ESP_LOGI(TAG, "fan: arming %u/%u (%s)", (unsigned)fanPresentTicks, (unsigned)onNeed,
+                   reason);
+        }
+      }
+    } else {
+      fanSetPhase("on");
+    }
+  } else {
+    fanAbsentTicks = (uint8_t)((fanAbsentTicks < 250) ? fanAbsentTicks + 1 : 250);
+    fanPresentTicks = 0;
+    if (fanAutoOn) {
+      fanSetPhase("holdoff");
+      if (fanAbsentTicks >= FAN_OFF_TICKS) {
+        if (applyRadarFan(false)) {
+          fanAutoOn = false;
+          fanSetPhase("idle");
+          snprintf(fanLastAction, sizeof(fanLastAction), "关 LED_1：%s（持续无人）", reason);
+          ESP_LOGI(TAG, "fan: OFF reason=%s", reason);
+        }
+      } else if ((fanAbsentTicks % 5) == 0 || fanAbsentTicks == 1) {
+        if (fanProgressLogTick != (1000u + fanAbsentTicks)) {
+          fanProgressLogTick = 1000u + fanAbsentTicks;
+          ESP_LOGI(TAG, "fan: holdoff %u/%u (%s)", (unsigned)fanAbsentTicks,
+                   (unsigned)FAN_OFF_TICKS, reason);
+        }
+      }
+    } else {
+      fanSetPhase("idle");
     }
   }
 }
 
 static bool emergencyStop() {
+  recStop();
   if (!actuatorLock()) return false;
   const bool oeOk = xl.setPin(XL_OE, true);
   const bool ampOk = xl.setPin(XL_AMP_SD, false);
@@ -369,6 +685,11 @@ static bool emergencyStop() {
     radar_on_power(false);
   }
   fanAutoOn = false;
+  fanPresentTicks = fanAbsentTicks = 0;
+  fanSetPhase(fanAutoEnable ? "idle" : "disabled");
+  snprintf(fanReason, sizeof(fanReason), "急停");
+  snprintf(fanLastAction, sizeof(fanLastAction), "关 LED_1：急停");
+  spotDutyPct[0] = spotDutyPct[1] = spotDutyPct[2] = 0;
   actuatorUnlock();
   return oeOk && ampOk && radarOk && pwmOk;
 }
@@ -447,7 +768,10 @@ static esp_err_t handleRadarPost(httpd_req_t *req) {
       return sendJson(req, 500, "{\"ok\":false,\"error\":\"radar power write failed\"}");
   }
   if (argsHasKey(a, "on")) {
-    radar_set_enabled(argBool(a, "on", true));
+    const bool wantOn = argBool(a, "on", true);
+    if (wantOn && !flagRadarPwr)
+      return sendJson(req, 409, "{\"ok\":false,\"error\":\"radar power is off; turn power on first\"}");
+    radar_set_enabled(wantOn);
   }
   if (argsHasKey(a, "power") || argsHasKey(a, "on")) {
     char buf[1536];
@@ -485,18 +809,85 @@ static esp_err_t handleApiIndex(httpd_req_t *req) {
   body += "\"endpoints\":[";
   body += "{\"path\":\"/api/status\"},{\"path\":\"/api/estop\"},";
   body += "{\"path\":\"/api/shutdown\",\"note\":\"deep sleep; wake by power cycle or reset\"},";
-  body += "{\"path\":\"/api/pwm\"},{\"path\":\"/api/amp\"},";
+  body += "{\"path\":\"/api/pwm\"},";
+  body += "{\"path\":\"/api/amp\",\"note\":\"on bool; volume 0..100 digital gain\"},";
   body += "{\"path\":\"/api/servo\",\"note\":\"id 0..1 = T3/T4\"},";
   body += "{\"path\":\"/api/servos\"},";
   body += "{\"path\":\"/api/led\",\"note\":\"id 0=LED_1 1=LED_2 2=LED_ALL; need LED_ALL for 1/2\"},";
+  body += "{\"path\":\"/api/fan\",\"note\":\"radar→LED_1 auto; GET status / POST auto=0|1\"},";
   body += "{\"path\":\"/api/i2c\",\"note\":\"?full=1 for bus scan\"},";
-  body += "{\"path\":\"/api/mic\"},{\"path\":\"/api/beep\"},{\"path\":\"/api/oled\"},";
+  body += "{\"path\":\"/api/mic\",\"note\":\"RMS sample\"},";
+  body += "{\"path\":\"/api/rec\",\"note\":\"POST on=1|0 record; GET status; GET /api/rec/wav\"},";
+  body += "{\"path\":\"/api/play\",\"note\":\"POST play last recording\"},";
+  body += "{\"path\":\"/api/play/upload\",\"note\":\"POST WAV PCM16 16kHz or raw PCM16LE\"},";
+  body += "{\"path\":\"/api/beep\"},{\"path\":\"/api/oled\"},";
   body += "{\"path\":\"/api/ota\",\"methods\":[\"GET\",\"POST\"]},";
   body += "{\"path\":\"/api/logs\"},";
   body += "{\"path\":\"/api/radar\",\"note\":\"power + acquire on/off\"},";
   body += "{\"path\":\"/api/radar/live\"},{\"path\":\"/radar\"}";
   body += "]}";
   return sendJson(req, 200, body);
+}
+
+static void jsonEscLite(const char *in, char *out, size_t n) {
+  size_t j = 0;
+  for (size_t i = 0; in && in[i] && j + 2 < n; i++) {
+    const char c = in[i];
+    if (c == '"' || c == '\\') {
+      out[j++] = '\\';
+      out[j++] = c;
+    } else if ((uint8_t)c < 0x20) {
+      out[j++] = ' ';
+    } else {
+      out[j++] = c;
+    }
+  }
+  out[j < n ? j : n - 1] = 0;
+}
+
+static void fanJsonInto(char *buf, size_t buflen) {
+  const uint8_t need = fanAutoOn ? FAN_OFF_TICKS : fanOnNeedTicks;
+  const uint8_t cur = fanAutoOn ? fanAbsentTicks : fanPresentTicks;
+  char r[72], a[112];
+  jsonEscLite(fanReason, r, sizeof(r));
+  jsonEscLite(fanLastAction, a, sizeof(a));
+  snprintf(buf, buflen,
+           "{\"auto\":%s,\"on\":%s,\"phase\":\"%s\",\"reason\":\"%s\",\"lastAction\":\"%s\","
+           "\"progress\":%u,\"need\":%u,\"offNeed\":%u,\"led1\":%d}",
+           fanAutoEnable ? "true" : "false", fanAutoOn ? "true" : "false", fanPhase, r, a,
+           (unsigned)cur, (unsigned)need, (unsigned)FAN_OFF_TICKS, spotDutyPct[0]);
+}
+
+static esp_err_t handleFanGet(httpd_req_t *req) {
+  char fan[480];
+  fanJsonInto(fan, sizeof(fan));
+  char buf[520];
+  snprintf(buf, sizeof(buf), "{\"ok\":true,\"fan\":%s}", fan);
+  return sendJson(req, 200, buf);
+}
+
+static esp_err_t handleFanPost(httpd_req_t *req) {
+  auto a = loadArgs(req);
+  if (!argsHasKey(a, "auto") && !argsHasKey(a, "on"))
+    return sendJson(req, 400, "{\"ok\":false,\"error\":\"need auto or on bool\"}");
+  const bool en = argsHasKey(a, "auto") ? argBool(a, "auto", false) : argBool(a, "on", false);
+  fanAutoEnable = en;
+  if (!en && fanAutoOn) {
+    if (applyRadarFan(false)) {
+      fanAutoOn = false;
+      snprintf(fanLastAction, sizeof(fanLastAction), "关 LED_1：用户关闭联动");
+      ESP_LOGI(TAG, "fan: OFF (user disabled auto)");
+    }
+  }
+  fanPresentTicks = fanAbsentTicks = 0;
+  fanSetPhase(en ? "idle" : "disabled");
+  if (!en) snprintf(fanReason, sizeof(fanReason), "未启用");
+  ESP_LOGI(TAG, "fan: auto=%d", en ? 1 : 0);
+  char fan[480];
+  fanJsonInto(fan, sizeof(fan));
+  char buf[520];
+  snprintf(buf, sizeof(buf), "{\"ok\":true,\"fan\":%s}", fan);
+  return sendJson(req, 200, buf);
 }
 
 static esp_err_t handleStatus(httpd_req_t *req) {
@@ -506,17 +897,22 @@ static esp_err_t handleStatus(httpd_req_t *req) {
 
   const bool psramOk = esp_psram_is_initialized();
   const size_t psramBytes = psramOk ? esp_psram_get_size() : 0;
-  char buf[640];
+  char fan[480];
+  fanJsonInto(fan, sizeof(fan));
+  char buf[1100];
   snprintf(buf, sizeof(buf),
            "{\"ok\":true,\"fw\":\"%s\",\"board\":\"v6-1\",\"ip\":\"%s\",\"rssi\":%d,"
            "\"psram\":%s,\"psramBytes\":%u,"
            "\"xl9555\":%s,\"oled\":%s,\"pca9685\":%s,\"i2s\":%s,"
-           "\"pwmEnable\":%s,\"ampEnable\":%s,\"radarPower\":%s,\"otaBusy\":%s,\"i2c\":%s}",
+           "\"pwmEnable\":%s,\"ampEnable\":%s,\"volume\":%u,\"radarPower\":%s,\"otaBusy\":%s,"
+           "\"leds\":[%d,%d,%d],\"fan\":%s,\"i2c\":%s}",
            FW_VERSION, ipStr, rssi, psramOk ? "true" : "false", (unsigned)psramBytes,
            xl.present() ? "true" : "false", oled.present() ? "true" : "false",
            pca.present() ? "true" : "false", i2sReady ? "true" : "false",
            flagPwm ? "true" : "false", flagAmp ? "true" : "false",
-           flagRadarPwr ? "true" : "false", otaBusy ? "true" : "false", i2cScanJson().c_str());
+           (unsigned)board_i2s_get_volume(),
+           flagRadarPwr ? "true" : "false", otaBusy ? "true" : "false", spotDutyPct[0],
+           spotDutyPct[1], spotDutyPct[2], fan, i2cScanJson().c_str());
   return sendJson(req, 200, buf);
 }
 
@@ -558,10 +954,23 @@ static esp_err_t handlePwm(httpd_req_t *req) {
 
 static esp_err_t handleAmp(httpd_req_t *req) {
   auto a = loadArgs(req);
-  bool on = argBool(a, "on", true);
-  if (!setAmp(on)) return sendJson(req, 500, "{\"ok\":false,\"error\":\"xl9555 AMP write failed\"}");
-  char b[64];
-  snprintf(b, sizeof(b), "{\"ok\":true,\"ampEnable\":%s}", on ? "true" : "false");
+  const bool hasVol = argsHasKey(a, "volume");
+  const bool hasOn = argsHasKey(a, "on");
+  if (hasVol) {
+    int vol = argInt(a, "volume", 100);
+    if (vol < 0) vol = 0;
+    if (vol > 100) vol = 100;
+    board_i2s_set_volume((uint8_t)vol);
+  }
+  // 仅改音量时不碰功放开关；无 volume 时保持旧行为（默认开）
+  if (hasOn || !hasVol) {
+    const bool on = argBool(a, "on", true);
+    if (!setAmp(on))
+      return sendJson(req, 500, "{\"ok\":false,\"error\":\"xl9555 AMP write failed\"}");
+  }
+  char b[96];
+  snprintf(b, sizeof(b), "{\"ok\":true,\"ampEnable\":%s,\"volume\":%u}",
+           flagAmp ? "true" : "false", (unsigned)board_i2s_get_volume());
   return sendJson(req, 200, b);
 }
 
@@ -669,11 +1078,152 @@ static esp_err_t handleMic(httpd_req_t *req) {
   return sendJson(req, 200, b);
 }
 
+static esp_err_t handleRecGet(httpd_req_t *req) {
+  const uint32_t ms =
+      recSamples ? (uint32_t)((recSamples * 1000u) / (uint32_t)BOARD_I2S_RATE) : 0;
+  char b[160];
+  snprintf(b, sizeof(b),
+           "{\"ok\":true,\"recording\":%s,\"ready\":%s,\"samples\":%u,\"ms\":%u,\"rate\":%d,"
+           "\"maxMs\":%u,\"playBusy\":%s}",
+           recActive ? "true" : "false", (!recActive && recSamples > 0) ? "true" : "false",
+           (unsigned)recSamples, (unsigned)ms, BOARD_I2S_RATE,
+           (unsigned)((REC_MAX_SAMPLES * 1000u) / (uint32_t)BOARD_I2S_RATE),
+           playBusy ? "true" : "false");
+  return sendJson(req, 200, b);
+}
+
+static esp_err_t handleRecPost(httpd_req_t *req) {
+  auto a = loadArgs(req);
+  const bool on = argBool(a, "on", true);
+  if (on) {
+    if (playBusy) return sendJson(req, 409, "{\"ok\":false,\"error\":\"playing\"}");
+    if (recActive) return sendJson(req, 200, "{\"ok\":true,\"recording\":true}");
+    if (!recStart())
+      return sendJson(req, 500, "{\"ok\":false,\"error\":\"rec start failed (i2s/psram/busy)\"}");
+    return sendJson(req, 200, "{\"ok\":true,\"recording\":true}");
+  }
+  recStop();
+  const uint32_t ms =
+      recSamples ? (uint32_t)((recSamples * 1000u) / (uint32_t)BOARD_I2S_RATE) : 0;
+  char b[128];
+  snprintf(b, sizeof(b),
+           "{\"ok\":true,\"recording\":false,\"ready\":%s,\"samples\":%u,\"ms\":%u}",
+           recSamples > 0 ? "true" : "false", (unsigned)recSamples, (unsigned)ms);
+  return sendJson(req, 200, b);
+}
+
+static esp_err_t handleRecWav(httpd_req_t *req) {
+  if (recActive) return sendJson(req, 409, "{\"ok\":false,\"error\":\"still recording\"}");
+  if (!recBuf || recSamples == 0)
+    return sendJson(req, 404, "{\"ok\":false,\"error\":\"no recording\"}");
+  const uint32_t dataBytes = (uint32_t)(recSamples * sizeof(int16_t));
+  uint8_t hdr[44];
+  writeWavHeader(hdr, dataBytes, (uint32_t)BOARD_I2S_RATE);
+  addCors(req);
+  httpd_resp_set_type(req, "audio/wav");
+  httpd_resp_set_hdr(req, "Content-Disposition", "inline; filename=\"rec.wav\"");
+  if (httpd_resp_send_chunk(req, (const char *)hdr, sizeof(hdr)) != ESP_OK) return ESP_FAIL;
+  const uint8_t *p = (const uint8_t *)recBuf;
+  size_t left = dataBytes;
+  while (left) {
+    const size_t n = left > 4096 ? 4096 : left;
+    if (httpd_resp_send_chunk(req, (const char *)p, n) != ESP_OK) return ESP_FAIL;
+    p += n;
+    left -= n;
+  }
+  return httpd_resp_send_chunk(req, nullptr, 0);
+}
+
+static esp_err_t handlePlayRec(httpd_req_t *req) {
+  if (recActive) return sendJson(req, 409, "{\"ok\":false,\"error\":\"recording\"}");
+  if (!recBuf || recSamples == 0)
+    return sendJson(req, 404, "{\"ok\":false,\"error\":\"no recording\"}");
+  if (playBusy) return sendJson(req, 409, "{\"ok\":false,\"error\":\"playing\"}");
+  const bool ok = playPcmWithAmp(recBuf, recSamples);
+  if (!ok) return sendJson(req, 500, "{\"ok\":false,\"error\":\"play failed\"}");
+  char b[80];
+  snprintf(b, sizeof(b), "{\"ok\":true,\"samples\":%u,\"volume\":%u}", (unsigned)recSamples,
+           (unsigned)board_i2s_get_volume());
+  return sendJson(req, 200, b);
+}
+
+static esp_err_t handlePlayUpload(httpd_req_t *req) {
+  if (req->method == HTTP_OPTIONS) return handleOptions(req);
+  if (recActive) return sendJson(req, 409, "{\"ok\":false,\"error\":\"recording\"}");
+  if (playBusy) return sendJson(req, 409, "{\"ok\":false,\"error\":\"playing\"}");
+  if (req->content_len <= 0)
+    return sendJson(req, 400, "{\"ok\":false,\"error\":\"Content-Length required\"}");
+  if ((size_t)req->content_len > PLAY_UPLOAD_MAX)
+    return sendJson(req, 400, "{\"ok\":false,\"error\":\"audio too large (max 512KB)\"}");
+
+  uint8_t *buf = (uint8_t *)heap_caps_malloc((size_t)req->content_len,
+                                             MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+  if (!buf) buf = (uint8_t *)malloc((size_t)req->content_len);
+  if (!buf) return sendJson(req, 500, "{\"ok\":false,\"error\":\"oom\"}");
+
+  int got = 0;
+  while (got < req->content_len) {
+    int n = httpd_req_recv(req, (char *)buf + got, req->content_len - got);
+    if (n == HTTPD_SOCK_ERR_TIMEOUT) continue;
+    if (n <= 0) {
+      free(buf);
+      return sendJson(req, 500, "{\"ok\":false,\"error\":\"recv aborted\"}");
+    }
+    got += n;
+  }
+
+  int16_t *pcm = nullptr;
+  size_t nSamples = 0;
+  bool owned = false;
+  bool ok = false;
+  const char *err = nullptr;
+
+  if (got >= 12 && !memcmp(buf, "RIFF", 4)) {
+    if (!parseWavPcm16(buf, (size_t)got, &pcm, &nSamples, &owned)) {
+      err = "need WAV PCM16 @16kHz mono/stereo";
+    }
+  } else {
+    // 原始 PCM16LE mono @16kHz
+    if ((got & 1) != 0) {
+      err = "odd PCM length";
+    } else {
+      pcm = (int16_t *)buf;
+      nSamples = (size_t)got / 2;
+    }
+  }
+
+  if (!err && pcm && nSamples) {
+    ok = playPcmWithAmp(pcm, nSamples);
+    if (!ok) err = "play failed";
+  } else if (!err) {
+    err = "empty audio";
+  }
+
+  if (owned && pcm) free(pcm);
+  free(buf);
+
+  if (!ok) {
+    char b[96];
+    snprintf(b, sizeof(b), "{\"ok\":false,\"error\":\"%s\"}", err ? err : "play failed");
+    return sendJson(req, 400, b);
+  }
+  char b[80];
+  snprintf(b, sizeof(b), "{\"ok\":true,\"samples\":%u,\"volume\":%u}", (unsigned)nSamples,
+           (unsigned)board_i2s_get_volume());
+  return sendJson(req, 200, b);
+}
+
 static esp_err_t handleBeep(httpd_req_t *req) {
   auto a = loadArgs(req);
   int ms = argInt(a, "ms", 250);
   if (ms < 50) ms = 50;
   if (ms > 2000) ms = 2000;
+  if (argsHasKey(a, "volume")) {
+    int vol = argInt(a, "volume", 100);
+    if (vol < 0) vol = 0;
+    if (vol > 100) vol = 100;
+    board_i2s_set_volume((uint8_t)vol);
+  }
   const bool wasOn = flagAmp;
   if (!wasOn && !setAmp(true))
     return sendJson(req, 500, "{\"ok\":false,\"error\":\"amp enable failed\"}");
@@ -682,8 +1232,9 @@ static esp_err_t handleBeep(httpd_req_t *req) {
   const bool restoreOk = wasOn || setAmp(false);
   if (!beepOk || !restoreOk)
     return sendJson(req, 500, "{\"ok\":false,\"error\":\"beep or amp restore failed\"}");
-  char b[48];
-  snprintf(b, sizeof(b), "{\"ok\":true,\"ms\":%d}", ms);
+  char b[64];
+  snprintf(b, sizeof(b), "{\"ok\":true,\"ms\":%d,\"volume\":%u}", ms,
+           (unsigned)board_i2s_get_volume());
   return sendJson(req, 200, b);
 }
 
@@ -894,7 +1445,7 @@ static bool registerUri(httpd_handle_t s, const char *path, httpd_method_t metho
 static void setupHttp() {
   httpRegistrationOk = true;
   httpd_config_t config = HTTPD_DEFAULT_CONFIG();
-  config.max_uri_handlers = 48;
+  config.max_uri_handlers = 64;
   config.stack_size = 10240;
   config.uri_match_fn = httpd_uri_match_wildcard;
   config.recv_wait_timeout = 120;
@@ -919,10 +1470,22 @@ static void setupHttp() {
   registerUri(server, "/api/radar/live", HTTP_OPTIONS, handleOptions);
   registerUri(server, "/api/logs", HTTP_GET, handleLogs);
   registerUri(server, "/api/logs", HTTP_OPTIONS, handleOptions);
+  registerUri(server, "/api/fan", HTTP_GET, handleFanGet);
+  registerUri(server, "/api/fan", HTTP_POST, handleFanPost);
+  registerUri(server, "/api/fan", HTTP_OPTIONS, handleOptions);
   registerUri(server, "/api/i2c", HTTP_GET, handleI2c);
   registerUri(server, "/api/i2c", HTTP_OPTIONS, handleOptions);
   registerUri(server, "/api/mic", HTTP_GET, handleMic);
   registerUri(server, "/api/mic", HTTP_OPTIONS, handleOptions);
+  registerUri(server, "/api/rec", HTTP_GET, handleRecGet);
+  registerUri(server, "/api/rec", HTTP_POST, handleRecPost);
+  registerUri(server, "/api/rec", HTTP_OPTIONS, handleOptions);
+  registerUri(server, "/api/rec/wav", HTTP_GET, handleRecWav);
+  registerUri(server, "/api/rec/wav", HTTP_OPTIONS, handleOptions);
+  registerUri(server, "/api/play", HTTP_POST, handlePlayRec);
+  registerUri(server, "/api/play", HTTP_OPTIONS, handleOptions);
+  registerUri(server, "/api/play/upload", HTTP_POST, handlePlayUpload);
+  registerUri(server, "/api/play/upload", HTTP_OPTIONS, handleOptions);
   registerUri(server, "/api/ota", HTTP_GET, handleOta);
   registerUri(server, "/api/ota", HTTP_POST, handleOta);
   registerUri(server, "/api/ota", HTTP_OPTIONS, handleOptions);
@@ -953,22 +1516,31 @@ static void setupHttp() {
 }
 
 // ---- WiFi ----
+static void oledShowIpStatus(const char *footer) {
+  if (!oled.present() || !oledMutex) return;
+  if (xSemaphoreTake(oledMutex, pdMS_TO_TICKS(100)) != pdTRUE) return;
+  if (ipStr[0])
+    oled.showIp(ipStr, footer);
+  else
+    oled.printfLines("WiFi...", WIFI_SSID, "连接中", footer ? footer : FW_VERSION);
+  xSemaphoreGive(oledMutex);
+}
+
 static void wifi_event_handler(void *, esp_event_base_t base, int32_t id, void *data) {
   if (base == WIFI_EVENT && id == WIFI_EVENT_STA_START) {
     esp_wifi_connect();
   } else if (base == WIFI_EVENT && id == WIFI_EVENT_STA_DISCONNECTED) {
+    const bool hadIp = ipStr[0] != 0;
     wifiOk = false;
     ipStr[0] = 0;
+    if (hadIp) oledShowIpStatus(FW_VERSION);
     esp_wifi_connect();
   } else if (base == IP_EVENT && id == IP_EVENT_STA_GOT_IP) {
     ip_event_got_ip_t *event = (ip_event_got_ip_t *)data;
     snprintf(ipStr, sizeof(ipStr), IPSTR, IP2STR(&event->ip_info.ip));
     wifiOk = true;
     ESP_LOGI(TAG, "Got IP: %s", ipStr);
-    if (oled.present() && oledMutex && xSemaphoreTake(oledMutex, pdMS_TO_TICKS(100)) == pdTRUE) {
-      oled.printfLines("WiFi OK", ipStr, "打开浏览器", FW_VERSION);
-      xSemaphoreGive(oledMutex);
-    }
+    oledShowIpStatus(FW_VERSION);
   }
 }
 
@@ -1001,7 +1573,7 @@ static void background_task(void *) {
     radar_poll();
     RadarSnapshot rs;
     radar_get_snapshot(rs);
-    updateRadarFan(rs.present);
+    updateRadarFan(rs);
     vTaskDelay(pdMS_TO_TICKS(20));
   }
 }
@@ -1023,6 +1595,7 @@ extern "C" void app_main(void) {
 
   actuatorMutex = xSemaphoreCreateRecursiveMutex();
   oledMutex = xSemaphoreCreateMutex();
+  audioMutex = xSemaphoreCreateMutex();
   if (!actuatorMutex || !oledMutex) {
     ESP_LOGE(TAG, "failed to create synchronization primitives");
     return;

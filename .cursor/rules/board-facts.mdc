@@ -37,8 +37,8 @@ U1：IO12=SDA，IO13=SCL；R11/R12 4.7k↑3V3。
 
 | 功能 | 连接 |
 |---|---|
-| 麦克风 INMP441 U2 | SCK=IO16，WS=IO17，SD=IO18；L/R→MIC_LR→R2↓GND |
-| 功放 MAX98357 U3 | LRC=IO38，BCLK=IO39，DIN=IO40；GAIN→R8↓GND；SD=`SPK_SD`→XL9555 IO1_6 + R10↑3V3；VIN=5V |
+| 麦克风 INMP441 U2 | SCK=IO16，WS=IO17，SD=IO18；L/R→MIC_LR→R2↓GND；Web「录音」`/api/rec` |
+| 功放 MAX98357 U3 | LRC=IO38，BCLK=IO39，DIN=IO40；GAIN→R8↓GND；SD=`SPK_SD`→XL9555 IO1_6 + R10↑3V3；VIN=5V；Web「扬声器」`/api/play`；数字音量 `/api/amp` `volume` 0..100 |
 | 60G 雷达 UART | IO9=`Radar-RX`，IO10=`Radar-TX` → U6 3P 座 |
 | GPIO 扩展排针 U4 | IO4/5/6/7/41/42 |
 | 下载 | T1=BOOT/EN/3V3；T2=GND/RX/TX（UART0） |
@@ -93,10 +93,13 @@ U1 当前 NC：IO1/8/11/14/15/19/20/21/35/36/37/47/48。
 
 摄像头 OV5640、SPI ST7796/XPT2046、TB6612 电机、ENC1..4 编码器计数、PCA9685 U23、舵机 T5–T7。
 
-## 固件约定（`firmware/` FW ≥ 3.0.0，对齐 v6-1）
+## 固件约定（`firmware/` FW ≥ 3.4.2，对齐 v6-1）
 
 - 构建：`cd firmware && idf.py set-target esp32s3 && idf.py build`
 - 上电：OE# 高、雷达 Q4 关、功放关；缺焊 I2C 器件不阻断启动
 - 雷达：`POST /api/radar {"power":true}` 再 `{"on":true}`；UART IO9/10
 - 舵机 id `0..1`；探照灯 id `0/1/2`=LED_1/2/ALL（1/2 需 ALL）
+- 雷达→风扇：`POST /api/fan {"auto":true}` 仅自动控 **LED_1**（开时顺带拉高 LED_ALL；关只关 LED_1）；默认关；设备日志有 `fan: arming/ON/OFF` 进度
+- 录音：`POST /api/rec {"on":true|false}`，`GET /api/rec/wav`；播放录音 `POST /api/play`；上传 `POST /api/play/upload`（WAV PCM16 @16kHz）
+- 音量：`POST /api/amp {"volume":0..100}`（数字缩放，默认 100；仅改音量不碰功放开关）；`/api/status` 含 `volume`；影响 play/beep/upload
 - 已删：摄像头 / LCD / 电机 / 编码器 / U23 API

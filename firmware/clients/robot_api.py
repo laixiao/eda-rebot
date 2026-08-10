@@ -54,8 +54,16 @@ class RobotApi:
     def pwm(self, on: bool = True) -> dict:
         return self._call("/api/pwm", {"on": on}, method="POST")
 
-    def amp(self, on: bool = True) -> dict:
-        return self._call("/api/amp", {"on": on}, method="POST")
+    def amp(self, on: bool | None = None, volume: int | None = None) -> dict:
+        """功放开关 / 数字音量 0..100。仅传 volume 时不改开关。"""
+        body: dict[str, Any] = {}
+        if on is not None:
+            body["on"] = on
+        if volume is not None:
+            body["volume"] = max(0, min(100, int(volume)))
+        if not body:
+            body["on"] = True
+        return self._call("/api/amp", body, method="POST")
 
     def servo(self, servo_id: int, angle: int) -> dict:
         return self._call("/api/servo", {"id": servo_id, "angle": angle}, method="POST")
@@ -67,11 +75,53 @@ class RobotApi:
         """id 0=LED_1, 1=LED_2, 2=LED_ALL（点亮 1/2 时需同时开 LED_ALL）"""
         return self._call("/api/led", {"id": led_id, "duty": duty}, method="POST")
 
+    def fan(self) -> dict:
+        return self._call("/api/fan")
+
+    def fan_auto(self, on: bool = True) -> dict:
+        """雷达自动控 LED_1（风扇）；默认固件侧为关"""
+        return self._call("/api/fan", {"auto": on}, method="POST")
+
     def mic(self) -> dict:
         return self._call("/api/mic")
 
-    def beep(self, ms: int = 250) -> dict:
-        return self._call("/api/beep", {"ms": ms}, method="POST")
+    def rec(self, on: bool | None = None) -> dict:
+        """GET 状态；POST on=True 开始 / False 停止录音。"""
+        if on is None:
+            return self._call("/api/rec")
+        return self._call("/api/rec", {"on": on}, method="POST")
+
+    def play(self) -> dict:
+        """播放最近一次录音（板载扬声器）。"""
+        return self._call("/api/play", method="POST")
+
+    def play_upload(self, wav_path: str, timeout: float = 30.0) -> dict:
+        """上传 WAV（PCM16 @16kHz）或原始 PCM16LE 并播放。"""
+        import pathlib
+
+        data = pathlib.Path(wav_path).read_bytes()
+        url = self.base + "/api/play/upload"
+        req = urllib.request.Request(
+            url,
+            data=data,
+            headers={"Content-Type": "audio/wav", "Content-Length": str(len(data))},
+            method="POST",
+        )
+        try:
+            with urllib.request.urlopen(req, timeout=timeout) as resp:
+                return json.loads(resp.read().decode("utf-8"))
+        except urllib.error.HTTPError as e:
+            body = e.read().decode("utf-8", errors="replace")
+            try:
+                return json.loads(body)
+            except json.JSONDecodeError:
+                return {"ok": False, "error": body, "http": e.code}
+
+    def beep(self, ms: int = 250, volume: int | None = None) -> dict:
+        body: dict[str, Any] = {"ms": ms}
+        if volume is not None:
+            body["volume"] = max(0, min(100, int(volume)))
+        return self._call("/api/beep", body, method="POST")
 
     def oled(self, text: str = "", cmd: str = "text") -> dict:
         return self._call("/api/oled", {"cmd": cmd, "text": text}, method="POST")

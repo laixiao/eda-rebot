@@ -2,9 +2,11 @@
 .vscode/
 .cache/
 *.bin
+!main/font_cjk.bin
 *.elf
 *.map
 tools/
+scripts/.cache/
 build/
 sdkconfig
 sdkconfig.old

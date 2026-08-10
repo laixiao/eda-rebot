@@ -513,6 +513,11 @@ void radar_on_power(bool powered) {
   if (!sMtx) return;
   xSemaphoreTake(sMtx, portMAX_DELAY);
   sPowered = powered;
+  // 关供电无模块可采：同步关采集，避免 UI 仍显示「采集已开」
+  if (!powered) {
+    sEnabled = false;
+    sState.enabled = false;
+  }
   sRxLen = 0;
   sLastQueryUs = 0;
   sState.link_ok = false;
