@@ -102,8 +102,10 @@ U1 当前 NC：IO1/8/11/14/15/19/20/21/35/36/37/47/48。
 - 空板可只跑 WiFi/HTTP；语音默认关；I2S DMA 空闲关闭
 - 雷达：`POST /api/radar {"power":true}` 开电即自动查询（已取消独立采集开关）；UART IO9/10
 - 舵机 id `0..1`；探照灯 id `0/1/2`=LED_1/2/ALL（1/2 需 ALL）
-- 雷达→风扇：`POST /api/fan {"auto":true}`；每 **2s** 取样；**有人 1 次即开**、**无人连续 3 次才关** **LED_1**（开时恢复上次 LED_1×LED_ALL；关只关 LED_1）；有人判定不含单独呼吸/微动/OUT；默认关
-- 手势切档：`POST /api/fan {"gesture":true}`（网页「手势切档」）；雷达供电后，目标 **≤0.45m** 连续停留 **2s** → 档位循环 **关→50%→100%**；切档后须手离开（**>0.60m** 或丢目标）再武装；触发时设 LED_ALL=100、LED_1=档位并**关闭雷达联动**；默认关
+- 雷达→风扇：`POST /api/fan {"auto":true}`；每 **2s** 取样；**有人 1 次即开**、**无人连续 3 次才关** **LED_1**；开时按手势档位（若手势开）或记忆强度；有人判定不含单独呼吸/微动/OUT；默认关
+- 手势切档：`POST /api/fan {"gesture":true}`（可与控风扇**同时开**）；近距 **≤0.45m** 停留 **2s** → 档位循环 **关→50%→100%**（sticky `gear`）；只管档位、**不关闭控风扇**；切到关时有人期间抑制自动再开，人离开后恢复；自动再开时用当前档位；触发后须离开（**>0.60m**）再武装；默认关
+- 分工：控风扇=有人开/无人关；手势=档位；网页 LED_1/ALL 滑条改强度时同步 `gear` 且不关联动；语音/`power`=接管并**关闭控风扇**（同步 `gear`，手势可继续）
+- 关控风扇：若手势开且档>0 则保留当前输出；否则关掉自动开的风扇。关 PWM 时清零软件占空比；有人会话下输出丢失会按档位补开
 - 语音控风扇（ESP-SR）：**默认关**（NVS `cfg/voice`）；网页「语音」开关或 `POST /api/voice {"on":true|false}`；开后 **MultiNet 伪唤醒「你好爱妃」**（无 WakeNet；随机播放 `firmware/assets/*.wav`，失败则双音）→ 开/关风扇、**大一点/小一点（±20%）**、最大/最小(20%)/中等(50%)；开或加大时恢复/设置 LED_1×LED_ALL 并**关闭雷达联动**；`GET /api/voice` / `/api/status` 含 `enabled`/`modelBytes`
 - 录音：`POST /api/rec {"on":true|false}`，`GET /api/rec/wav`；播放录音 `POST /api/play`；上传 `POST /api/play/upload`（WAV PCM16 @16kHz）
 - 音量：`POST /api/amp {"volume":0..100}`（数字缩放，默认 100；仅改音量不碰功放开关）；`/api/status` 含 `volume`；影响 play/beep/upload

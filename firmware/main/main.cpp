@@ -38,7 +38,7 @@
 #include "wake_reply.h"
 
 static const char *TAG = "eda_robot";
-static const char *FW_VERSION = "3.6.12";
+static const char *FW_VERSION = "3.6.14";
 static volatile bool otaBusy = false;
 static volatile bool shutdownPending = false;
 
@@ -294,7 +294,10 @@ static bool setPwmEnable(bool on) {
   if (!actuatorLock()) return false;
   // 无 XL9555 时无法控 OE#；关请求视为成功，开请求失败
   if (!xl.present()) {
-    if (!on) flagPwm = false;
+    if (!on) {
+      flagPwm = false;
+      spotDutyPct[0] = spotDutyPct[1] = spotDutyPct[2] = 0;
+    }
     actuatorUnlock();
     return !on;
   }
@@ -312,6 +315,8 @@ static bool setPwmEnable(bool on) {
     }
   } else if (xl.present()) {
     flagPwm = false;
+    // 硬件已 allOff：同步软件占空比，避免 fanIsOn()/OLED 与实况脱节
+    spotDutyPct[0] = spotDutyPct[1] = spotDutyPct[2] = 0;
   }
   actuatorUnlock();
   return ok;
@@ -612,6 +617,9 @@ static bool setSpotDuty(uint8_t id, int dutyPct) {
 /** 雷达 → 仅控 LED_1（风扇）；开时恢复上次 LED_1×LED_ALL，关时只关 LED_1。 */
 static bool fanAutoEnable = false;  // Web「控风扇」，默认关
 static bool fanAutoOn = false;
+static bool fanGestureEnable = false;  // Web「手势切档」，可与控风扇同时开
+static int fanGearPct = 100;           // 手势档位 0/50/100；控风扇开时按此强度
+static bool fanSuppressAutoOn = false; // 手势刚切到关：有人期间抑制自动再开
 static const int64_t FAN_SAMPLE_US = 2000000;  // 每 2s 取样
 static const uint8_t FAN_CONFIRM_ON = 1;       // 有人：1 次即开
 static const uint8_t FAN_CONFIRM_OFF = 3;      // 无人：连续 3 次才关
@@ -624,12 +632,33 @@ static char fanLastAction[96] = "—";
 
 static void fanSetPhase(const char *phase) { snprintf(fanPhase, sizeof(fanPhase), "%s", phase); }
 
-/** 关掉雷达联动（语音/手动控风扇时避免抢控）。 */
+/** 任意改风量后同步手势档位，避免语音/滑条与手势/自动恢复脱节。 */
+static void syncFanGearFromIntensity(int pct) {
+  if (pct < 0) pct = 0;
+  if (pct > 100) pct = 100;
+  fanGearPct = pct;
+}
+
+/** 网页/API 改 LED_1 或 LED_ALL 后：同步档位，并与控风扇状态对齐（不关联动）。 */
+static void onFanOutputChangedFromUi() {
+  const int inten = fanIntensityPct();
+  syncFanGearFromIntensity(inten);
+  if (inten <= 0) {
+    fanAutoOn = false;
+    if (fanAutoEnable) fanSuppressAutoOn = true;
+  } else {
+    fanSuppressAutoOn = false;
+    if (fanAutoEnable) fanAutoOn = true;
+  }
+}
+
+/** 关掉雷达联动（语音/手动 power 时避免抢控）。手势切档保持，仅同步档位由调用方负责。 */
 static void fanDisableAuto(const char *why) {
   fanAutoEnable = false;
   fanAutoOn = false;
   fanConfirmCount = 0;
   fanLastSampleUs = 0;
+  fanSuppressAutoOn = false;
   fanSetPhase("disabled");
   snprintf(fanReason, sizeof(fanReason), "%s", why ? why : "未启用");
 }
@@ -650,6 +679,7 @@ static bool applyManualFan(bool on, const char *src) {
     if (ok) ok = setSpotDuty(0, b);
     actuatorUnlock();
     if (ok) {
+      syncFanGearFromIntensity(fanIntensityPct());
       snprintf(fanLastAction, sizeof(fanLastAction), "开风扇 %d%%（%s）", fanIntensityPct(),
                src ? src : "?");
       ESP_LOGI(TAG, "fan: MANUAL ON intensity=%d src=%s", fanIntensityPct(), src ? src : "?");
@@ -661,6 +691,7 @@ static bool applyManualFan(bool on, const char *src) {
   const bool ok = setSpotDuty(0, 0);
   actuatorUnlock();
   if (ok) {
+    syncFanGearFromIntensity(0);
     snprintf(fanLastAction, sizeof(fanLastAction), "关风扇（%s，已记强度 %d/%d）", src ? src : "?",
              fanSavedLed1, fanSavedLedAll);
     ESP_LOGI(TAG, "fan: MANUAL OFF saved=%d/%d src=%s", fanSavedLed1, fanSavedLedAll,
@@ -694,6 +725,7 @@ static bool applyManualFanLevel(int pct, const char *src) {
   if (ok) ok = setSpotDuty(0, pct);
   actuatorUnlock();
   if (ok) {
+    syncFanGearFromIntensity(fanIntensityPct());
     snprintf(fanLastAction, sizeof(fanLastAction), "风量 %d%%（%s）", fanIntensityPct(),
              src ? src : "?");
     ESP_LOGI(TAG, "fan: LEVEL %d%% src=%s", fanIntensityPct(), src ? src : "?");
@@ -756,10 +788,20 @@ static bool classifyFanPresent(const RadarSnapshot &rs, char *reason, size_t n) 
 static bool applyRadarFan(bool on) {
   if (!pca.present()) return false;
   if (on) {
+    // 手势切档开启时：按档位恢复；档位 0 则保持关（控风扇仍记「有人会话」由调用方处理）
+    if (fanGestureEnable && fanGearPct <= 0) return true;
     if (!flagPwm && !setPwmEnable(true)) return false;
     if (!actuatorLock()) return false;
-    int a = fanSavedLedAll > 0 ? fanSavedLedAll : 100;
-    int b = fanSavedLed1 > 0 ? fanSavedLed1 : 100;
+    int a, b;
+    if (fanGestureEnable) {
+      a = 100;
+      b = fanGearPct;
+      if (b < 1) b = 1;
+      if (b > 100) b = 100;
+    } else {
+      a = fanSavedLedAll > 0 ? fanSavedLedAll : 100;
+      b = fanSavedLed1 > 0 ? fanSavedLed1 : 100;
+    }
     bool ok = setSpotDuty(2, a);
     if (ok) ok = setSpotDuty(0, b);
     actuatorUnlock();
@@ -835,7 +877,16 @@ static void updateRadarFan(const RadarSnapshot &rs) {
     return;
   }
 
+  // 无人后允许再次自动开；手势档位=0 时有人也不自动开
+  if (!fanSamplePresent) fanSuppressAutoOn = false;
+
   if (fanSamplePresent && !fanAutoOn) {
+    if (fanSuppressAutoOn || (fanGestureEnable && fanGearPct <= 0)) {
+      fanSetPhase("idle");
+      if (fanGestureEnable && fanGearPct <= 0)
+        snprintf(fanReason, sizeof(fanReason), "有人·档位关");
+      return;
+    }
     if (applyRadarFan(true)) {
       fanAutoOn = true;
       fanSetPhase("on");
@@ -850,12 +901,19 @@ static void updateRadarFan(const RadarSnapshot &rs) {
       ESP_LOGI(TAG, "fan: OFF reason=%s", reason);
     }
   } else {
+    // 会话仍为「开」但输出被 PWM/滑条等清掉时，有人则按档位补开
+    if (fanAutoOn && fanSamplePresent && !fanIsOn() &&
+        !(fanSuppressAutoOn || (fanGestureEnable && fanGearPct <= 0))) {
+      if (applyRadarFan(true)) {
+        snprintf(fanLastAction, sizeof(fanLastAction), "开风扇 %d%%：恢复输出", fanIntensityPct());
+        ESP_LOGI(TAG, "fan: RECOVER intensity=%d", fanIntensityPct());
+      }
+    }
     fanSetPhase(fanAutoOn ? "on" : "idle");
   }
 }
 
-/** 近距手掌停留切档：关闭 → 50% → 100% 循环。默认关。 */
-static bool fanGestureEnable = false;
+/** 近距手掌停留切档：关闭 → 50% → 100% 循环。可与「控风扇」同时开。默认关。 */
 static const uint16_t GEST_NEAR_ENTER_MM = 450;
 static const uint16_t GEST_NEAR_EXIT_MM = 600;
 static const int64_t GEST_HOLD_US = 2000000;
@@ -886,13 +944,50 @@ static uint16_t nearestRangeMm(const RadarSnapshot &rs) {
   return best;
 }
 
-/** 当前档位索引：0=关 / 1=50% / 2=100%（按有效强度就近）。 */
+/** 档位索引：0=关 / 1=50% / 2=100%（按手势档位，而非当前输出）。 */
+static int fanGearIndex() {
+  if (fanGearPct >= 75) return 2;
+  if (fanGearPct >= 25) return 1;
+  return 0;
+}
+
+/** 供 JSON / UI：实际输出档位（关着时也反映 sticky 手势档）。 */
 static int fanLevelIndex() {
+  if (fanGestureEnable) return fanGearIndex();
   if (!fanIsOn()) return 0;
   const int cur = fanIntensityPct();
   if (cur >= 75) return 2;
   if (cur >= 25) return 1;
   return 0;
+}
+
+/** 手势设档：不关闭「控风扇」；与自动开/关分工。 */
+static bool applyGestureFanLevel(int pct) {
+  if (!pca.present()) return false;
+  if (pct < 0) pct = 0;
+  if (pct > 100) pct = 100;
+  fanGearPct = pct;
+
+  if (pct <= 0) {
+    if (!actuatorLock()) return false;
+    fanRememberIfOn();
+    const bool ok = setSpotDuty(0, 0);
+    actuatorUnlock();
+    if (ok) {
+      fanAutoOn = false;
+      if (fanAutoEnable) fanSuppressAutoOn = true;
+    }
+    return ok;
+  }
+
+  fanSuppressAutoOn = false;
+  if (!flagPwm && !setPwmEnable(true)) return false;
+  if (!actuatorLock()) return false;
+  bool ok = setSpotDuty(2, 100);
+  if (ok) ok = setSpotDuty(0, pct);
+  actuatorUnlock();
+  if (ok && fanAutoEnable) fanAutoOn = true;
+  return ok;
 }
 
 static void updateFanGesture(const RadarSnapshot &rs) {
@@ -944,13 +1039,14 @@ static void updateFanGesture(const RadarSnapshot &rs) {
   }
 
   static const int LEVELS[] = {0, 50, 100};
-  const int next = LEVELS[(fanLevelIndex() + 1) % 3];
-  if (applyManualFanLevel(next, "手势")) {
+  const int next = LEVELS[(fanGearIndex() + 1) % 3];
+  if (applyGestureFanLevel(next)) {
     gestFired = true;
     snprintf(gestPhase, sizeof(gestPhase), "wait_leave");
     snprintf(fanLastAction, sizeof(fanLastAction), "手势切档 → %d%%（近距 %umm 停留2s）", next,
              (unsigned)range);
-    ESP_LOGI(TAG, "fan: GESTURE level=%d%% range=%umm", next, (unsigned)range);
+    ESP_LOGI(TAG, "fan: GESTURE gear=%d%% range=%umm auto=%d", next, (unsigned)range,
+             fanAutoEnable ? 1 : 0);
   } else {
     snprintf(gestPhase, sizeof(gestPhase), "holding");
     ESP_LOGW(TAG, "fan: GESTURE apply failed next=%d", next);
@@ -986,6 +1082,7 @@ static bool emergencyStop() {
   fanLastSampleUs = 0;
   fanSetPhase("disabled");
   fanGestureEnable = false;
+  fanSuppressAutoOn = false;
   gestResetTracking();
   snprintf(gestPhase, sizeof(gestPhase), "disabled");
   snprintf(fanReason, sizeof(fanReason), "关闭所有外设");
@@ -1194,14 +1291,14 @@ static void fanJsonInto(char *buf, size_t buflen) {
            "\"samplePresent\":%s,\"led1\":%d,\"ledAll\":%d,\"intensity\":%d,"
            "\"savedLed1\":%d,\"savedLedAll\":%d,\"savedIntensity\":%d,"
            "\"gesture\":%s,\"gestPhase\":\"%s\",\"gestProgressMs\":%lld,\"gestNeedMs\":2000,"
-           "\"gestNearMm\":%u,\"gestExitMm\":%u,\"gestRangeMm\":%u,\"gestLevel\":%d}",
+           "\"gestNearMm\":%u,\"gestExitMm\":%u,\"gestRangeMm\":%u,\"gestLevel\":%d,\"gear\":%d}",
            fanAutoEnable ? "true" : "false", fanAutoOn ? "true" : "false", fanPhase, r, a,
            (unsigned)fanConfirmCount, (unsigned)FAN_CONFIRM_ON, (unsigned)FAN_CONFIRM_OFF,
            (unsigned)FAN_CONFIRM_OFF, fanSamplePresent ? "true" : "false", spotDutyPct[0],
            spotDutyPct[2], fanIntensityPct(), fanSavedLed1, fanSavedLedAll,
            (fanSavedLed1 * fanSavedLedAll) / 100, fanGestureEnable ? "true" : "false", gp,
            (long long)gestHoldElapsedMs, (unsigned)GEST_NEAR_ENTER_MM, (unsigned)GEST_NEAR_EXIT_MM,
-           (unsigned)gestLastRangeMm, fanLevelIndex());
+           (unsigned)gestLastRangeMm, fanLevelIndex(), fanGearPct);
 }
 
 static esp_err_t handleFanGet(httpd_req_t *req) {
@@ -1229,27 +1326,45 @@ static esp_err_t handleFanPost(httpd_req_t *req) {
   if (hasAuto) {
     const bool en = argsHasKey(a, "auto") ? argBool(a, "auto", false) : argBool(a, "on", false);
     fanAutoEnable = en;
-    if (en) flagPeriphOff = false;
-    if (!en && fanAutoOn) {
-      if (applyRadarFan(false)) {
-        fanAutoOn = false;
-        snprintf(fanLastAction, sizeof(fanLastAction), "关 LED_1：用户关闭联动");
-        ESP_LOGI(TAG, "fan: OFF (user disabled auto)");
+    if (en) {
+      flagPeriphOff = false;
+      fanSuppressAutoOn = false;
+      fanConfirmCount = 0;
+      fanLastSampleUs = 0;
+      fanSetPhase(flagRadarPwr ? "idle" : "disabled");
+      // 不强制改输出：若手势档>0 且已在转，保持；由下一轮取样决定
+      if (fanIsOn()) fanAutoOn = true;
+    } else {
+      // 关闭联动：若手势仍开且档位>0，保留当前输出（手势接管强度）；否则关掉自动开的风扇
+      if (fanAutoOn && !(fanGestureEnable && fanGearPct > 0)) {
+        if (applyRadarFan(false)) {
+          snprintf(fanLastAction, sizeof(fanLastAction), "关 LED_1：用户关闭联动");
+          ESP_LOGI(TAG, "fan: OFF (user disabled auto)");
+        }
       }
+      fanAutoOn = false;
+      fanConfirmCount = 0;
+      fanLastSampleUs = 0;
+      fanSuppressAutoOn = false;
+      fanSetPhase("disabled");
+      snprintf(fanReason, sizeof(fanReason), "未启用");
     }
-    fanConfirmCount = 0;
-    fanLastSampleUs = 0;
-    fanSetPhase(en ? "idle" : "disabled");
-    if (!en) snprintf(fanReason, sizeof(fanReason), "未启用");
     ESP_LOGI(TAG, "fan: auto=%d", en ? 1 : 0);
   }
   if (hasGesture) {
     const bool en = argBool(a, "gesture", false);
     fanGestureEnable = en;
-    if (en) flagPeriphOff = false;
+    if (en) {
+      flagPeriphOff = false;
+      if (fanIsOn()) syncFanGearFromIntensity(fanIntensityPct());
+      fanSuppressAutoOn = false;
+    } else {
+      // 关手势：清抑制，让控风扇可按记忆强度恢复；档位值保留供再开
+      fanSuppressAutoOn = false;
+    }
     gestResetTracking();
     snprintf(gestPhase, sizeof(gestPhase), en ? (flagRadarPwr ? "idle" : "no_power") : "disabled");
-    ESP_LOGI(TAG, "fan: gesture=%d", en ? 1 : 0);
+    ESP_LOGI(TAG, "fan: gesture=%d gear=%d", en ? 1 : 0, fanGearPct);
   }
   char fan[760];
   fanJsonInto(fan, sizeof(fan));
@@ -1475,6 +1590,8 @@ static esp_err_t handleLed(httpd_req_t *req) {
   const bool ledOk = setSpotDuty((uint8_t)id, duty);
   actuatorUnlock();
   if (!ledOk) return sendJson(req, 500, "{\"ok\":false,\"error\":\"led write failed\"}");
+  // LED_1 / LED_ALL 与风扇强度相关：同步档位，避免与控风扇/手势抢控
+  if (id == 0 || id == 2) onFanOutputChangedFromUi();
   char b[96];
   snprintf(b, sizeof(b), "{\"ok\":true,\"id\":%d,\"duty\":%d,\"pwmEnable\":true}", id, duty);
   return sendJson(req, 200, b);
@@ -2009,8 +2126,8 @@ static void background_task(void *) {
     if (flagRadarPwr) radar_poll();
     RadarSnapshot rs;
     radar_get_snapshot(rs);
-    if (fanAutoEnable && pca.present()) updateRadarFan(rs);
     if (fanGestureEnable && pca.present()) updateFanGesture(rs);
+    if (fanAutoEnable && pca.present()) updateRadarFan(rs);
     if (oled.present()) oledShowHome(false);
     vTaskDelay(pdMS_TO_TICKS((xl.present() || flagRadarPwr) ? 20 : 500));
   }

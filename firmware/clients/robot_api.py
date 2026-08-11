@@ -84,7 +84,7 @@ class RobotApi:
         return self._call("/api/fan", {"auto": on}, method="POST")
 
     def fan_gesture(self, on: bool = True) -> dict:
-        """近距手掌停留 2s 循环切档：关→50%→100%；默认关"""
+        """近距手掌停留 2s 循环切档：关→50%→100%；可与 fan_auto 同时开"""
         return self._call("/api/fan", {"gesture": on}, method="POST")
 
     def fan_power(self, on: bool = True) -> dict:

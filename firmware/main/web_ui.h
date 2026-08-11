@@ -252,12 +252,12 @@ header .switch-periph.on{border-color:#f85149;background:#3b1212;color:#ff7b72}
         <span class="track"></span>
         <span id="labRadarPwr">供电</span>
       </label>
-      <label class="switch switch-fan" title="雷达有人→立即开；无人 2s×3 才关 LED_1">
+      <label class="switch switch-fan" title="有人→按档位开；无人 2s×3 才关。可与手势切档同时开">
         <input id="swFanAuto" type="checkbox" onchange="setFanAuto(this.checked)"/>
         <span class="track"></span>
         <span id="labFanAuto">控风扇</span>
       </label>
-      <label class="switch switch-gest" title="手掌靠近≤0.45m并停留2s：关→50%→100%循环；手离开后再切下一档">
+      <label class="switch switch-gest" title="近距≤0.45m 停留2s 循环档位 关→50%→100；只管档位，不关控风扇">
         <input id="swFanGest" type="checkbox" onchange="setFanGesture(this.checked)"/>
         <span class="track"></span>
         <span id="labFanGest">手势切档</span>
@@ -392,7 +392,7 @@ function renderFan(f){
     const hold=Math.min(f.gestProgressMs||0,f.gestNeedMs||2000);
     const need=f.gestNeedMs||2000;
     const rng=f.gestRangeMm?((f.gestRangeMm/1000).toFixed(2)+' m'):'—';
-    gest=`手势：<b>${gestPhaseLabel(f.gestPhase)}</b> · 档位 ${lv} · ${hold}/${need} ms · 距 ${rng}<br>`;
+    gest=`手势档 <b>${f.gear??0}%</b>（${lv}）· <b>${gestPhaseLabel(f.gestPhase)}</b> · ${hold}/${need} ms · 距 ${rng}<br>`;
   }
   box.innerHTML=
     `<b>${phaseLabel(f.phase)}</b> · LED_1 ${f.on?'<span class=ok>开</span>':'关'} · ${prog}<br>`+
