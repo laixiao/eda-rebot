@@ -38,9 +38,26 @@
 #include "wake_reply.h"
 
 static const char *TAG = "eda_robot";
-static const char *FW_VERSION = "3.6.14";
+static const char *FW_VERSION = "3.6.16";
 static volatile bool otaBusy = false;
 static volatile bool shutdownPending = false;
+static volatile bool cfgDirty = false;
+static bool flagVoice = false;
+static int servoAngleDeg[2] = {90, 90};
+/** 持久化镜像：急停清 spotDutyPct 时仍保留，避免随后 cfgSave 把 NVS 写成全 0 */
+static int cfgSnapLed[3] = {0, 0, 0};
+static int cfgSnapSrv[2] = {90, 90};
+static bool cfgWantPwm = false;
+static bool cfgWantAmp = false;
+static bool cfgWantRadar = false;
+static bool cfgLoaded = false;
+static SemaphoreHandle_t cfgMutex = nullptr;
+
+static void cfgMarkDirty();
+static void cfgSave();
+static void cfgLoad();
+static void cfgApplyBoot();
+static bool cfgRestoreOutputs();
 
 // 录音 / 播放（16 kHz mono PCM16，缓冲于 PSRAM）
 static constexpr size_t REC_MAX_SAMPLES = (size_t)BOARD_I2S_RATE * 12;  // ~12 s
@@ -297,6 +314,7 @@ static bool setPwmEnable(bool on) {
     if (!on) {
       flagPwm = false;
       spotDutyPct[0] = spotDutyPct[1] = spotDutyPct[2] = 0;
+      cfgSnapLed[0] = cfgSnapLed[1] = cfgSnapLed[2] = 0;
     }
     actuatorUnlock();
     return !on;
@@ -317,6 +335,7 @@ static bool setPwmEnable(bool on) {
     flagPwm = false;
     // 硬件已 allOff：同步软件占空比，避免 fanIsOn()/OLED 与实况脱节
     spotDutyPct[0] = spotDutyPct[1] = spotDutyPct[2] = 0;
+    cfgSnapLed[0] = cfgSnapLed[1] = cfgSnapLed[2] = 0;
   }
   actuatorUnlock();
   return ok;
@@ -558,7 +577,12 @@ static bool servoAngle(uint8_t id, int angle) {
   if (angle > 180) angle = 180;
   uint16_t us =
       SERVO_US_MIN + (uint16_t)((uint32_t)(SERVO_US_MAX - SERVO_US_MIN) * angle / 180);
-  return pca.setPulseUs(SERVO_CH[id], us);
+  const bool ok = pca.setPulseUs(SERVO_CH[id], us);
+  if (ok) {
+    servoAngleDeg[id] = angle;
+    cfgSnapSrv[id] = angle;
+  }
+  return ok;
 }
 
 /** 风扇强度：LED_1 × LED_ALL（两者共同决定有效占空比）。 */
@@ -606,6 +630,7 @@ static bool setSpotDuty(uint8_t id, int dutyPct) {
   const bool ok = pca.setDuty(SPOT_CH[id], d);
   if (ok) {
     spotDutyPct[id] = dutyPct;
+    cfgSnapLed[id] = dutyPct;
     if (id == 0 || id == 2) {
       fanRememberIfOn();
       oledShowHome(false);
@@ -683,6 +708,7 @@ static bool applyManualFan(bool on, const char *src) {
       snprintf(fanLastAction, sizeof(fanLastAction), "开风扇 %d%%（%s）", fanIntensityPct(),
                src ? src : "?");
       ESP_LOGI(TAG, "fan: MANUAL ON intensity=%d src=%s", fanIntensityPct(), src ? src : "?");
+      cfgSave();
     }
     return ok;
   }
@@ -696,6 +722,7 @@ static bool applyManualFan(bool on, const char *src) {
              fanSavedLed1, fanSavedLedAll);
     ESP_LOGI(TAG, "fan: MANUAL OFF saved=%d/%d src=%s", fanSavedLed1, fanSavedLedAll,
              src ? src : "?");
+    cfgSave();
   }
   return ok;
 }
@@ -729,6 +756,7 @@ static bool applyManualFanLevel(int pct, const char *src) {
     snprintf(fanLastAction, sizeof(fanLastAction), "风量 %d%%（%s）", fanIntensityPct(),
              src ? src : "?");
     ESP_LOGI(TAG, "fan: LEVEL %d%% src=%s", fanIntensityPct(), src ? src : "?");
+    cfgSave();
   }
   return ok;
 }
@@ -852,12 +880,14 @@ static bool applyRadarFan(bool on) {
     bool ok = setSpotDuty(2, a);
     if (ok) ok = setSpotDuty(0, b);
     actuatorUnlock();
+    if (ok) cfgMarkDirty();
     return ok;
   }
   if (!actuatorLock()) return false;
   fanRememberIfOn();
   const bool ok = setSpotDuty(0, 0);
   actuatorUnlock();
+  if (ok) cfgMarkDirty();
   return ok;
 }
 
@@ -1027,6 +1057,7 @@ static bool applyGestureFanLevel(int pct) {
     if (ok) {
       fanAutoOn = false;
       if (fanAutoEnable) fanSuppressAutoOn = true;
+      cfgMarkDirty();
     }
     return ok;
   }
@@ -1037,7 +1068,10 @@ static bool applyGestureFanLevel(int pct) {
   bool ok = setSpotDuty(2, 100);
   if (ok) ok = setSpotDuty(0, pct);
   actuatorUnlock();
-  if (ok && fanAutoEnable) fanAutoOn = true;
+  if (ok) {
+    if (fanAutoEnable) fanAutoOn = true;
+    cfgMarkDirty();
+  }
   return ok;
 }
 
@@ -1148,11 +1182,12 @@ static bool emergencyStop() {
   return oeOk && ampOk && radarOk && pwmOk;
 }
 
-/** 关闭「关闭所有外设」：按关之前的快照恢复 PWM / 功放 / 雷达 / 风扇联动 */
+/** 关闭「关闭所有外设」：按关之前的快照恢复 PWM / 功放 / 雷达 / 风扇联动 / LED·舵机 */
 static bool releasePeripherals() {
   flagPeriphOff = false;
   bool ok = true;
   if (savedPwm && !setPwmEnable(true)) ok = false;
+  if (savedPwm && flagPwm && !cfgRestoreOutputs()) ok = false;
   if (savedAmp && !setAmp(true)) ok = false;
   if (savedRadarPwr && !setRadarPower(true)) ok = false;
   if (savedFanAuto) {
@@ -1171,6 +1206,7 @@ static bool releasePeripherals() {
     gestResetTracking();
     snprintf(gestPhase, sizeof(gestPhase), flagRadarPwr ? "idle" : "no_power");
   }
+  if (fanIsOn()) fanAutoOn = fanAutoEnable;
   oledShowHome(true);
   return ok;
 }
@@ -1247,6 +1283,7 @@ static esp_err_t handleRadarPost(httpd_req_t *req) {
   if (argsHasKey(a, "power")) {
     if (!setRadarPower(argBool(a, "power", true)))
       return sendJson(req, 500, "{\"ok\":false,\"error\":\"radar power write failed\"}");
+    cfgSave();
     char buf[1536];
     radar_json_summary(buf, sizeof(buf));
     std::string body = buf;
@@ -1302,7 +1339,7 @@ static esp_err_t handleApiIndex(httpd_req_t *req) {
   body += "{\"path\":\"/api/servos\"},";
   body += "{\"path\":\"/api/led\",\"note\":\"id 0=LED_1 1=LED_2 2=LED_ALL; need LED_ALL for 1/2\"},";
   body += "{\"path\":\"/api/fan\",\"note\":\"auto / gesture / power; gesture: near palm hold 2s cycles 0→50→100\"},";
-  body += "{\"path\":\"/api/voice\",\"note\":\"GET status; POST {on:true|false} 语音开关(NVS,默认关)\"},";
+  body += "{\"path\":\"/api/voice\",\"note\":\"GET status; POST {on:true|false}; all UI settings persist in NVS\"},";
   body += "{\"path\":\"/api/i2c\",\"note\":\"?full=1 for bus scan\"},";
   body += "{\"path\":\"/api/mic\",\"note\":\"RMS sample\"},";
   body += "{\"path\":\"/api/rec\",\"note\":\"POST on=1|0 record; GET status; GET /api/rec/wav\"},";
@@ -1419,6 +1456,7 @@ static esp_err_t handleFanPost(httpd_req_t *req) {
     snprintf(gestPhase, sizeof(gestPhase), en ? (flagRadarPwr ? "idle" : "no_power") : "disabled");
     ESP_LOGI(TAG, "fan: gesture=%d gear=%d", en ? 1 : 0, fanGearPct);
   }
+  cfgSave();
   char fan[760];
   fanJsonInto(fan, sizeof(fan));
   char buf[800];
@@ -1426,21 +1464,150 @@ static esp_err_t handleFanPost(httpd_req_t *req) {
   return sendJson(req, 200, buf);
 }
 
-static bool voiceEnabledNvs() {
-  nvs_handle_t h;
-  uint8_t v = 0;
-  if (nvs_open("cfg", NVS_READONLY, &h) != ESP_OK) return false;
-  nvs_get_u8(h, "voice", &v);
-  nvs_close(h);
-  return v != 0;
-}
+static bool voiceEnabledNvs() { return flagVoice; }
 
 static void voiceSetEnabledNvs(bool on) {
+  flagVoice = on;
+  cfgSave();
+}
+
+/** 写入全部可持久化设置（急停/播音临时开功放不调用；急停中不覆盖硬件键为全关）。 */
+static void cfgSave() {
+  if (cfgMutex && xSemaphoreTake(cfgMutex, pdMS_TO_TICKS(500)) != pdTRUE) return;
   nvs_handle_t h;
-  if (nvs_open("cfg", NVS_READWRITE, &h) != ESP_OK) return;
-  nvs_set_u8(h, "voice", on ? 1 : 0);
+  if (nvs_open("cfg", NVS_READWRITE, &h) != ESP_OK) {
+    if (cfgMutex) xSemaphoreGive(cfgMutex);
+    return;
+  }
+  auto clampU8 = [](int x) -> uint8_t {
+    if (x < 0) return 0;
+    if (x > 255) return 255;
+    return (uint8_t)x;
+  };
+  const bool pwm = flagPeriphOff ? savedPwm : flagPwm;
+  const bool amp = flagPeriphOff ? savedAmp : flagAmp;
+  const bool radar = flagPeriphOff ? savedRadarPwr : flagRadarPwr;
+  const bool fauto = flagPeriphOff ? savedFanAuto : fanAutoEnable;
+  const bool fgest = flagPeriphOff ? savedFanGesture : fanGestureEnable;
+  nvs_set_u8(h, "voice", flagVoice ? 1 : 0);
+  nvs_set_u8(h, "vol", board_i2s_get_volume());
+  nvs_set_u8(h, "pwm", pwm ? 1 : 0);
+  nvs_set_u8(h, "amp", amp ? 1 : 0);
+  nvs_set_u8(h, "radar", radar ? 1 : 0);
+  nvs_set_u8(h, "fauto", fauto ? 1 : 0);
+  nvs_set_u8(h, "fgest", fgest ? 1 : 0);
+  nvs_set_u8(h, "fgear", clampU8(fanGearPct));
+  nvs_set_u8(h, "fs1", clampU8(fanSavedLed1));
+  nvs_set_u8(h, "fsa", clampU8(fanSavedLedAll));
+  // 始终写 snap：急停清零的是 spotDutyPct，不是意图镜像
+  nvs_set_u8(h, "led0", clampU8(cfgSnapLed[0]));
+  nvs_set_u8(h, "led1", clampU8(cfgSnapLed[1]));
+  nvs_set_u8(h, "led2", clampU8(cfgSnapLed[2]));
+  nvs_set_u8(h, "srv0", clampU8(cfgSnapSrv[0]));
+  nvs_set_u8(h, "srv1", clampU8(cfgSnapSrv[1]));
   nvs_commit(h);
   nvs_close(h);
+  cfgDirty = false;
+  if (cfgMutex) xSemaphoreGive(cfgMutex);
+}
+
+static void cfgMarkDirty() { cfgDirty = true; }
+
+static void cfgFlushIfDirty() {
+  if (cfgDirty) cfgSave();
+}
+
+static void cfgLoad() {
+  nvs_handle_t h;
+  if (nvs_open("cfg", NVS_READONLY, &h) != ESP_OK) return;
+  uint8_t v = 0;
+  if (nvs_get_u8(h, "voice", &v) == ESP_OK) flagVoice = v != 0;
+  if (nvs_get_u8(h, "vol", &v) == ESP_OK) board_i2s_set_volume(v > 100 ? 100 : v);
+  if (nvs_get_u8(h, "pwm", &v) == ESP_OK) cfgWantPwm = v != 0;
+  if (nvs_get_u8(h, "amp", &v) == ESP_OK) cfgWantAmp = v != 0;
+  if (nvs_get_u8(h, "radar", &v) == ESP_OK) cfgWantRadar = v != 0;
+  if (nvs_get_u8(h, "fauto", &v) == ESP_OK) fanAutoEnable = v != 0;
+  if (nvs_get_u8(h, "fgest", &v) == ESP_OK) fanGestureEnable = v != 0;
+  if (nvs_get_u8(h, "fgear", &v) == ESP_OK) fanGearPct = v > 100 ? 100 : (int)v;
+  if (nvs_get_u8(h, "fs1", &v) == ESP_OK) fanSavedLed1 = v > 100 ? 100 : (int)v;
+  if (nvs_get_u8(h, "fsa", &v) == ESP_OK) fanSavedLedAll = v > 100 ? 100 : (int)v;
+  if (nvs_get_u8(h, "led0", &v) == ESP_OK) cfgSnapLed[0] = v > 100 ? 100 : (int)v;
+  if (nvs_get_u8(h, "led1", &v) == ESP_OK) cfgSnapLed[1] = v > 100 ? 100 : (int)v;
+  if (nvs_get_u8(h, "led2", &v) == ESP_OK) cfgSnapLed[2] = v > 100 ? 100 : (int)v;
+  if (nvs_get_u8(h, "srv0", &v) == ESP_OK) {
+    cfgSnapSrv[0] = v > 180 ? 180 : (int)v;
+    servoAngleDeg[0] = cfgSnapSrv[0];
+  }
+  if (nvs_get_u8(h, "srv1", &v) == ESP_OK) {
+    cfgSnapSrv[1] = v > 180 ? 180 : (int)v;
+    servoAngleDeg[1] = cfgSnapSrv[1];
+  }
+  nvs_close(h);
+  cfgLoaded = true;
+  ESP_LOGI(TAG,
+           "cfg NVS: voice=%d vol=%u pwm=%d amp=%d radar=%d fauto=%d fgest=%d gear=%d "
+           "led=[%d,%d,%d] srv=[%d,%d]",
+           flagVoice ? 1 : 0, (unsigned)board_i2s_get_volume(), cfgWantPwm ? 1 : 0,
+           cfgWantAmp ? 1 : 0, cfgWantRadar ? 1 : 0, fanAutoEnable ? 1 : 0,
+           fanGestureEnable ? 1 : 0, fanGearPct, cfgSnapLed[0], cfgSnapLed[1], cfgSnapLed[2],
+           cfgSnapSrv[0], cfgSnapSrv[1]);
+}
+
+/** 按 snap 写回 LED/舵机（调用方已保证 PWM/OE 已开）。 */
+static bool cfgRestoreOutputs() {
+  if (!pca.present()) return false;
+  bool ok = true;
+  if (!actuatorLock()) return false;
+  for (uint8_t i = 0; i < SPOT_COUNT; i++) {
+    if (!setSpotDuty(i, cfgSnapLed[i])) ok = false;
+  }
+  for (uint8_t i = 0; i < SERVO_COUNT; i++) {
+    if (!servoAngle(i, cfgSnapSrv[i])) ok = false;
+  }
+  actuatorUnlock();
+  return ok;
+}
+
+/** I2C 器件就绪后恢复上次外设（急停态不落盘，故重启仍按用户上次意图）。 */
+static void cfgApplyBoot() {
+  if (!cfgLoaded) return;
+
+  if (fanAutoEnable) {
+    fanSuppressAutoOn = false;
+    fanConfirmCount = 0;
+    fanLastSampleUs = 0;
+    fanSetPhase(cfgWantRadar ? "idle" : "disabled");
+    snprintf(fanReason, sizeof(fanReason), "上电恢复联动");
+  }
+  if (fanGestureEnable) {
+    gestResetTracking();
+    snprintf(gestPhase, sizeof(gestPhase), cfgWantRadar ? "idle" : "no_power");
+  }
+
+  const bool anyLed = cfgSnapLed[0] > 0 || cfgSnapLed[1] > 0 || cfgSnapLed[2] > 0;
+  const bool needPwm = cfgWantPwm || anyLed;
+  if (needPwm && pca.present()) {
+    if (!setPwmEnable(true)) {
+      ESP_LOGW(TAG, "cfg restore: PWM enable failed");
+    } else if (!cfgRestoreOutputs()) {
+      ESP_LOGW(TAG, "cfg restore: LED/servo write failed");
+    }
+  } else if (cfgWantPwm && !pca.present()) {
+    ESP_LOGW(TAG, "cfg restore: PWM wanted but PCA absent");
+  }
+
+  if (cfgWantAmp) {
+    if (!setAmp(true)) ESP_LOGW(TAG, "cfg restore: amp failed");
+  }
+  if (cfgWantRadar) {
+    if (!setRadarPower(true)) ESP_LOGW(TAG, "cfg restore: radar power failed");
+  }
+
+  if (fanIsOn()) fanAutoOn = fanAutoEnable;
+  oledShowHome(true);
+  ESP_LOGI(TAG, "cfg restore done pwm=%d amp=%d radar=%d leds=%d/%d/%d", flagPwm ? 1 : 0,
+           flagAmp ? 1 : 0, flagRadarPwr ? 1 : 0, spotDutyPct[0], spotDutyPct[1],
+           spotDutyPct[2]);
 }
 
 static void voiceJsonInto(char *buf, size_t buflen) {
@@ -1526,6 +1693,7 @@ static esp_err_t handlePwm(httpd_req_t *req) {
   bool on = argBool(a, "on", true);
   if (!setPwmEnable(on))
     return sendJson(req, 500, "{\"ok\":false,\"error\":\"xl9555 OE write failed\"}");
+  cfgSave();
   char b[64];
   snprintf(b, sizeof(b), "{\"ok\":true,\"pwmEnable\":%s}", on ? "true" : "false");
   return sendJson(req, 200, b);
@@ -1547,6 +1715,7 @@ static esp_err_t handleAmp(httpd_req_t *req) {
     if (!setAmp(on))
       return sendJson(req, 500, "{\"ok\":false,\"error\":\"xl9555 AMP write failed\"}");
   }
+  cfgSave();
   char b[96];
   snprintf(b, sizeof(b), "{\"ok\":true,\"ampEnable\":%s,\"volume\":%u}",
            flagAmp ? "true" : "false", (unsigned)board_i2s_get_volume());
@@ -1564,6 +1733,7 @@ static esp_err_t handleServo(httpd_req_t *req) {
   if (!flagPwm) return sendJson(req, 400, "{\"ok\":false,\"error\":\"enable PWM first with POST /api/pwm\"}");
   if (!servoAngle((uint8_t)id, angle))
     return sendJson(req, 500, "{\"ok\":false,\"error\":\"pca9685 servo write failed\"}");
+  cfgSave();
   char b[80];
   snprintf(b, sizeof(b), "{\"ok\":true,\"id\":%d,\"angle\":%d}", id, angle);
   return sendJson(req, 200, b);
@@ -1616,6 +1786,7 @@ static esp_err_t handleServos(httpd_req_t *req) {
       return sendJson(req, 500, b);
     }
   }
+  cfgSave();
   char out[64];
   snprintf(out, sizeof(out), "{\"ok\":true,\"angles\":[%d,%d]}", angles[0], angles[1]);
   return sendJson(req, 200, out);
@@ -1645,6 +1816,7 @@ static esp_err_t handleLed(httpd_req_t *req) {
   if (!ledOk) return sendJson(req, 500, "{\"ok\":false,\"error\":\"led write failed\"}");
   // LED_1 / LED_ALL 与风扇强度相关：同步档位，避免与控风扇/手势抢控
   if (id == 0 || id == 2) onFanOutputChangedFromUi();
+  cfgSave();
   char b[96];
   snprintf(b, sizeof(b), "{\"ok\":true,\"id\":%d,\"duty\":%d,\"pwmEnable\":true}", id, duty);
   return sendJson(req, 200, b);
@@ -1890,6 +2062,7 @@ static esp_err_t handleBeep(httpd_req_t *req) {
     if (vol < 0) vol = 0;
     if (vol > 100) vol = 100;
     board_i2s_set_volume((uint8_t)vol);
+    cfgSave();
   }
   const bool wasOn = flagAmp;
   if (!wasOn && !setAmp(true))
@@ -2170,6 +2343,7 @@ static void wifi_init() {
 }
 
 static void background_task(void *) {
+  int64_t lastCfgFlushUs = 0;
   while (true) {
     // 空板：无 XL 不做 I2C；雷达未供电时 poll 立即返回
     if (xl.present()) {
@@ -2182,6 +2356,11 @@ static void background_task(void *) {
     if (fanGestureEnable && pca.present()) updateFanGesture(rs);
     if (fanAutoEnable && pca.present()) updateRadarFan(rs);
     if (oled.present()) oledShowHome(false);
+    const int64_t now = esp_timer_get_time();
+    if (cfgDirty && (now - lastCfgFlushUs) >= 2000000) {
+      lastCfgFlushUs = now;
+      cfgFlushIfDirty();
+    }
     vTaskDelay(pdMS_TO_TICKS((xl.present() || flagRadarPwr) ? 20 : 500));
   }
 }
@@ -2204,7 +2383,8 @@ extern "C" void app_main(void) {
   actuatorMutex = xSemaphoreCreateRecursiveMutex();
   oledMutex = xSemaphoreCreateMutex();
   audioMutex = xSemaphoreCreateMutex();
-  if (!actuatorMutex || !oledMutex) {
+  cfgMutex = xSemaphoreCreateMutex();
+  if (!actuatorMutex || !oledMutex || !cfgMutex) {
     ESP_LOGE(TAG, "failed to create synchronization primitives");
     return;
   }
@@ -2230,6 +2410,7 @@ extern "C" void app_main(void) {
     xSemaphoreGive(oledMutex);
   }
   flagPwm = flagAmp = flagRadarPwr = flagPeriphOff = false;
+  cfgLoad();
 
   i2sReady = board_i2s_init();
   ESP_LOGI(TAG, "I2S=%d", i2sReady);
@@ -2250,6 +2431,8 @@ extern "C" void app_main(void) {
   } else {
     ESP_LOGI(TAG, "voice_sr idle (enable via POST /api/voice {\"on\":true})");
   }
+
+  cfgApplyBoot();
 
   wifi_init();
 
