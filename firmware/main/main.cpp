@@ -38,7 +38,7 @@
 #include "wake_reply.h"
 
 static const char *TAG = "eda_robot";
-static const char *FW_VERSION = "3.6.8";
+static const char *FW_VERSION = "3.6.10";
 static volatile bool otaBusy = false;
 static volatile bool shutdownPending = false;
 
@@ -651,6 +651,63 @@ static bool applyManualFan(bool on, const char *src) {
              src ? src : "?");
   }
   return ok;
+}
+
+static int fanSavedIntensityPct() {
+  int a = fanSavedLed1;
+  int b = fanSavedLedAll;
+  if (a < 0) a = 0;
+  if (b < 0) b = 0;
+  if (a > 100) a = 100;
+  if (b > 100) b = 100;
+  return (a * b) / 100;
+}
+
+static bool fanIsOn() { return spotDutyPct[0] > 0 && spotDutyPct[2] > 0; }
+
+/** 语音设绝对风量：LED_ALL=100、LED_1=pct（有效强度≈pct）。低于 20 抬到 20；0 则关。 */
+static bool applyManualFanLevel(int pct, const char *src) {
+  if (!pca.present()) return false;
+  if (pct <= 0) return applyManualFan(false, src);
+  if (pct < 20) pct = 20;
+  if (pct > 100) pct = 100;
+  fanDisableAuto(src && strstr(src, "语音") ? "语音接管" : "手动接管");
+  if (!flagPwm && !setPwmEnable(true)) return false;
+  if (!actuatorLock()) return false;
+  bool ok = setSpotDuty(2, 100);
+  if (ok) ok = setSpotDuty(0, pct);
+  actuatorUnlock();
+  if (ok) {
+    snprintf(fanLastAction, sizeof(fanLastAction), "风量 %d%%（%s）", fanIntensityPct(),
+             src ? src : "?");
+    ESP_LOGI(TAG, "fan: LEVEL %d%% src=%s", fanIntensityPct(), src ? src : "?");
+  }
+  return ok;
+}
+
+/** ±步长；关着说「大一点」则先按记忆/50% 再加大；关着说「小一点」忽略。 */
+static bool applyManualFanDelta(int delta, const char *src) {
+  int cur = 0;
+  if (fanIsOn()) {
+    cur = fanIntensityPct();
+  } else {
+    if (delta <= 0) return false;
+    cur = fanSavedIntensityPct();
+    if (cur < 20) cur = 50;
+  }
+  int next = cur + delta;
+  if (next < 20) next = 20;
+  if (next > 100) next = 100;
+  return applyManualFanLevel(next, src);
+}
+
+static void voiceAckBeep() {
+  if (!i2sReady) return;
+  const bool was = flagAmp;
+  if (!was) setAmp(true);
+  if (!was) vTaskDelay(pdMS_TO_TICKS(5));
+  board_i2s_beep(60);
+  if (!was) setAmp(false);
 }
 
 /** 明确有人：主目标 / is_detected / 明显运动。不含单独呼吸、微动、OUT。 */
@@ -1299,11 +1356,31 @@ static void onVoiceSrCmd(int cmd_id) {
     return;
   }
   if (cmd_id == VOICE_SR_CMD_FAN_ON) {
-    applyManualFan(true, "语音");
+    if (applyManualFan(true, "语音")) voiceAckBeep();
     return;
   }
   if (cmd_id == VOICE_SR_CMD_FAN_OFF) {
-    applyManualFan(false, "语音");
+    if (applyManualFan(false, "语音")) voiceAckBeep();
+    return;
+  }
+  if (cmd_id == VOICE_SR_CMD_FAN_UP) {
+    if (applyManualFanDelta(20, "语音")) voiceAckBeep();
+    return;
+  }
+  if (cmd_id == VOICE_SR_CMD_FAN_DOWN) {
+    if (applyManualFanDelta(-20, "语音")) voiceAckBeep();
+    return;
+  }
+  if (cmd_id == VOICE_SR_CMD_FAN_MAX) {
+    if (applyManualFanLevel(100, "语音")) voiceAckBeep();
+    return;
+  }
+  if (cmd_id == VOICE_SR_CMD_FAN_MIN) {
+    if (applyManualFanLevel(20, "语音")) voiceAckBeep();
+    return;
+  }
+  if (cmd_id == VOICE_SR_CMD_FAN_MID) {
+    if (applyManualFanLevel(50, "语音")) voiceAckBeep();
   }
 }
 

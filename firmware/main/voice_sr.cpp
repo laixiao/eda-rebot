@@ -18,11 +18,12 @@
 
 static const char *TAG = "voice_sr";
 
-/** MultiNet 伪唤醒抗误触：风扇/环境噪声易误报「你好爱妃」 */
-static constexpr float kMnDetThreshold = 0.55f;      // 模型侧总门槛
-static constexpr float kWakeMinProb = 0.62f;         // 伪唤醒额外置信度
-static constexpr float kCmdMinProb = 0.50f;          // 开/关风扇
-static constexpr int64_t kWakeCooldownUs = 4000000;  // 播报后/开风扇后 4s 内不接受伪唤醒
+/** MultiNet 灵敏度：偏易唤醒；靠冷却抑制风扇误触，不靠高门槛卡真人 */
+static constexpr float kMnDetThreshold = 0.28f;      // 模型侧（越低越灵敏）
+static constexpr float kWakeMinProb = 0.25f;         // 伪唤醒软门槛
+static constexpr float kCmdMinProb = 0.22f;          // 开/关/调风量
+static constexpr int64_t kWakeCooldownUs = 2500000;  // 播报后/开风扇后约 2.5s 不接受伪唤醒
+static constexpr int kMnCmdTimeoutMs = 10000;        // 唤醒后命令窗（含播报后继续听）
 
 static voice_sr_cmd_cb_t s_cb = nullptr;
 static volatile bool s_ok = false;
@@ -49,16 +50,66 @@ static void armWakeCooldown(int64_t extra_us) {
   if (until > s_wake_cooldown_until_us) s_wake_cooldown_until_us = until;
 }
 
+static bool addMn(int id, const char *py) {
+  if (esp_mn_commands_add(id, py) != ESP_OK) {
+    ESP_LOGE(TAG, "mn add fail id=%d '%s'", id, py);
+    return false;
+  }
+  return true;
+}
+
 static bool loadCommands(esp_mn_iface_t *mn, model_iface_data_t *md) {
   esp_mn_commands_clear();
-  // MultiNet 伪唤醒（拼音空格分隔）；无 WakeNet
-  if (esp_mn_commands_add(VOICE_SR_CMD_WAKE, "ni hao ai fei") != ESP_OK) return false;
-  // 开：开风扇 / 打开风扇
-  if (esp_mn_commands_add(VOICE_SR_CMD_FAN_ON, "kai feng shan") != ESP_OK) return false;
-  if (esp_mn_commands_add(VOICE_SR_CMD_FAN_ON, "da kai feng shan") != ESP_OK) return false;
-  // 关：关风扇 / 关闭风扇
-  if (esp_mn_commands_add(VOICE_SR_CMD_FAN_OFF, "guan feng shan") != ESP_OK) return false;
-  if (esp_mn_commands_add(VOICE_SR_CMD_FAN_OFF, "guan bi feng shan") != ESP_OK) return false;
+  // 伪唤醒额外别名，降低必须一字不差的压力
+  if (!addMn(VOICE_SR_CMD_WAKE, "ni hao ai fei")) return false;
+  if (!addMn(VOICE_SR_CMD_WAKE, "ai fei ai fei")) return false;
+
+  // 开 / 关
+  if (!addMn(VOICE_SR_CMD_FAN_ON, "kai feng shan")) return false;
+  if (!addMn(VOICE_SR_CMD_FAN_ON, "da kai feng shan")) return false;
+  if (!addMn(VOICE_SR_CMD_FAN_OFF, "guan feng shan")) return false;
+  if (!addMn(VOICE_SR_CMD_FAN_OFF, "guan bi feng shan")) return false;
+
+  // 大一点（冗余）
+  if (!addMn(VOICE_SR_CMD_FAN_UP, "da yi dian")) return false;
+  if (!addMn(VOICE_SR_CMD_FAN_UP, "da yi xie")) return false;
+  if (!addMn(VOICE_SR_CMD_FAN_UP, "feng da yi dian")) return false;
+  if (!addMn(VOICE_SR_CMD_FAN_UP, "feng da yi xie")) return false;
+  if (!addMn(VOICE_SR_CMD_FAN_UP, "feng su da yi dian")) return false;
+  if (!addMn(VOICE_SR_CMD_FAN_UP, "feng su da yi xie")) return false;
+  if (!addMn(VOICE_SR_CMD_FAN_UP, "feng liang da yi dian")) return false;
+  if (!addMn(VOICE_SR_CMD_FAN_UP, "feng liang da yi xie")) return false;
+  if (!addMn(VOICE_SR_CMD_FAN_UP, "jia da feng su")) return false;
+  if (!addMn(VOICE_SR_CMD_FAN_UP, "feng su jia da")) return false;
+  if (!addMn(VOICE_SR_CMD_FAN_UP, "jia kuai")) return false;
+
+  // 小一点（冗余）
+  if (!addMn(VOICE_SR_CMD_FAN_DOWN, "xiao yi dian")) return false;
+  if (!addMn(VOICE_SR_CMD_FAN_DOWN, "xiao yi xie")) return false;
+  if (!addMn(VOICE_SR_CMD_FAN_DOWN, "feng xiao yi dian")) return false;
+  if (!addMn(VOICE_SR_CMD_FAN_DOWN, "feng xiao yi xie")) return false;
+  if (!addMn(VOICE_SR_CMD_FAN_DOWN, "feng su xiao yi dian")) return false;
+  if (!addMn(VOICE_SR_CMD_FAN_DOWN, "feng su xiao yi xie")) return false;
+  if (!addMn(VOICE_SR_CMD_FAN_DOWN, "feng liang xiao yi dian")) return false;
+  if (!addMn(VOICE_SR_CMD_FAN_DOWN, "feng liang xiao yi xie")) return false;
+  if (!addMn(VOICE_SR_CMD_FAN_DOWN, "jian xiao feng su")) return false;
+  if (!addMn(VOICE_SR_CMD_FAN_DOWN, "feng su jian xiao")) return false;
+  if (!addMn(VOICE_SR_CMD_FAN_DOWN, "jian man")) return false;
+
+  // 最大 / 最小 / 中等
+  if (!addMn(VOICE_SR_CMD_FAN_MAX, "zui da feng")) return false;
+  if (!addMn(VOICE_SR_CMD_FAN_MAX, "feng su zui da")) return false;
+  if (!addMn(VOICE_SR_CMD_FAN_MAX, "zui da feng su")) return false;
+  if (!addMn(VOICE_SR_CMD_FAN_MAX, "feng liang zui da")) return false;
+  if (!addMn(VOICE_SR_CMD_FAN_MIN, "zui xiao feng")) return false;
+  if (!addMn(VOICE_SR_CMD_FAN_MIN, "feng su zui xiao")) return false;
+  if (!addMn(VOICE_SR_CMD_FAN_MIN, "zui xiao feng su")) return false;
+  if (!addMn(VOICE_SR_CMD_FAN_MIN, "feng liang zui xiao")) return false;
+  if (!addMn(VOICE_SR_CMD_FAN_MID, "zhong deng feng")) return false;
+  if (!addMn(VOICE_SR_CMD_FAN_MID, "zhong deng feng su")) return false;
+  if (!addMn(VOICE_SR_CMD_FAN_MID, "yi ban feng")) return false;
+  if (!addMn(VOICE_SR_CMD_FAN_MID, "feng su zhong deng")) return false;
+
   esp_mn_error_t *err = esp_mn_commands_update();
   if (err) {
     ESP_LOGE(TAG, "mn commands update failed");
@@ -121,8 +172,8 @@ static void detectTask(void *) {
     vTaskDelete(nullptr);
     return;
   }
-  // 6000ms：唤醒后命令窗；未唤醒时 TIMEOUT 仅重置状态，继续听伪唤醒词
-  model_iface_data_t *model_data = multinet->create(mn_name, 6000);
+  // 命令窗加长：唤醒播报约 3s，之后仍有时间说开/关/调风
+  model_iface_data_t *model_data = multinet->create(mn_name, kMnCmdTimeoutMs);
   if (!model_data) {
     setLast("MultiNet create 失败");
     vTaskDelete(nullptr);
@@ -191,15 +242,9 @@ static void detectTask(void *) {
           multinet->clean(model_data);
           continue;
         }
-        // 要求识别串像完整「你好爱妃」，降低噪声碎片命中
-        if (!strstr(mn->string, "ni hao") || !strstr(mn->string, "ai fei")) {
-          ESP_LOGI(TAG, "reject wake weak phrase str=%s", mn->string);
-          multinet->clean(model_data);
-          continue;
-        }
 
-        ESP_LOGI(TAG, "PSEUDO_WAKE 你好爱妃 prob=%.2f", prob);
-        setLast("已唤醒，请说开/打开/关/关闭风扇");
+        ESP_LOGI(TAG, "PSEUDO_WAKE 你好爱妃 prob=%.2f str=%s", prob, mn->string);
+        setLast("已唤醒：开/关/大一点/小一点/最大/最小/中等");
         multinet->clean(model_data);
         s_wakeup = 1;
         if (s_cb) s_cb(0);  // 播放回复（内部 pause）；返回后再冷却
@@ -229,12 +274,24 @@ static void detectTask(void *) {
           setLast("识别：关闭风扇");
         else
           setLast("识别：关风扇");
+      } else if (cmd == VOICE_SR_CMD_FAN_UP) {
+        setLast("识别：风量大一点");
+      } else if (cmd == VOICE_SR_CMD_FAN_DOWN) {
+        setLast("识别：风量小一点");
+      } else if (cmd == VOICE_SR_CMD_FAN_MAX) {
+        setLast("识别：最大风");
+      } else if (cmd == VOICE_SR_CMD_FAN_MIN) {
+        setLast("识别：最小风");
+      } else if (cmd == VOICE_SR_CMD_FAN_MID) {
+        setLast("识别：中等风");
       } else {
         snprintf(s_last, sizeof(s_last), "识别：cmd=%d", cmd);
       }
       if (s_cb && cmd > 0) s_cb(cmd);
-      // 开风扇后噪声大，拉长伪唤醒冷却
-      if (cmd == VOICE_SR_CMD_FAN_ON) armWakeCooldown(kWakeCooldownUs);
+      // 开风扇/加大后噪声大，拉长伪唤醒冷却
+      if (cmd == VOICE_SR_CMD_FAN_ON || cmd == VOICE_SR_CMD_FAN_UP || cmd == VOICE_SR_CMD_FAN_MAX ||
+          cmd == VOICE_SR_CMD_FAN_MID)
+        armWakeCooldown(kWakeCooldownUs);
       continue;
     }
 
@@ -244,7 +301,7 @@ static void detectTask(void *) {
         setLast("待命：说「你好爱妃」");
         s_wakeup = 0;
         // 刚退出命令窗时风扇可能仍在转，短暂不接受伪唤醒
-        armWakeCooldown(2000000);
+        armWakeCooldown(1500000);
       }
       multinet->clean(model_data);
     }

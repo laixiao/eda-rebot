@@ -187,7 +187,7 @@ label{color:var(--muted)}
   </div>
   <div class="rec-voice">
     <div class="row" style="margin:0">
-      <label class="switch switch-voice" title="伪唤醒「你好爱妃」→ 开风扇/打开风扇/关风扇/关闭风扇（默认关；录音时会暂停识别）">
+      <label class="switch switch-voice" title="伪唤醒「你好爱妃」→ 开/关/大一点/小一点/最大/最小/中等（默认关；录音时会暂停识别）">
         <input id="swVoice" type="checkbox" onchange="setVoice(this.checked)"/>
         <span class="track"></span>
         <span id="labVoice">语音</span>
@@ -368,7 +368,7 @@ function renderVoice(v){
   const mb=v.modelBytes?Math.round(v.modelBytes/1048576*10)/10+'MB':'—';
   box.innerHTML=
     `<b>${st}</b> · 模型 ${mb}<br>`+
-    `伪唤醒：你好爱妃 → 随机语音回应 → 开风扇/打开风扇 · 关风扇/关闭风扇<br>`+
+    `伪唤醒：你好爱妃 → 随机语音 → 开/关 · 大一点/小一点 · 最大/最小/中等风<br>`+
     `${v.last||'—'}`;
 }
 async function setVoice(on){

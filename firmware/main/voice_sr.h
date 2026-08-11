@@ -9,6 +9,11 @@ enum VoiceSrCmd : int {
   VOICE_SR_CMD_FAN_OFF = 2,
   /** MultiNet 伪唤醒：「你好爱妃」（无 WakeNet） */
   VOICE_SR_CMD_WAKE = 3,
+  VOICE_SR_CMD_FAN_UP = 4,    // 大一点 / 风速大一些 …
+  VOICE_SR_CMD_FAN_DOWN = 5,  // 小一点 / 风速小一些 …
+  VOICE_SR_CMD_FAN_MAX = 6,   // 最大风
+  VOICE_SR_CMD_FAN_MIN = 7,   // 最小风
+  VOICE_SR_CMD_FAN_MID = 8,   // 中等风 / 一半风
 };
 
 typedef void (*voice_sr_cmd_cb_t)(int cmd_id);
