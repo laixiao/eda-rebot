@@ -256,3 +256,46 @@ bool board_i2s_beep(uint16_t ms) {
   amp_ensure(false);
   return ok;
 }
+
+static bool play_tone_ms(int freq_hz, uint16_t ms, int16_t amp) {
+  if (!s_amp_tx || freq_hz <= 0 || ms == 0) return false;
+  const int rate = BOARD_I2S_RATE;
+  const size_t n = (size_t)rate * ms / 1000;
+  int16_t frames[256 * 2];
+  size_t done = 0;
+  while (done < n) {
+    const size_t count = (n - done) > 256 ? 256 : (n - done);
+    for (size_t i = 0; i < count; i++) {
+      const float t = (float)(done + i) / (float)rate;
+      // 短淡入淡出，减轻咔嗒声
+      float env = 1.0f;
+      if (i + done < 80) env = (float)(i + done) / 80.0f;
+      else if (n - (done + i) < 80) env = (float)(n - (done + i)) / 80.0f;
+      const int16_t s =
+          apply_volume((int16_t)((float)amp * env * sinf(2.0f * (float)M_PI * (float)freq_hz * t)));
+      frames[i * 2] = s;
+      frames[i * 2 + 1] = s;
+    }
+    size_t written = 0;
+    const size_t bytes = count * 2 * sizeof(int16_t);
+    if (i2s_channel_write(s_amp_tx, frames, bytes, &written, 250) != ESP_OK || written != bytes)
+      return false;
+    done += count;
+  }
+  return true;
+}
+
+bool board_i2s_wake_ack() {
+  if (!s_amp_tx) return false;
+  if (!amp_ensure(true)) return false;
+  // 升调双音：像「叮—咚」，比单声短 beep 更容易听清
+  bool ok = play_tone_ms(880, 140, 12000);
+  if (ok) ok = play_tone_ms(1320, 220, 14000);
+  if (ok) {
+    int16_t silence[256 * 2] = {0};
+    size_t written = 0;
+    ok = i2s_channel_write(s_amp_tx, silence, sizeof(silence), &written, 250) == ESP_OK;
+  }
+  amp_ensure(false);
+  return ok;
+}

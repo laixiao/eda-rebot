@@ -3,6 +3,7 @@
 
 #include "esp_log.h"
 #include "esp_heap_caps.h"
+#include "esp_timer.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 
@@ -17,6 +18,12 @@
 
 static const char *TAG = "voice_sr";
 
+/** MultiNet 伪唤醒抗误触：风扇/环境噪声易误报「你好爱妃」 */
+static constexpr float kMnDetThreshold = 0.55f;      // 模型侧总门槛
+static constexpr float kWakeMinProb = 0.62f;         // 伪唤醒额外置信度
+static constexpr float kCmdMinProb = 0.50f;          // 开/关风扇
+static constexpr int64_t kWakeCooldownUs = 4000000;  // 播报后/开风扇后 4s 内不接受伪唤醒
+
 static voice_sr_cmd_cb_t s_cb = nullptr;
 static volatile bool s_ok = false;
 static volatile bool s_running = false;
@@ -24,6 +31,7 @@ static volatile bool s_paused = false;
 static volatile bool s_feeding = false;
 static volatile int s_wakeup = 0;
 static bool s_mic_held = false;
+static int64_t s_wake_cooldown_until_us = 0;
 
 static const esp_afe_sr_iface_t *s_afe = nullptr;
 static esp_afe_sr_data_t *s_afe_data = nullptr;
@@ -36,12 +44,19 @@ static void setLast(const char *msg) {
   snprintf(s_last, sizeof(s_last), "%s", msg);
 }
 
+static void armWakeCooldown(int64_t extra_us) {
+  const int64_t until = esp_timer_get_time() + extra_us;
+  if (until > s_wake_cooldown_until_us) s_wake_cooldown_until_us = until;
+}
+
 static bool loadCommands(esp_mn_iface_t *mn, model_iface_data_t *md) {
   esp_mn_commands_clear();
   // MultiNet 伪唤醒（拼音空格分隔）；无 WakeNet
   if (esp_mn_commands_add(VOICE_SR_CMD_WAKE, "ni hao ai fei") != ESP_OK) return false;
+  // 开：开风扇 / 打开风扇
   if (esp_mn_commands_add(VOICE_SR_CMD_FAN_ON, "kai feng shan") != ESP_OK) return false;
   if (esp_mn_commands_add(VOICE_SR_CMD_FAN_ON, "da kai feng shan") != ESP_OK) return false;
+  // 关：关风扇 / 关闭风扇
   if (esp_mn_commands_add(VOICE_SR_CMD_FAN_OFF, "guan feng shan") != ESP_OK) return false;
   if (esp_mn_commands_add(VOICE_SR_CMD_FAN_OFF, "guan bi feng shan") != ESP_OK) return false;
   esp_mn_error_t *err = esp_mn_commands_update();
@@ -119,6 +134,10 @@ static void detectTask(void *) {
     vTaskDelete(nullptr);
     return;
   }
+  if (multinet->set_det_threshold) {
+    multinet->set_det_threshold(model_data, kMnDetThreshold);
+    ESP_LOGI(TAG, "mn det_threshold=%.2f wake_min_prob=%.2f", kMnDetThreshold, kWakeMinProb);
+  }
   multinet->print_active_speech_commands(model_data);
 
   const int afe_chunk = s_afe->get_fetch_chunksize(s_afe_data);
@@ -150,15 +169,42 @@ static void detectTask(void *) {
       esp_mn_results_t *mn = multinet->get_results(model_data);
       if (!mn || mn->num <= 0) continue;
       const int cmd = mn->command_id[0];
-      ESP_LOGI(TAG, "cmd=%d str=%s prob=%.2f wake=%d", cmd, mn->string, mn->prob[0],
-               s_wakeup);
+      const float prob = mn->prob[0];
+      ESP_LOGI(TAG, "cmd=%d str=%s prob=%.2f wake=%d", cmd, mn->string, prob, s_wakeup);
 
       if (cmd == VOICE_SR_CMD_WAKE) {
-        ESP_LOGI(TAG, "PSEUDO_WAKE 你好爱妃");
-        setLast("已唤醒，请说开/关风扇");
+        // 已在命令窗：忽略再次伪唤醒（风扇噪声常见）
+        if (s_wakeup == 1) {
+          ESP_LOGI(TAG, "ignore wake (already listening cmds)");
+          multinet->clean(model_data);
+          continue;
+        }
+        const int64_t now = esp_timer_get_time();
+        if (now < s_wake_cooldown_until_us) {
+          ESP_LOGI(TAG, "ignore wake (cooldown %.1fs left, prob=%.2f)",
+                   (s_wake_cooldown_until_us - now) / 1e6f, prob);
+          multinet->clean(model_data);
+          continue;
+        }
+        if (prob < kWakeMinProb) {
+          ESP_LOGI(TAG, "reject wake low prob=%.2f < %.2f", prob, kWakeMinProb);
+          multinet->clean(model_data);
+          continue;
+        }
+        // 要求识别串像完整「你好爱妃」，降低噪声碎片命中
+        if (!strstr(mn->string, "ni hao") || !strstr(mn->string, "ai fei")) {
+          ESP_LOGI(TAG, "reject wake weak phrase str=%s", mn->string);
+          multinet->clean(model_data);
+          continue;
+        }
+
+        ESP_LOGI(TAG, "PSEUDO_WAKE 你好爱妃 prob=%.2f", prob);
+        setLast("已唤醒，请说开/打开/关/关闭风扇");
         multinet->clean(model_data);
         s_wakeup = 1;
-        if (s_cb) s_cb(0);  // 0 = 唤醒提示音
+        if (s_cb) s_cb(0);  // 播放回复（内部 pause）；返回后再冷却
+        armWakeCooldown(kWakeCooldownUs);
+        multinet->clean(model_data);
         continue;
       }
 
@@ -168,13 +214,27 @@ static void detectTask(void *) {
         continue;
       }
 
-      if (cmd == VOICE_SR_CMD_FAN_ON)
-        setLast("识别：开风扇");
-      else if (cmd == VOICE_SR_CMD_FAN_OFF)
-        setLast("识别：关风扇");
-      else
+      if (prob < kCmdMinProb) {
+        ESP_LOGI(TAG, "reject cmd=%d low prob=%.2f", cmd, prob);
+        continue;
+      }
+
+      if (cmd == VOICE_SR_CMD_FAN_ON) {
+        if (strstr(mn->string, "da kai"))
+          setLast("识别：打开风扇");
+        else
+          setLast("识别：开风扇");
+      } else if (cmd == VOICE_SR_CMD_FAN_OFF) {
+        if (strstr(mn->string, "guan bi"))
+          setLast("识别：关闭风扇");
+        else
+          setLast("识别：关风扇");
+      } else {
         snprintf(s_last, sizeof(s_last), "识别：cmd=%d", cmd);
+      }
       if (s_cb && cmd > 0) s_cb(cmd);
+      // 开风扇后噪声大，拉长伪唤醒冷却
+      if (cmd == VOICE_SR_CMD_FAN_ON) armWakeCooldown(kWakeCooldownUs);
       continue;
     }
 
@@ -183,6 +243,8 @@ static void detectTask(void *) {
         ESP_LOGI(TAG, "mn timeout → wait pseudo-wake");
         setLast("待命：说「你好爱妃」");
         s_wakeup = 0;
+        // 刚退出命令窗时风扇可能仍在转，短暂不接受伪唤醒
+        armWakeCooldown(2000000);
       }
       multinet->clean(model_data);
     }

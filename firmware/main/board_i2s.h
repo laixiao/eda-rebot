@@ -8,6 +8,10 @@ bool board_i2s_ready();
 bool board_i2s_mic_rms(int32_t &rms, int32_t &peak);
 bool board_i2s_beep(uint16_t ms);
 
+/** 语音伪唤醒成功后的双音回应（约 0.4s）。 */
+bool board_i2s_wake_ack();
+
+
 /** 从麦克风读 mono PCM16（16 kHz），最多 max_samples；*got 为实际样点数。 */
 bool board_i2s_mic_read_pcm16(int16_t *out, size_t max_samples, size_t *got);
 

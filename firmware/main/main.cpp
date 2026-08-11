@@ -35,9 +35,10 @@
 #include "font_cjk.h"
 #include "device_log.h"
 #include "voice_sr.h"
+#include "wake_reply.h"
 
 static const char *TAG = "eda_robot";
-static const char *FW_VERSION = "3.6.5";
+static const char *FW_VERSION = "3.6.8";
 static volatile bool otaBusy = false;
 static volatile bool shutdownPending = false;
 
@@ -593,7 +594,7 @@ static bool setSpotDuty(uint8_t id, int dutyPct) {
   return ok;
 }
 
-/** 雷达 → 仅控 LED_1（风扇）；开时顺带拉高 LED_ALL（公共地），关时只关 LED_1。 */
+/** 雷达 → 仅控 LED_1（风扇）；开时恢复上次 LED_1×LED_ALL，关时只关 LED_1。 */
 static bool fanAutoEnable = false;  // Web「控风扇」，默认关
 static bool fanAutoOn = false;
 static const int64_t FAN_SAMPLE_US = 2000000;  // 每 2s 取样
@@ -684,9 +685,10 @@ static bool applyRadarFan(bool on) {
   if (on) {
     if (!flagPwm && !setPwmEnable(true)) return false;
     if (!actuatorLock()) return false;
-    bool ok = true;
-    if (spotDutyPct[2] < 100) ok = setSpotDuty(2, 100);
-    if (ok) ok = setSpotDuty(0, 100);
+    int a = fanSavedLedAll > 0 ? fanSavedLedAll : 100;
+    int b = fanSavedLed1 > 0 ? fanSavedLed1 : 100;
+    bool ok = setSpotDuty(2, a);
+    if (ok) ok = setSpotDuty(0, b);
     actuatorUnlock();
     return ok;
   }
@@ -763,8 +765,8 @@ static void updateRadarFan(const RadarSnapshot &rs) {
     if (applyRadarFan(true)) {
       fanAutoOn = true;
       fanSetPhase("on");
-      snprintf(fanLastAction, sizeof(fanLastAction), "开 LED_1：%s", reason);
-      ESP_LOGI(TAG, "fan: ON reason=%s", reason);
+      snprintf(fanLastAction, sizeof(fanLastAction), "开风扇 %d%%：%s", fanIntensityPct(), reason);
+      ESP_LOGI(TAG, "fan: ON intensity=%d reason=%s", fanIntensityPct(), reason);
     }
   } else if (!fanSamplePresent && fanAutoOn) {
     if (applyRadarFan(false)) {
@@ -1276,13 +1278,24 @@ static esp_err_t handleVoicePost(httpd_req_t *req) {
 
 static void onVoiceSrCmd(int cmd_id) {
   if (cmd_id == 0) {
-    // 唤醒提示音（短 beep）；失败忽略
-    if (i2sReady) {
+    // 唤醒：随机播 assets 语音；失败则双音；播放时暂停识别防回灌
+    if (!i2sReady) return;
+    voice_sr_pause();
+    int16_t *pcm = nullptr;
+    size_t n = 0;
+    const char *name = nullptr;
+    if (wake_reply_decode_random(&pcm, &n, &name) && pcm && n > 0) {
+      ESP_LOGI(TAG, "wake reply play %s (%u samples)", name ? name : "?", (unsigned)n);
+      playPcmWithAmp(pcm, n);
+      free(pcm);
+    } else {
       const bool was = flagAmp;
       if (!was) setAmp(true);
-      board_i2s_beep(80);
+      if (!was) vTaskDelay(pdMS_TO_TICKS(8));
+      board_i2s_wake_ack();
       if (!was) setAmp(false);
     }
+    voice_sr_resume();
     return;
   }
   if (cmd_id == VOICE_SR_CMD_FAN_ON) {
