@@ -96,14 +96,20 @@ label{color:var(--muted)}
 .rec-voice{margin-top:12px;padding-top:12px;border-top:1px solid var(--line)}
 .rec-voice .switch-voice{padding:6px 10px;border-radius:8px;border:1px solid #238636;background:#0d3b24;color:#3fb950;gap:8px}
 .rec-voice .switch-voice input:checked+.track{background:#238636}
+header .switch-periph{padding:6px 10px;border-radius:8px;border:1px solid var(--line);background:#21262d;color:var(--muted);gap:8px}
+header .switch-periph input:checked+.track{background:#da3633}
+header .switch-periph.on{border-color:#f85149;background:#3b1212;color:#ff7b72}
 </style>
 </head>
 <body>
 <header>
   <h1>EDA-Robot v6-1</h1>
   <span id="wifi" class="badge off">...</span>
-  <button class="danger" onclick="api('POST','/api/estop')">紧急停止</button>
-  <span class="action-note">关 PWM / 功放 / 雷达供电</span>
+  <label class="switch switch-periph" title="关 PWM / 功放 / 雷达供电；关后再开可恢复">
+    <input type="checkbox" id="swPeriphOff" onchange="setPeriphOff(this.checked)"/>
+    <span class="track"></span>
+    <span id="labPeriphOff">关闭所有外设</span>
+  </label>
   <button id="btnShutdown" class="danger" onclick="shutdownDevice()">关机</button>
   <button onclick="refresh()">刷新</button>
 </header>
@@ -244,7 +250,7 @@ label{color:var(--muted)}
         <span class="track"></span>
         <span id="labRadarPwr">供电</span>
       </label>
-      <label class="switch switch-fan" title="雷达有人 → LED_1（2s×3次确认）">
+      <label class="switch switch-fan" title="雷达有人→立即开；无人 2s×3 才关 LED_1">
         <input id="swFanAuto" type="checkbox" onchange="setFanAuto(this.checked)"/>
         <span class="track"></span>
         <span id="labFanAuto">控风扇</span>
@@ -313,7 +319,7 @@ async function api(method,url,body){
 }
 function renderFlags(s){
   document.getElementById('flags').textContent=
-    `pwm=${s.pwmEnable}\namp=${s.ampEnable}\nvol=${s.volume??100}\nradarPower=${s.radarPower}`;
+    `pwm=${s.pwmEnable}\namp=${s.ampEnable}\nvol=${s.volume??100}\nradarPower=${s.radarPower}\nperipheralsOff=${!!s.peripheralsOff}`;
   document.getElementById('btnPwm').textContent=s.pwmEnable?'PWM 已开':'使能 PWM (OE#)';
   const amp=document.getElementById('swAmp');
   const lab=document.getElementById('labAmp');
@@ -326,6 +332,21 @@ function renderFlags(s){
     vol.value=v;
     if(volV) volV.textContent=v;
   }
+  const po=document.getElementById('swPeriphOff');
+  const labPo=document.getElementById('labPeriphOff');
+  const wrapPo=po&&po.closest('.switch-periph');
+  if(po && document.activeElement!==po) po.checked=!!s.peripheralsOff;
+  if(labPo) labPo.textContent=s.peripheralsOff?'已关闭所有外设':'关闭所有外设';
+  if(wrapPo) wrapPo.classList.toggle('on',!!s.peripheralsOff);
+}
+async function setPeriphOff(on){
+  const sw=document.getElementById('swPeriphOff');
+  if(sw) sw.disabled=true;
+  try{
+    const j=await api('POST','/api/estop',{on:!!on});
+    if(!j||j.ok===false){if(sw) sw.checked=!on}
+  }finally{if(sw) sw.disabled=false}
+  refresh();
 }
 function phaseLabel(p){
   return ({disabled:'未启用',idle:'待命',arming:'确认有人中',on:'风扇已开',holdoff:'确认无人中'}[p])||p||'—';
@@ -339,11 +360,12 @@ function renderFan(f){
   if(sw && document.activeElement!==sw) sw.checked=!!f.auto;
   if(lab) lab.textContent=f.auto?'控风扇 开':'控风扇';
   let prog='';
-  const need=f.need||f.confirm||3;
+  const needOn=f.need||1;
+  const needOff=f.offNeed||f.confirm||3;
   if(f.phase==='arming')
-    prog=`有人 ${f.progress||0}/${need}（每2s）`;
+    prog=`有人 ${f.progress||0}/${needOn}（每2s）`;
   else if(f.phase==='holdoff')
-    prog=`无人 ${f.progress||0}/${need}（每2s）`;
+    prog=`无人 ${f.progress||0}/${needOff}（每2s）`;
   else if(f.phase==='on')
     prog='保持开';
   else if(f.phase==='idle')
@@ -435,7 +457,7 @@ async function setRadarPower(on){
   refresh();
 }
 async function shutdownDevice(){
-  if(!confirm('急停并进入深度睡眠？需断电或按 EN 恢复。'))return;
+  if(!confirm('关闭所有外设并进入深度睡眠？需断电或按 EN 恢复。'))return;
   const btn=document.getElementById('btnShutdown');
   btn.disabled=true;
   const r=await api('POST','/api/shutdown');

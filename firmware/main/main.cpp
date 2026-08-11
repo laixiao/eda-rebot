@@ -38,7 +38,7 @@
 #include "wake_reply.h"
 
 static const char *TAG = "eda_robot";
-static const char *FW_VERSION = "3.6.10";
+static const char *FW_VERSION = "3.6.11";
 static volatile bool otaBusy = false;
 static volatile bool shutdownPending = false;
 
@@ -59,6 +59,11 @@ static SSD1306 oled;
 static bool flagPwm = false;
 static bool flagAmp = false;
 static bool flagRadarPwr = false;
+static bool flagPeriphOff = false;  // 「关闭所有外设」开关
+static bool savedPwm = false;
+static bool savedAmp = false;
+static bool savedRadarPwr = false;
+static bool savedFanAuto = false;
 static int spotDutyPct[SPOT_COUNT] = {0, 0, 0};
 static bool i2sReady = false;
 static bool wifiOk = false;
@@ -300,7 +305,10 @@ static bool setPwmEnable(bool on) {
     ok = xl.setPin(XL_OE, true) && pcaAllOffOrAbsent();
   }
   if (on) {
-    if (ok) flagPwm = true;
+    if (ok) {
+      flagPwm = true;
+      flagPeriphOff = false;
+    }
   } else if (xl.present()) {
     flagPwm = false;
   }
@@ -316,7 +324,10 @@ static bool setAmp(bool on) {
     return !on;
   }
   const bool ok = xl.setPin(XL_AMP_SD, on);
-  if (ok) flagAmp = on;
+  if (ok) {
+    flagAmp = on;
+    if (on) flagPeriphOff = false;
+  }
   actuatorUnlock();
   return ok;
 }
@@ -526,7 +537,10 @@ static bool setRadarPower(bool on) {
     return !on;
   }
   const bool ok = xl.setPin(XL_RADAR_PWR, !on);
-  if (ok) flagRadarPwr = on;
+  if (ok) {
+    flagRadarPwr = on;
+    if (on) flagPeriphOff = false;
+  }
   actuatorUnlock();
   if (ok) radar_on_power(on);
   return ok;
@@ -598,7 +612,8 @@ static bool setSpotDuty(uint8_t id, int dutyPct) {
 static bool fanAutoEnable = false;  // Web「控风扇」，默认关
 static bool fanAutoOn = false;
 static const int64_t FAN_SAMPLE_US = 2000000;  // 每 2s 取样
-static const uint8_t FAN_CONFIRM = 3;          // 连续 3 次相同再切换
+static const uint8_t FAN_CONFIRM_ON = 1;       // 有人：1 次即开
+static const uint8_t FAN_CONFIRM_OFF = 3;      // 无人：连续 3 次才关
 static int64_t fanLastSampleUs = 0;
 static uint8_t fanConfirmCount = 0;
 static bool fanSamplePresent = false;
@@ -810,11 +825,12 @@ static void updateRadarFan(const RadarSnapshot &rs) {
     fanConfirmCount = (uint8_t)((fanConfirmCount < 250) ? fanConfirmCount + 1 : 250);
   }
 
-  if (fanConfirmCount < FAN_CONFIRM) {
+  const uint8_t need = fanSamplePresent ? FAN_CONFIRM_ON : FAN_CONFIRM_OFF;
+  if (fanConfirmCount < need) {
     fanSetPhase(fanSamplePresent ? (fanAutoOn ? "on" : "arming")
                                  : (fanAutoOn ? "holdoff" : "idle"));
     ESP_LOGI(TAG, "fan: sample %s %u/%u (%s)", fanSamplePresent ? "present" : "absent",
-             (unsigned)fanConfirmCount, (unsigned)FAN_CONFIRM, reason);
+             (unsigned)fanConfirmCount, (unsigned)need, reason);
     return;
   }
 
@@ -838,6 +854,12 @@ static void updateRadarFan(const RadarSnapshot &rs) {
 }
 
 static bool emergencyStop() {
+  if (!flagPeriphOff) {
+    savedPwm = flagPwm;
+    savedAmp = flagAmp;
+    savedRadarPwr = flagRadarPwr;
+    savedFanAuto = fanAutoEnable;
+  }
   recStop();
   if (!actuatorLock()) return false;
   bool oeOk = true, ampOk = true, radarOk = true;
@@ -853,16 +875,41 @@ static bool emergencyStop() {
     flagRadarPwr = false;
     radar_on_power(false);
   }
+  fanAutoEnable = false;
   fanAutoOn = false;
   fanConfirmCount = 0;
   fanLastSampleUs = 0;
-  fanSetPhase(fanAutoEnable ? "idle" : "disabled");
-  snprintf(fanReason, sizeof(fanReason), "急停");
-  snprintf(fanLastAction, sizeof(fanLastAction), "关 LED_1：急停");
+  fanSetPhase("disabled");
+  snprintf(fanReason, sizeof(fanReason), "关闭所有外设");
+  snprintf(fanLastAction, sizeof(fanLastAction), "关 LED_1：关闭所有外设");
   spotDutyPct[0] = spotDutyPct[1] = spotDutyPct[2] = 0;
+  flagPeriphOff = true;
   actuatorUnlock();
+  radar_set_enabled(false);
   oledShowHome(true);
   return oeOk && ampOk && radarOk && pwmOk;
+}
+
+/** 关闭「关闭所有外设」：按关之前的快照恢复 PWM / 功放 / 雷达 / 风扇联动 */
+static bool releasePeripherals() {
+  flagPeriphOff = false;
+  bool ok = true;
+  if (savedPwm && !setPwmEnable(true)) ok = false;
+  if (savedAmp && !setAmp(true)) ok = false;
+  if (savedRadarPwr && !setRadarPower(true)) ok = false;
+  if (savedFanAuto) {
+    fanAutoEnable = true;
+    fanConfirmCount = 0;
+    fanLastSampleUs = 0;
+    fanSetPhase(flagRadarPwr ? "idle" : "disabled");
+    snprintf(fanReason, sizeof(fanReason), "已恢复外设");
+    snprintf(fanLastAction, sizeof(fanLastAction), "恢复风扇联动");
+  } else {
+    snprintf(fanReason, sizeof(fanReason), "已恢复外设");
+    snprintf(fanLastAction, sizeof(fanLastAction), "允许单独开启");
+  }
+  oledShowHome(true);
+  return ok;
 }
 
 static void shutdownTask(void *) {
@@ -984,7 +1031,7 @@ static esp_err_t handleApiIndex(httpd_req_t *req) {
   body += "\",\"framework\":\"esp-idf\",";
   body += "\"board\":\"AI通用机器人_v6-1 / V1.0.0\",";
   body += "\"endpoints\":[";
-  body += "{\"path\":\"/api/status\"},{\"path\":\"/api/estop\"},";
+  body += "{\"path\":\"/api/status\"},{\"path\":\"/api/estop\",\"note\":\"POST {on:true|false} 关闭/恢复所有外设\"},";
   body += "{\"path\":\"/api/shutdown\",\"note\":\"deep sleep; wake by power cycle or reset\"},";
   body += "{\"path\":\"/api/pwm\"},";
   body += "{\"path\":\"/api/amp\",\"note\":\"on bool; volume 0..100 digital gain\"},";
@@ -1033,8 +1080,8 @@ static void fanJsonInto(char *buf, size_t buflen) {
            "\"samplePresent\":%s,\"led1\":%d,\"ledAll\":%d,\"intensity\":%d,"
            "\"savedLed1\":%d,\"savedLedAll\":%d,\"savedIntensity\":%d}",
            fanAutoEnable ? "true" : "false", fanAutoOn ? "true" : "false", fanPhase, r, a,
-           (unsigned)fanConfirmCount, (unsigned)FAN_CONFIRM, (unsigned)FAN_CONFIRM,
-           (unsigned)FAN_CONFIRM, fanSamplePresent ? "true" : "false", spotDutyPct[0],
+           (unsigned)fanConfirmCount, (unsigned)FAN_CONFIRM_ON, (unsigned)FAN_CONFIRM_OFF,
+           (unsigned)FAN_CONFIRM_OFF, fanSamplePresent ? "true" : "false", spotDutyPct[0],
            spotDutyPct[2], fanIntensityPct(), fanSavedLed1, fanSavedLedAll,
            (fanSavedLed1 * fanSavedLedAll) / 100);
 }
@@ -1062,6 +1109,7 @@ static esp_err_t handleFanPost(httpd_req_t *req) {
   if (hasAuto) {
     const bool en = argsHasKey(a, "auto") ? argBool(a, "auto", false) : argBool(a, "on", false);
     fanAutoEnable = en;
+    if (en) flagPeriphOff = false;
     if (!en && fanAutoOn) {
       if (applyRadarFan(false)) {
         fanAutoOn = false;
@@ -1133,24 +1181,30 @@ static esp_err_t handleStatus(httpd_req_t *req) {
            "{\"ok\":true,\"fw\":\"%s\",\"board\":\"v6-1\",\"ip\":\"%s\",\"rssi\":%d,"
            "\"psram\":%s,\"psramBytes\":%u,"
            "\"xl9555\":%s,\"oled\":%s,\"pca9685\":%s,\"i2s\":%s,"
-           "\"pwmEnable\":%s,\"ampEnable\":%s,\"volume\":%u,\"radarPower\":%s,\"otaBusy\":%s,"
+           "\"pwmEnable\":%s,\"ampEnable\":%s,\"volume\":%u,\"radarPower\":%s,\"peripheralsOff\":%s,\"otaBusy\":%s,"
            "\"leds\":[%d,%d,%d],\"fan\":%s,\"voice\":%s,\"i2c\":%s}",
            FW_VERSION, ipStr, rssi, psramOk ? "true" : "false", (unsigned)psramBytes,
            xl.present() ? "true" : "false", oled.present() ? "true" : "false",
            pca.present() ? "true" : "false", i2sReady ? "true" : "false",
            flagPwm ? "true" : "false", flagAmp ? "true" : "false",
            (unsigned)board_i2s_get_volume(),
-           flagRadarPwr ? "true" : "false", otaBusy ? "true" : "false", spotDutyPct[0],
+           flagRadarPwr ? "true" : "false", flagPeriphOff ? "true" : "false",
+           otaBusy ? "true" : "false", spotDutyPct[0],
            spotDutyPct[1], spotDutyPct[2], fan, voice, i2cKnownJson().c_str());
   return sendJson(req, 200, buf);
 }
 
 static esp_err_t handleEstop(httpd_req_t *req) {
-  (void)loadArgs(req);
-  if (!emergencyStop())
-    return sendJson(req, 500, "{\"ok\":false,\"error\":\"estop hardware write failed\"}");
-  radar_set_enabled(false);
-  return sendJson(req, 200, "{\"ok\":true,\"estop\":true}");
+  auto a = loadArgs(req);
+  const bool on = argBool(a, "on", true);
+  if (on) {
+    if (!emergencyStop())
+      return sendJson(req, 500, "{\"ok\":false,\"error\":\"peripherals off hardware write failed\"}");
+    return sendJson(req, 200, "{\"ok\":true,\"peripheralsOff\":true,\"estop\":true}");
+  }
+  if (!releasePeripherals())
+    return sendJson(req, 500, "{\"ok\":false,\"error\":\"peripherals restore failed\"}");
+  return sendJson(req, 200, "{\"ok\":true,\"peripheralsOff\":false,\"estop\":false}");
 }
 
 static esp_err_t handleShutdown(httpd_req_t *req) {
@@ -1876,7 +1930,7 @@ extern "C" void app_main(void) {
     oled.printfLines("EDA Robot", "汉字字库就绪", "等待 WiFi...", FW_VERSION);
     xSemaphoreGive(oledMutex);
   }
-  flagPwm = flagAmp = flagRadarPwr = false;
+  flagPwm = flagAmp = flagRadarPwr = flagPeriphOff = false;
 
   i2sReady = board_i2s_init();
   ESP_LOGI(TAG, "I2S=%d", i2sReady);

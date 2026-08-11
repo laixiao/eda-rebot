@@ -21,7 +21,7 @@ UNIFONT_URL = (
 )
 
 # Extra UI strings used by firmware OLED / web notes
-EXTRA_CHARS = "你好机器人汉字字库就绪等待打开浏览器检查热点已关机深度睡眠急停风扇雷达采集供电"
+EXTRA_CHARS = "你好机器人汉字字库就绪等待打开浏览器检查热点已关机深度睡眠关闭所有外设风扇雷达采集供电"
 
 
 def gb2312_level1() -> list[int]:

@@ -1,6 +1,23 @@
 ======= 环境 =======
 & 'C:\Espressif\tools\Microsoft.v5.5.5.PowerShell_profile.ps1'
 
+
+======= 构建 =======
+主系统：
+  cd firmware
+  idf.py build
+  → firmware\build\eda_robot.bin（开 SPIRAM 时约 5MB+，含语音模型；语音运行时默认不启动）
+
+救援：
+  cd firmware_recovery
+  idf.py build
+  → firmware_recovery\build\eda_rescue.bin
+
+大包只烧 ota_0（0x120000 / 救援 OTA），不要烧 factory（1MB）。
+
+（build 被占用打不开时，可临时：idf.py -B "$env:TEMP\eda_robot_build" build）
+
+
 ======= 产物路径（项目内）=======
 主系统：firmware/build/eda_robot.bin
 救援：  firmware_recovery/build/eda_rescue.bin
@@ -45,20 +62,6 @@ curl 等价：
   Invoke-RestMethod -Method POST -Uri http://<主IP>/api/voice -ContentType application/json -Body '{"on":true}'
   Invoke-RestMethod -Method POST -Uri http://<主IP>/api/voice -ContentType application/json -Body '{"on":false}'
 
-======= 构建 =======
-主系统：
-  cd firmware
-  idf.py build
-  → firmware\build\eda_robot.bin（开 SPIRAM 时约 5MB+，含语音模型；语音运行时默认不启动）
-
-救援：
-  cd firmware_recovery
-  idf.py build
-  → firmware_recovery\build\eda_rescue.bin
-
-大包只烧 ota_0（0x120000 / 救援 OTA），不要烧 factory（1MB）。
-
-（build 被占用打不开时，可临时：idf.py -B "$env:TEMP\eda_robot_build" build）
 
 当前板子 IP
 http://192.168.137.178/

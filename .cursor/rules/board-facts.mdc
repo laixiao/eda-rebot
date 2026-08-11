@@ -102,7 +102,7 @@ U1 当前 NC：IO1/8/11/14/15/19/20/21/35/36/37/47/48。
 - 空板可只跑 WiFi/HTTP；语音默认关；I2S DMA 空闲关闭
 - 雷达：`POST /api/radar {"power":true}` 开电即自动查询（已取消独立采集开关）；UART IO9/10
 - 舵机 id `0..1`；探照灯 id `0/1/2`=LED_1/2/ALL（1/2 需 ALL）
-- 雷达→风扇：`POST /api/fan {"auto":true}`；每 **2s** 取样，连续 **3** 次相同再开/关 **LED_1**（开时恢复上次 LED_1×LED_ALL；关只关 LED_1）；有人判定不含单独呼吸/微动/OUT；默认关
+- 雷达→风扇：`POST /api/fan {"auto":true}`；每 **2s** 取样；**有人 1 次即开**、**无人连续 3 次才关** **LED_1**（开时恢复上次 LED_1×LED_ALL；关只关 LED_1）；有人判定不含单独呼吸/微动/OUT；默认关
 - 语音控风扇（ESP-SR）：**默认关**（NVS `cfg/voice`）；网页「语音」开关或 `POST /api/voice {"on":true|false}`；开后 **MultiNet 伪唤醒「你好爱妃」**（无 WakeNet；随机播放 `firmware/assets/*.wav`，失败则双音）→ 开/关风扇、**大一点/小一点（±20%）**、最大/最小(20%)/中等(50%)；开或加大时恢复/设置 LED_1×LED_ALL 并**关闭雷达联动**；`GET /api/voice` / `/api/status` 含 `enabled`/`modelBytes`
 - 录音：`POST /api/rec {"on":true|false}`，`GET /api/rec/wav`；播放录音 `POST /api/play`；上传 `POST /api/play/upload`（WAV PCM16 @16kHz）
 - 音量：`POST /api/amp {"volume":0..100}`（数字缩放，默认 100；仅改音量不碰功放开关）；`/api/status` 含 `volume`；影响 play/beep/upload

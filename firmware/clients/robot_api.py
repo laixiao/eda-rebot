@@ -45,8 +45,9 @@ class RobotApi:
     def status(self) -> dict:
         return self._call("/api/status")
 
-    def estop(self) -> dict:
-        return self._call("/api/estop", method="POST")
+    def estop(self, on: bool = True) -> dict:
+        """关闭所有外设 (on=True) 或按快照恢复 (on=False)。"""
+        return self._call("/api/estop", {"on": on}, method="POST")
 
     def shutdown(self) -> dict:
         return self._call("/api/shutdown", method="POST")
