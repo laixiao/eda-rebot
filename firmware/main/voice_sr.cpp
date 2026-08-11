@@ -10,8 +10,6 @@
 #include "esp_mn_iface.h"
 #include "esp_mn_models.h"
 #include "esp_mn_speech_commands.h"
-#include "esp_wn_iface.h"
-#include "esp_wn_models.h"
 #include "model_path.h"
 
 #include <stdio.h>
@@ -40,7 +38,8 @@ static void setLast(const char *msg) {
 
 static bool loadCommands(esp_mn_iface_t *mn, model_iface_data_t *md) {
   esp_mn_commands_clear();
-  // MultiNet6 中文：拼音空格分隔
+  // MultiNet 伪唤醒（拼音空格分隔）；无 WakeNet
+  if (esp_mn_commands_add(VOICE_SR_CMD_WAKE, "ni hao ai fei") != ESP_OK) return false;
   if (esp_mn_commands_add(VOICE_SR_CMD_FAN_ON, "kai feng shan") != ESP_OK) return false;
   if (esp_mn_commands_add(VOICE_SR_CMD_FAN_ON, "da kai feng shan") != ESP_OK) return false;
   if (esp_mn_commands_add(VOICE_SR_CMD_FAN_OFF, "guan feng shan") != ESP_OK) return false;
@@ -107,6 +106,7 @@ static void detectTask(void *) {
     vTaskDelete(nullptr);
     return;
   }
+  // 6000ms：唤醒后命令窗；未唤醒时 TIMEOUT 仅重置状态，继续听伪唤醒词
   model_iface_data_t *model_data = multinet->create(mn_name, 6000);
   if (!model_data) {
     setLast("MultiNet create 失败");
@@ -127,8 +127,8 @@ static void detectTask(void *) {
     ESP_LOGW(TAG, "chunk mismatch afe=%d mn=%d", afe_chunk, mu_chunk);
   }
 
-  setLast("待命：说「你好小智」");
-  ESP_LOGI(TAG, "voice ready — wake: 你好小智; cmds: 开/关风扇");
+  setLast("待命：说「你好爱妃」");
+  ESP_LOGI(TAG, "voice ready — pseudo-wake: 你好爱妃; cmds: 开/关风扇");
 
   while (s_running) {
     if (s_paused) {
@@ -140,45 +140,51 @@ static void detectTask(void *) {
       vTaskDelay(pdMS_TO_TICKS(10));
       continue;
     }
+    if (!res->data) continue;
 
-    if (res->wakeup_state == WAKENET_DETECTED) {
-      ESP_LOGI(TAG, "WAKEWORD");
-      setLast("已唤醒，请说开/关风扇");
-      multinet->clean(model_data);
-      s_wakeup = 1;
-      if (s_cb) s_cb(0);  // 0 = 唤醒提示（主程序可 beep）
-    } else if (res->wakeup_state == WAKENET_CHANNEL_VERIFIED) {
-      s_wakeup = 1;
-      multinet->clean(model_data);
-    }
-
-    if (s_wakeup != 1) continue;
-
+    // 无 WakeNet：始终跑 MultiNet；伪唤醒词与命令词共用检测
     esp_mn_state_t st = multinet->detect(model_data, res->data);
     if (st == ESP_MN_STATE_DETECTING) continue;
 
     if (st == ESP_MN_STATE_DETECTED) {
       esp_mn_results_t *mn = multinet->get_results(model_data);
-      if (mn && mn->num > 0) {
-        const int cmd = mn->command_id[0];
-        ESP_LOGI(TAG, "cmd=%d str=%s prob=%.2f", cmd, mn->string, mn->prob[0]);
-        if (cmd == VOICE_SR_CMD_FAN_ON)
-          setLast("识别：开风扇");
-        else if (cmd == VOICE_SR_CMD_FAN_OFF)
-          setLast("识别：关风扇");
-        else
-          snprintf(s_last, sizeof(s_last), "识别：cmd=%d", cmd);
-        if (s_cb && cmd > 0) s_cb(cmd);
+      if (!mn || mn->num <= 0) continue;
+      const int cmd = mn->command_id[0];
+      ESP_LOGI(TAG, "cmd=%d str=%s prob=%.2f wake=%d", cmd, mn->string, mn->prob[0],
+               s_wakeup);
+
+      if (cmd == VOICE_SR_CMD_WAKE) {
+        ESP_LOGI(TAG, "PSEUDO_WAKE 你好爱妃");
+        setLast("已唤醒，请说开/关风扇");
+        multinet->clean(model_data);
+        s_wakeup = 1;
+        if (s_cb) s_cb(0);  // 0 = 唤醒提示音
+        continue;
       }
-      // 单次命令后继续听，直到超时；保持唤醒以便连说
+
+      if (s_wakeup != 1) {
+        // 未唤醒时忽略开/关风扇，避免误控
+        ESP_LOGI(TAG, "ignore cmd=%d (need wake)", cmd);
+        continue;
+      }
+
+      if (cmd == VOICE_SR_CMD_FAN_ON)
+        setLast("识别：开风扇");
+      else if (cmd == VOICE_SR_CMD_FAN_OFF)
+        setLast("识别：关风扇");
+      else
+        snprintf(s_last, sizeof(s_last), "识别：cmd=%d", cmd);
+      if (s_cb && cmd > 0) s_cb(cmd);
       continue;
     }
 
     if (st == ESP_MN_STATE_TIMEOUT) {
-      ESP_LOGI(TAG, "mn timeout → wait wake");
-      setLast("待命：说「你好小智」");
-      s_afe->enable_wakenet(s_afe_data);
-      s_wakeup = 0;
+      if (s_wakeup == 1) {
+        ESP_LOGI(TAG, "mn timeout → wait pseudo-wake");
+        setLast("待命：说「你好爱妃」");
+        s_wakeup = 0;
+      }
+      multinet->clean(model_data);
     }
   }
 
@@ -248,9 +254,10 @@ bool voice_sr_start(voice_sr_cmd_cb_t cb) {
     setLast("AFE 配置失败");
     return false;
   }
-  // 单麦板：关闭 SE，省算力
+  // 单麦板：关闭 SE；伪唤醒不跑 WakeNet，省算力、避免「你好小智」误导
   afe_cfg->aec_init = false;
   afe_cfg->se_init = false;
+  afe_cfg->wakenet_init = false;
 
   s_afe = esp_afe_handle_from_config(afe_cfg);
   s_afe_data = s_afe ? s_afe->create_from_config(afe_cfg) : nullptr;
@@ -281,6 +288,6 @@ bool voice_sr_start(voice_sr_cmd_cb_t cb) {
   }
 
   s_ok = true;
-  setLast("待命：说「你好小智」");
+  setLast("待命：说「你好爱妃」");
   return true;
 }

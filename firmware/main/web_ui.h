@@ -93,6 +93,9 @@ label{color:var(--muted)}
 .radar-actions .switch-acq input:checked+.track{background:#1f6feb}
 .radar-actions .switch-fan{background:#0d3b24;border-color:#238636;color:#3fb950}
 .radar-actions .switch-fan input:checked+.track{background:#238636}
+.rec-voice{margin-top:12px;padding-top:12px;border-top:1px solid var(--line)}
+.rec-voice .switch-voice{padding:6px 10px;border-radius:8px;border:1px solid #238636;background:#0d3b24;color:#3fb950;gap:8px}
+.rec-voice .switch-voice input:checked+.track{background:#238636}
 </style>
 </head>
 <body>
@@ -167,7 +170,7 @@ label{color:var(--muted)}
   </div>
 </section>
 <section>
-  <h2>录音</h2>
+  <h2>录音 / 语音</h2>
   <div class="row" style="justify-content:center;margin-top:8px">
     <button id="btnRec" class="rec-btn" onclick="toggleRec()" title="录音" aria-label="录音">
       <svg id="recIcon" viewBox="0 0 24 24" aria-hidden="true"><path d="M12 14a3 3 0 0 0 3-3V6a3 3 0 1 0-6 0v5a3 3 0 0 0 3 3zm5-3a5 5 0 0 1-10 0H5a7 7 0 0 0 6 6.92V21h2v-3.08A7 7 0 0 0 19 11h-2z"/></svg>
@@ -181,6 +184,16 @@ label{color:var(--muted)}
       <b>录音片段</b>
       <div id="recMeta" class="action-note">—</div>
     </div>
+  </div>
+  <div class="rec-voice">
+    <div class="row" style="margin:0">
+      <label class="switch switch-voice" title="伪唤醒「你好爱妃」→ 开/关风扇（默认关；录音时会暂停识别）">
+        <input id="swVoice" type="checkbox" onchange="setVoice(this.checked)"/>
+        <span class="track"></span>
+        <span id="labVoice">语音</span>
+      </label>
+    </div>
+    <div id="voiceStatus" class="fan-line" style="margin-top:8px">加载中...</div>
   </div>
 </section>
 <section>
@@ -236,11 +249,6 @@ label{color:var(--muted)}
         <span class="track"></span>
         <span id="labFanAuto">控风扇</span>
       </label>
-      <label class="switch switch-fan" title="唤醒「你好小智」→ 开/关风扇（默认关，省电/避 AFE 崩溃）">
-        <input id="swVoice" type="checkbox" onchange="setVoice(this.checked)"/>
-        <span class="track"></span>
-        <span id="labVoice">语音</span>
-      </label>
     </div>
   </div>
   <div class="radar-body">
@@ -259,10 +267,6 @@ label{color:var(--muted)}
       <div class="fan-box">
         <div class="fan-title">风扇联动</div>
         <div id="fanStatus" class="fan-line">加载中...</div>
-      </div>
-      <div class="fan-box" style="margin-top:8px">
-        <div class="fan-title">语音控风扇</div>
-        <div id="voiceStatus" class="fan-line">加载中...</div>
       </div>
       <div>
         <h2 style="margin:0 0 6px">目标</h2>
@@ -364,7 +368,7 @@ function renderVoice(v){
   const mb=v.modelBytes?Math.round(v.modelBytes/1048576*10)/10+'MB':'—';
   box.innerHTML=
     `<b>${st}</b> · 模型 ${mb}<br>`+
-    `唤醒：你好小智 → 开风扇 / 关风扇<br>`+
+    `伪唤醒：你好爱妃 → 开风扇 / 关风扇<br>`+
     `${v.last||'—'}`;
 }
 async function setVoice(on){

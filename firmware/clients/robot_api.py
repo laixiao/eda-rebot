@@ -87,7 +87,7 @@ class RobotApi:
         return self._call("/api/fan", {"power": on}, method="POST")
 
     def voice(self) -> dict:
-        """板端语音：唤醒「你好小智」→「开风扇」「关风扇」"""
+        """板端语音：伪唤醒「你好爱妃」→「开风扇」「关风扇」"""
         return self._call("/api/voice")
 
     def mic(self) -> dict:

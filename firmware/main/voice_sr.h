@@ -7,6 +7,8 @@
 enum VoiceSrCmd : int {
   VOICE_SR_CMD_FAN_ON = 1,
   VOICE_SR_CMD_FAN_OFF = 2,
+  /** MultiNet 伪唤醒：「你好爱妃」（无 WakeNet） */
+  VOICE_SR_CMD_WAKE = 3,
 };
 
 typedef void (*voice_sr_cmd_cb_t)(int cmd_id);

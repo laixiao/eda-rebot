@@ -37,7 +37,7 @@
 #include "voice_sr.h"
 
 static const char *TAG = "eda_robot";
-static const char *FW_VERSION = "3.6.3";
+static const char *FW_VERSION = "3.6.5";
 static volatile bool otaBusy = false;
 static volatile bool shutdownPending = false;
 
@@ -1797,7 +1797,7 @@ extern "C" void app_main(void) {
 #if CONFIG_SPIRAM
     if (esp_psram_is_initialized()) {
       const bool vok = voice_sr_start(onVoiceSrCmd);
-      ESP_LOGI(TAG, "voice_sr=%d (wake=你好小智)", vok ? 1 : 0);
+      ESP_LOGI(TAG, "voice_sr=%d (pseudo-wake=你好爱妃)", vok ? 1 : 0);
     } else {
       ESP_LOGW(TAG, "voice enabled in NVS but PSRAM missing — skipped");
     }
