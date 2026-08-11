@@ -196,7 +196,7 @@ bool board_i2s_mic_read_pcm16(int16_t *out, size_t max_samples, size_t *got) {
 bool board_i2s_play_pcm16(const int16_t *mono, size_t n_samples) {
   if (!s_amp_tx || !mono || n_samples == 0) return false;
   if (!amp_ensure(true)) return false;
-  int16_t frames[256 * 2];
+  static int16_t frames[256 * 2];
   size_t done = 0;
   bool ok = true;
   while (done < n_samples) {
@@ -229,7 +229,7 @@ bool board_i2s_beep(uint16_t ms) {
   const int rate = BOARD_I2S_RATE;
   const int freq = 1000;
   const size_t n = (size_t)rate * ms / 1000;
-  int16_t frames[256 * 2];
+  static int16_t frames[256 * 2];
   size_t done = 0;
   bool ok = true;
   while (done < n) {
@@ -261,7 +261,7 @@ static bool play_tone_ms(int freq_hz, uint16_t ms, int16_t amp) {
   if (!s_amp_tx || freq_hz <= 0 || ms == 0) return false;
   const int rate = BOARD_I2S_RATE;
   const size_t n = (size_t)rate * ms / 1000;
-  int16_t frames[256 * 2];
+  static int16_t frames[256 * 2];
   size_t done = 0;
   while (done < n) {
     const size_t count = (n - done) > 256 ? 256 : (n - done);
@@ -292,7 +292,8 @@ bool board_i2s_wake_ack() {
   bool ok = play_tone_ms(880, 140, 12000);
   if (ok) ok = play_tone_ms(1320, 220, 14000);
   if (ok) {
-    int16_t silence[256 * 2] = {0};
+    static int16_t silence[256 * 2];
+    memset(silence, 0, sizeof(silence));
     size_t written = 0;
     ok = i2s_channel_write(s_amp_tx, silence, sizeof(silence), &written, 250) == ESP_OK;
   }

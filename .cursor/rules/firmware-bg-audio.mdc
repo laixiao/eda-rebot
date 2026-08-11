@@ -1,0 +1,33 @@
+---
+description: 固件后台任务禁止同步播音；小栈任务勿放大缓冲/长阻塞
+globs: firmware/**/*.{c,cpp,h,hpp}
+alwaysApply: false
+---
+
+# 固件：后台任务与播音栈安全
+
+## 教训（2026-08-11）
+
+手势切档在 `background_task`（栈 **4096**）里**同步**调用 `board_i2s_wake_ack()` → 栈上大缓冲 + 阻塞约 0.4s → **栈溢出 / 看门狗，表现为一触发就重启**。
+
+## 禁止
+
+| 场景 | 禁止做法 |
+|---|---|
+| `background_task` / 雷达轮询 / 小栈任务（≤4KB） | 同步 `board_i2s_beep` / `wake_ack` / `play_pcm16` / 解码播 WAV |
+| I2S 音调/播放路径 | 在深调用链上再放 `int16_t frames[512+]` 等大栈数组 |
+| 反馈音效 | 在持有 `actuatorLock` 时长时间阻塞播音 |
+
+## 必须
+
+1. **播音另起任务**：如 `gest_chime`（栈 ≥6KB），由 bg 只置标志 / `xTaskCreate`，不在 bg 内直接播。
+2. **走 `audioMutex` / `playBusy`**：与 `/api/play`、录音互斥，避免与语音抢 I2S。
+3. **I2S 帧缓冲用 `static`（或堆）**：`board_i2s.cpp` 的 tone/beep/play 缓冲勿再放栈上。
+4. **bg 任务保持短周期**：只做采样、状态机、置位；重活（播音、HTTP 响应体组装、大 JSON）放到专用任务或 HTTP 任务。
+
+## 现有安全样板
+
+- 手势切档成功 → `gestureAckChime()` → `gestChimeTask` 异步「叮—咚」
+- 语音指令短 beep 在语音/HTTP 路径调用（非 bg 4KB 栈）
+
+改风扇/雷达/手势反馈时，先确认调用栈落在哪个任务、栈多大，再决定能否同步播音。

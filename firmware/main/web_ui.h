@@ -257,7 +257,7 @@ header .switch-periph.on{border-color:#f85149;background:#3b1212;color:#ff7b72}
         <span class="track"></span>
         <span id="labFanAuto">控风扇</span>
       </label>
-      <label class="switch switch-gest" title="近距≤0.45m 停留2s 循环档位 关→50%→100；只管档位，不关控风扇">
+      <label class="switch switch-gest" title="近距≤0.20m 停留2s 循环档位 关→50%→100；只管档位，不关控风扇">
         <input id="swFanGest" type="checkbox" onchange="setFanGesture(this.checked)"/>
         <span class="track"></span>
         <span id="labFanGest">手势切档</span>

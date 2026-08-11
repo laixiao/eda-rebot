@@ -758,6 +758,53 @@ static void voiceAckBeep() {
   if (!was) setAmp(false);
 }
 
+/** 手势切档成功：叮—咚。勿在 bg 任务同步调用（4KB 栈 + 阻塞易溢出/看门狗重启）。 */
+static volatile bool gestChimeBusy = false;
+
+static void gestChimeTask(void *) {
+  if (!i2sReady) {
+    gestChimeBusy = false;
+    vTaskDelete(nullptr);
+    return;
+  }
+  if (audioMutex) {
+    if (xSemaphoreTake(audioMutex, pdMS_TO_TICKS(80)) != pdTRUE) {
+      gestChimeBusy = false;
+      vTaskDelete(nullptr);
+      return;
+    }
+    if (recActive || playBusy) {
+      xSemaphoreGive(audioMutex);
+      gestChimeBusy = false;
+      vTaskDelete(nullptr);
+      return;
+    }
+    playBusy = true;
+    xSemaphoreGive(audioMutex);
+  }
+
+  const bool was = flagAmp;
+  if (!was) setAmp(true);
+  if (!was) vTaskDelay(pdMS_TO_TICKS(5));
+  board_i2s_wake_ack();
+  if (!was) setAmp(false);
+
+  if (audioMutex) {
+    xSemaphoreTake(audioMutex, portMAX_DELAY);
+    playBusy = false;
+    xSemaphoreGive(audioMutex);
+  }
+  gestChimeBusy = false;
+  vTaskDelete(nullptr);
+}
+
+static void gestureAckChime() {
+  if (!i2sReady || gestChimeBusy) return;
+  gestChimeBusy = true;
+  if (xTaskCreate(gestChimeTask, "gest_chime", 6144, nullptr, 4, nullptr) != pdPASS)
+    gestChimeBusy = false;
+}
+
 /** 明确有人：主目标 / is_detected / 明显运动。不含单独呼吸、微动、OUT。 */
 static bool classifyFanPresent(const RadarSnapshot &rs, char *reason, size_t n) {
   if (!flagRadarPwr) {
@@ -914,8 +961,8 @@ static void updateRadarFan(const RadarSnapshot &rs) {
 }
 
 /** 近距手掌停留切档：关闭 → 50% → 100% 循环。可与「控风扇」同时开。默认关。 */
-static const uint16_t GEST_NEAR_ENTER_MM = 450;
-static const uint16_t GEST_NEAR_EXIT_MM = 600;
+static const uint16_t GEST_NEAR_ENTER_MM = 200;  // 近距，降低路过误触
+static const uint16_t GEST_NEAR_EXIT_MM = 350;
 static const int64_t GEST_HOLD_US = 2000000;
 static bool gestInNear = false;
 static bool gestFired = false;  // 已切档，等手离开再武装
@@ -1047,6 +1094,7 @@ static void updateFanGesture(const RadarSnapshot &rs) {
              (unsigned)range);
     ESP_LOGI(TAG, "fan: GESTURE gear=%d%% range=%umm auto=%d", next, (unsigned)range,
              fanAutoEnable ? 1 : 0);
+    gestureAckChime();
   } else {
     snprintf(gestPhase, sizeof(gestPhase), "holding");
     ESP_LOGW(TAG, "fan: GESTURE apply failed next=%d", next);

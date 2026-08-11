@@ -20,4 +20,5 @@ alwaysApply: true
 - `easyeda-schematic-read.mdc` — 原理图精准读取与审查流程
 - `esp32-s3-constraints.mdc` — U1 ESP32-S3 引脚约束（IO35/36/37 PSRAM 禁用）
 - `firmware-wifi.mdc` — 烧录/OTA 必须含 `wifi_config.h`，禁止 example 占位 SSID
+- `firmware-bg-audio.mdc` — bg/小栈任务禁止同步播音（防栈溢出重启）
 - `project-knowledge-updates.mdc` — 本文件，知识沉淀方式
