@@ -38,7 +38,7 @@
 #include "wake_reply.h"
 
 static const char *TAG = "eda_robot";
-static const char *FW_VERSION = "3.6.11";
+static const char *FW_VERSION = "3.6.12";
 static volatile bool otaBusy = false;
 static volatile bool shutdownPending = false;
 
@@ -64,6 +64,7 @@ static bool savedPwm = false;
 static bool savedAmp = false;
 static bool savedRadarPwr = false;
 static bool savedFanAuto = false;
+static bool savedFanGesture = false;
 static int spotDutyPct[SPOT_COUNT] = {0, 0, 0};
 static bool i2sReady = false;
 static bool wifiOk = false;
@@ -853,12 +854,116 @@ static void updateRadarFan(const RadarSnapshot &rs) {
   }
 }
 
+/** 近距手掌停留切档：关闭 → 50% → 100% 循环。默认关。 */
+static bool fanGestureEnable = false;
+static const uint16_t GEST_NEAR_ENTER_MM = 450;
+static const uint16_t GEST_NEAR_EXIT_MM = 600;
+static const int64_t GEST_HOLD_US = 2000000;
+static bool gestInNear = false;
+static bool gestFired = false;  // 已切档，等手离开再武装
+static int64_t gestNearSinceUs = 0;
+static int64_t gestHoldElapsedMs = 0;
+static uint16_t gestLastRangeMm = 0;
+static char gestPhase[24] = "disabled";  // disabled/no_power/idle/holding/wait_leave
+
+static void gestResetTracking() {
+  gestInNear = false;
+  gestFired = false;
+  gestNearSinceUs = 0;
+  gestHoldElapsedMs = 0;
+  gestLastRangeMm = 0;
+}
+
+static uint16_t nearestRangeMm(const RadarSnapshot &rs) {
+  uint16_t best = 0;
+  if ((rs.primary_valid || rs.is_detected) && rs.range_mm > 0) best = rs.range_mm;
+  if (rs.multi_valid) {
+    for (uint8_t i = 0; i < rs.obj_num && i < RADAR_OBJ_MAX; i++) {
+      if (!rs.objs[i].valid || rs.objs[i].range_mm == 0) continue;
+      if (best == 0 || rs.objs[i].range_mm < best) best = rs.objs[i].range_mm;
+    }
+  }
+  return best;
+}
+
+/** 当前档位索引：0=关 / 1=50% / 2=100%（按有效强度就近）。 */
+static int fanLevelIndex() {
+  if (!fanIsOn()) return 0;
+  const int cur = fanIntensityPct();
+  if (cur >= 75) return 2;
+  if (cur >= 25) return 1;
+  return 0;
+}
+
+static void updateFanGesture(const RadarSnapshot &rs) {
+  if (!fanGestureEnable) {
+    gestResetTracking();
+    snprintf(gestPhase, sizeof(gestPhase), "disabled");
+    return;
+  }
+  if (!flagRadarPwr) {
+    gestResetTracking();
+    snprintf(gestPhase, sizeof(gestPhase), "no_power");
+    return;
+  }
+
+  const int64_t now = esp_timer_get_time();
+  const uint16_t range = nearestRangeMm(rs);
+  gestLastRangeMm = range;
+
+  bool near = false;
+  if (range > 0) {
+    if (gestInNear)
+      near = range <= GEST_NEAR_EXIT_MM;
+    else
+      near = range <= GEST_NEAR_ENTER_MM;
+  }
+
+  if (!near) {
+    gestInNear = false;
+    gestNearSinceUs = 0;
+    gestFired = false;
+    gestHoldElapsedMs = 0;
+    snprintf(gestPhase, sizeof(gestPhase), "idle");
+    return;
+  }
+
+  gestInNear = true;
+  if (gestFired) {
+    snprintf(gestPhase, sizeof(gestPhase), "wait_leave");
+    gestHoldElapsedMs = GEST_HOLD_US / 1000;
+    return;
+  }
+
+  if (gestNearSinceUs == 0) gestNearSinceUs = now;
+  const int64_t held = now - gestNearSinceUs;
+  gestHoldElapsedMs = held / 1000;
+  if (held < GEST_HOLD_US) {
+    snprintf(gestPhase, sizeof(gestPhase), "holding");
+    return;
+  }
+
+  static const int LEVELS[] = {0, 50, 100};
+  const int next = LEVELS[(fanLevelIndex() + 1) % 3];
+  if (applyManualFanLevel(next, "手势")) {
+    gestFired = true;
+    snprintf(gestPhase, sizeof(gestPhase), "wait_leave");
+    snprintf(fanLastAction, sizeof(fanLastAction), "手势切档 → %d%%（近距 %umm 停留2s）", next,
+             (unsigned)range);
+    ESP_LOGI(TAG, "fan: GESTURE level=%d%% range=%umm", next, (unsigned)range);
+  } else {
+    snprintf(gestPhase, sizeof(gestPhase), "holding");
+    ESP_LOGW(TAG, "fan: GESTURE apply failed next=%d", next);
+  }
+}
+
 static bool emergencyStop() {
   if (!flagPeriphOff) {
     savedPwm = flagPwm;
     savedAmp = flagAmp;
     savedRadarPwr = flagRadarPwr;
     savedFanAuto = fanAutoEnable;
+    savedFanGesture = fanGestureEnable;
   }
   recStop();
   if (!actuatorLock()) return false;
@@ -880,6 +985,9 @@ static bool emergencyStop() {
   fanConfirmCount = 0;
   fanLastSampleUs = 0;
   fanSetPhase("disabled");
+  fanGestureEnable = false;
+  gestResetTracking();
+  snprintf(gestPhase, sizeof(gestPhase), "disabled");
   snprintf(fanReason, sizeof(fanReason), "关闭所有外设");
   snprintf(fanLastAction, sizeof(fanLastAction), "关 LED_1：关闭所有外设");
   spotDutyPct[0] = spotDutyPct[1] = spotDutyPct[2] = 0;
@@ -907,6 +1015,11 @@ static bool releasePeripherals() {
   } else {
     snprintf(fanReason, sizeof(fanReason), "已恢复外设");
     snprintf(fanLastAction, sizeof(fanLastAction), "允许单独开启");
+  }
+  if (savedFanGesture) {
+    fanGestureEnable = true;
+    gestResetTracking();
+    snprintf(gestPhase, sizeof(gestPhase), flagRadarPwr ? "idle" : "no_power");
   }
   oledShowHome(true);
   return ok;
@@ -1038,7 +1151,7 @@ static esp_err_t handleApiIndex(httpd_req_t *req) {
   body += "{\"path\":\"/api/servo\",\"note\":\"id 0..1 = T3/T4\"},";
   body += "{\"path\":\"/api/servos\"},";
   body += "{\"path\":\"/api/led\",\"note\":\"id 0=LED_1 1=LED_2 2=LED_ALL; need LED_ALL for 1/2\"},";
-  body += "{\"path\":\"/api/fan\",\"note\":\"radar auto OR power=1|0 (last intensity; disables auto)\"},";
+  body += "{\"path\":\"/api/fan\",\"note\":\"auto / gesture / power; gesture: near palm hold 2s cycles 0→50→100\"},";
   body += "{\"path\":\"/api/voice\",\"note\":\"GET status; POST {on:true|false} 语音开关(NVS,默认关)\"},";
   body += "{\"path\":\"/api/i2c\",\"note\":\"?full=1 for bus scan\"},";
   body += "{\"path\":\"/api/mic\",\"note\":\"RMS sample\"},";
@@ -1071,25 +1184,30 @@ static void jsonEscLite(const char *in, char *out, size_t n) {
 }
 
 static void fanJsonInto(char *buf, size_t buflen) {
-  char r[72], a[112];
+  char r[72], a[112], gp[28];
   jsonEscLite(fanReason, r, sizeof(r));
   jsonEscLite(fanLastAction, a, sizeof(a));
+  jsonEscLite(gestPhase, gp, sizeof(gp));
   snprintf(buf, buflen,
            "{\"auto\":%s,\"on\":%s,\"phase\":\"%s\",\"reason\":\"%s\",\"lastAction\":\"%s\","
            "\"progress\":%u,\"need\":%u,\"offNeed\":%u,\"sampleMs\":2000,\"confirm\":%u,"
            "\"samplePresent\":%s,\"led1\":%d,\"ledAll\":%d,\"intensity\":%d,"
-           "\"savedLed1\":%d,\"savedLedAll\":%d,\"savedIntensity\":%d}",
+           "\"savedLed1\":%d,\"savedLedAll\":%d,\"savedIntensity\":%d,"
+           "\"gesture\":%s,\"gestPhase\":\"%s\",\"gestProgressMs\":%lld,\"gestNeedMs\":2000,"
+           "\"gestNearMm\":%u,\"gestExitMm\":%u,\"gestRangeMm\":%u,\"gestLevel\":%d}",
            fanAutoEnable ? "true" : "false", fanAutoOn ? "true" : "false", fanPhase, r, a,
            (unsigned)fanConfirmCount, (unsigned)FAN_CONFIRM_ON, (unsigned)FAN_CONFIRM_OFF,
            (unsigned)FAN_CONFIRM_OFF, fanSamplePresent ? "true" : "false", spotDutyPct[0],
            spotDutyPct[2], fanIntensityPct(), fanSavedLed1, fanSavedLedAll,
-           (fanSavedLed1 * fanSavedLedAll) / 100);
+           (fanSavedLed1 * fanSavedLedAll) / 100, fanGestureEnable ? "true" : "false", gp,
+           (long long)gestHoldElapsedMs, (unsigned)GEST_NEAR_ENTER_MM, (unsigned)GEST_NEAR_EXIT_MM,
+           (unsigned)gestLastRangeMm, fanLevelIndex());
 }
 
 static esp_err_t handleFanGet(httpd_req_t *req) {
-  char fan[560];
+  char fan[760];
   fanJsonInto(fan, sizeof(fan));
-  char buf[600];
+  char buf[800];
   snprintf(buf, sizeof(buf), "{\"ok\":true,\"fan\":%s}", fan);
   return sendJson(req, 200, buf);
 }
@@ -1097,9 +1215,11 @@ static esp_err_t handleFanGet(httpd_req_t *req) {
 static esp_err_t handleFanPost(httpd_req_t *req) {
   auto a = loadArgs(req);
   const bool hasPower = argsHasKey(a, "power");
-  const bool hasAuto = argsHasKey(a, "auto") || (!hasPower && argsHasKey(a, "on"));
-  if (!hasPower && !hasAuto)
-    return sendJson(req, 400, "{\"ok\":false,\"error\":\"need auto or power bool\"}");
+  const bool hasGesture = argsHasKey(a, "gesture");
+  const bool hasAuto =
+      argsHasKey(a, "auto") || (!hasPower && !hasGesture && argsHasKey(a, "on"));
+  if (!hasPower && !hasAuto && !hasGesture)
+    return sendJson(req, 400, "{\"ok\":false,\"error\":\"need auto, gesture or power bool\"}");
 
   if (hasPower) {
     const bool on = argBool(a, "power", false);
@@ -1123,9 +1243,17 @@ static esp_err_t handleFanPost(httpd_req_t *req) {
     if (!en) snprintf(fanReason, sizeof(fanReason), "未启用");
     ESP_LOGI(TAG, "fan: auto=%d", en ? 1 : 0);
   }
-  char fan[560];
+  if (hasGesture) {
+    const bool en = argBool(a, "gesture", false);
+    fanGestureEnable = en;
+    if (en) flagPeriphOff = false;
+    gestResetTracking();
+    snprintf(gestPhase, sizeof(gestPhase), en ? (flagRadarPwr ? "idle" : "no_power") : "disabled");
+    ESP_LOGI(TAG, "fan: gesture=%d", en ? 1 : 0);
+  }
+  char fan[760];
   fanJsonInto(fan, sizeof(fan));
-  char buf[600];
+  char buf[800];
   snprintf(buf, sizeof(buf), "{\"ok\":true,\"fan\":%s}", fan);
   return sendJson(req, 200, buf);
 }
@@ -1172,11 +1300,11 @@ static esp_err_t handleStatus(httpd_req_t *req) {
   const size_t psramBytes = 0;
 #endif
 
-  char fan[560];
+  char fan[760];
   fanJsonInto(fan, sizeof(fan));
   char voice[280];
   voiceJsonInto(voice, sizeof(voice));
-  char buf[1400];
+  char buf[1600];
   snprintf(buf, sizeof(buf),
            "{\"ok\":true,\"fw\":\"%s\",\"board\":\"v6-1\",\"ip\":\"%s\",\"rssi\":%d,"
            "\"psram\":%s,\"psramBytes\":%u,"
@@ -1882,6 +2010,7 @@ static void background_task(void *) {
     RadarSnapshot rs;
     radar_get_snapshot(rs);
     if (fanAutoEnable && pca.present()) updateRadarFan(rs);
+    if (fanGestureEnable && pca.present()) updateFanGesture(rs);
     if (oled.present()) oledShowHome(false);
     vTaskDelay(pdMS_TO_TICKS((xl.present() || flagRadarPwr) ? 20 : 500));
   }

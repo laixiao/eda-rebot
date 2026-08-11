@@ -93,6 +93,8 @@ label{color:var(--muted)}
 .radar-actions .switch-acq input:checked+.track{background:#1f6feb}
 .radar-actions .switch-fan{background:#0d3b24;border-color:#238636;color:#3fb950}
 .radar-actions .switch-fan input:checked+.track{background:#238636}
+.radar-actions .switch-gest{background:#0d2f2f;border-color:#1b9e9e;color:#56d4c8}
+.radar-actions .switch-gest input:checked+.track{background:#1b9e9e}
 .rec-voice{margin-top:12px;padding-top:12px;border-top:1px solid var(--line)}
 .rec-voice .switch-voice{padding:6px 10px;border-radius:8px;border:1px solid #238636;background:#0d3b24;color:#3fb950;gap:8px}
 .rec-voice .switch-voice input:checked+.track{background:#238636}
@@ -255,6 +257,11 @@ header .switch-periph.on{border-color:#f85149;background:#3b1212;color:#ff7b72}
         <span class="track"></span>
         <span id="labFanAuto">控风扇</span>
       </label>
+      <label class="switch switch-gest" title="手掌靠近≤0.45m并停留2s：关→50%→100%循环；手离开后再切下一档">
+        <input id="swFanGest" type="checkbox" onchange="setFanGesture(this.checked)"/>
+        <span class="track"></span>
+        <span id="labFanGest">手势切档</span>
+      </label>
     </div>
   </div>
   <div class="radar-body">
@@ -351,6 +358,9 @@ async function setPeriphOff(on){
 function phaseLabel(p){
   return ({disabled:'未启用',idle:'待命',arming:'确认有人中',on:'风扇已开',holdoff:'确认无人中'}[p])||p||'—';
 }
+function gestPhaseLabel(p){
+  return ({disabled:'未启用',no_power:'雷达未供电',idle:'待命',holding:'近距停留中',wait_leave:'已切档·移开手'}[p])||p||'—';
+}
 const ledTimers=[0,0,0];
 function renderFan(f){
   const box=document.getElementById('fanStatus');
@@ -359,6 +369,10 @@ function renderFan(f){
   const lab=document.getElementById('labFanAuto');
   if(sw && document.activeElement!==sw) sw.checked=!!f.auto;
   if(lab) lab.textContent=f.auto?'控风扇 开':'控风扇';
+  const swG=document.getElementById('swFanGest');
+  const labG=document.getElementById('labFanGest');
+  if(swG && document.activeElement!==swG) swG.checked=!!f.gesture;
+  if(labG) labG.textContent=f.gesture?'手势切档 开':'手势切档';
   let prog='';
   const needOn=f.need||1;
   const needOff=f.offNeed||f.confirm||3;
@@ -372,8 +386,17 @@ function renderFan(f){
     prog='待命';
   else
     prog='联动关';
+  const lv=['关','50%','100%'][f.gestLevel??0]||'—';
+  let gest='';
+  if(f.gesture){
+    const hold=Math.min(f.gestProgressMs||0,f.gestNeedMs||2000);
+    const need=f.gestNeedMs||2000;
+    const rng=f.gestRangeMm?((f.gestRangeMm/1000).toFixed(2)+' m'):'—';
+    gest=`手势：<b>${gestPhaseLabel(f.gestPhase)}</b> · 档位 ${lv} · ${hold}/${need} ms · 距 ${rng}<br>`;
+  }
   box.innerHTML=
     `<b>${phaseLabel(f.phase)}</b> · LED_1 ${f.on?'<span class=ok>开</span>':'关'} · ${prog}<br>`+
+    gest+
     `强度 ${f.intensity??0}% · 记忆 ${f.savedIntensity??'—'}%（${f.savedLed1??'—'}/${f.savedLedAll??'—'}）<br>`+
     `判定：${f.reason||'—'}<br>`+
     `上次：${f.lastAction||'—'}`;
@@ -443,6 +466,15 @@ async function setFanAuto(on){
   if(sw) sw.disabled=true;
   try{
     const j=await api('POST','/api/fan',{auto:!!on});
+    if(!j||j.ok===false){if(sw) sw.checked=!on}
+  }finally{if(sw) sw.disabled=false}
+  refresh();
+}
+async function setFanGesture(on){
+  const sw=document.getElementById('swFanGest');
+  if(sw) sw.disabled=true;
+  try{
+    const j=await api('POST','/api/fan',{gesture:!!on});
     if(!j||j.ok===false){if(sw) sw.checked=!on}
   }finally{if(sw) sw.disabled=false}
   refresh();

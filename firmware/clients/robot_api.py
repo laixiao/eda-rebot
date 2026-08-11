@@ -83,6 +83,10 @@ class RobotApi:
         """雷达自动控 LED_1（风扇）；默认固件侧为关"""
         return self._call("/api/fan", {"auto": on}, method="POST")
 
+    def fan_gesture(self, on: bool = True) -> dict:
+        """近距手掌停留 2s 循环切档：关→50%→100%；默认关"""
+        return self._call("/api/fan", {"gesture": on}, method="POST")
+
     def fan_power(self, on: bool = True) -> dict:
         """手动开/关风扇（恢复上次强度；同时关闭雷达联动）"""
         return self._call("/api/fan", {"power": on}, method="POST")
