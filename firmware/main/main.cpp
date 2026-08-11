@@ -618,8 +618,8 @@ static bool setSpotDuty(uint8_t id, int dutyPct) {
 static bool fanAutoEnable = false;  // Web「控风扇」，默认关
 static bool fanAutoOn = false;
 static bool fanGestureEnable = false;  // Web「手势切档」，可与控风扇同时开
-static int fanGearPct = 100;           // 手势档位 0/50/100；控风扇开时按此强度
-static bool fanSuppressAutoOn = false; // 手势刚切到关：有人期间抑制自动再开
+static int fanGearPct = 100;           // 手势档位 50/75/100；控风扇开时按此强度
+static bool fanSuppressAutoOn = false; // 历史：切到关时抑制；手势循环已不含关
 static const int64_t FAN_SAMPLE_US = 2000000;  // 每 2s 取样
 static const uint8_t FAN_CONFIRM_ON = 1;       // 有人：1 次即开
 static const uint8_t FAN_CONFIRM_OFF = 3;      // 无人：连续 3 次才关
@@ -758,7 +758,7 @@ static void voiceAckBeep() {
   if (!was) setAmp(false);
 }
 
-/** 手势切档成功：叮—咚。勿在 bg 任务同步调用（4KB 栈 + 阻塞易溢出/看门狗重启）。 */
+/** 手势切档成功：短「滴」。勿在 bg 任务同步调用（4KB 栈 + 阻塞易溢出/看门狗重启）。 */
 static volatile bool gestChimeBusy = false;
 
 static void gestChimeTask(void *) {
@@ -786,7 +786,7 @@ static void gestChimeTask(void *) {
   const bool was = flagAmp;
   if (!was) setAmp(true);
   if (!was) vTaskDelay(pdMS_TO_TICKS(5));
-  board_i2s_wake_ack();
+  board_i2s_beep(80);
   if (!was) setAmp(false);
 
   if (audioMutex) {
@@ -960,7 +960,7 @@ static void updateRadarFan(const RadarSnapshot &rs) {
   }
 }
 
-/** 近距手掌停留切档：关闭 → 50% → 100% 循环。可与「控风扇」同时开。默认关。 */
+/** 近距手掌停留切档：50% → 75% → 100% 循环。可与「控风扇」同时开。默认关。 */
 static const uint16_t GEST_NEAR_ENTER_MM = 200;  // 近距，降低路过误触
 static const uint16_t GEST_NEAR_EXIT_MM = 350;
 static const int64_t GEST_HOLD_US = 2000000;
@@ -991,20 +991,24 @@ static uint16_t nearestRangeMm(const RadarSnapshot &rs) {
   return best;
 }
 
-/** 档位索引：0=关 / 1=50% / 2=100%（按手势档位，而非当前输出）。 */
+/** 档位索引：0=50% / 1=75% / 2=100%；低于约 25% 返回 -1（下一档从 50% 起）。 */
 static int fanGearIndex() {
-  if (fanGearPct >= 75) return 2;
-  if (fanGearPct >= 25) return 1;
-  return 0;
+  if (fanGearPct >= 88) return 2;
+  if (fanGearPct >= 62) return 1;
+  if (fanGearPct >= 25) return 0;
+  return -1;
 }
 
 /** 供 JSON / UI：实际输出档位（关着时也反映 sticky 手势档）。 */
 static int fanLevelIndex() {
-  if (fanGestureEnable) return fanGearIndex();
+  if (fanGestureEnable) {
+    const int i = fanGearIndex();
+    return i < 0 ? 0 : i;
+  }
   if (!fanIsOn()) return 0;
   const int cur = fanIntensityPct();
-  if (cur >= 75) return 2;
-  if (cur >= 25) return 1;
+  if (cur >= 88) return 2;
+  if (cur >= 62) return 1;
   return 0;
 }
 
@@ -1085,8 +1089,9 @@ static void updateFanGesture(const RadarSnapshot &rs) {
     return;
   }
 
-  static const int LEVELS[] = {0, 50, 100};
-  const int next = LEVELS[(fanGearIndex() + 1) % 3];
+  static const int LEVELS[] = {50, 75, 100};
+  const int idx = fanGearIndex();
+  const int next = (idx < 0) ? LEVELS[0] : LEVELS[(idx + 1) % 3];
   if (applyGestureFanLevel(next)) {
     gestFired = true;
     snprintf(gestPhase, sizeof(gestPhase), "wait_leave");

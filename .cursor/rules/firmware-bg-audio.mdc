@@ -27,7 +27,7 @@ alwaysApply: false
 
 ## 现有安全样板
 
-- 手势切档成功 → `gestureAckChime()` → `gestChimeTask` 异步「叮—咚」
+- 手势切档成功 → `gestureAckChime()` → `gestChimeTask` 异步短 beep「滴」
 - 语音指令短 beep 在语音/HTTP 路径调用（非 bg 4KB 栈）
 
 改风扇/雷达/手势反馈时，先确认调用栈落在哪个任务、栈多大，再决定能否同步播音。

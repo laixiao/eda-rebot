@@ -1,0 +1,29 @@
+---
+description: 改固件后自动编译；仅用户说 OTA 时才推送
+globs: firmware/**/*.{c,cpp,h,hpp}
+alwaysApply: true
+---
+
+# 固件：改完编译 / 口头 OTA 才推
+
+## 流程（2026-08-11 约定）
+
+| 时机 | 动作 |
+|---|---|
+| 改完 `firmware/`（或救援相关固件）并告一段落 | **自动** `idf.py build`（先加载 IDF PowerShell 环境）；做完简短告知编译结果 |
+| 用户明确说「OTA」「推」「帮我推」等 | 再走救援 OTA：bin WiFi 自检 → `POST /api/rescue` → 救援页 `POST /api/ota` 上传 `eda_robot.bin` |
+| 仅改文档/规则、未改固件源码 | 不编译、不 OTA |
+
+## 禁止
+
+- 改完固件后只改代码不编译（除非用户明确说「先别编」）
+- **未**听到 OTA/推送类指令就自行救援重启或上传 bin
+- 跳过 `firmware-wifi.mdc` 的 bin 自检就 OTA
+
+## OTA 操作要点
+
+1. 先探测板子 IP（热点常为 `192.168.137.x`，以 `/api/status` 为准；勿死记旧 IP）
+2. 主系统 → `POST /api/rescue` → 等救援页 → 上传 `firmware/build/eda_robot.bin`
+3. 成功后确认主系统 `/api/status` 起来
+
+环境：`& 'C:\Espressif\tools\Microsoft.v5.5.5.PowerShell_profile.ps1'` 后再 `idf.py build`。
