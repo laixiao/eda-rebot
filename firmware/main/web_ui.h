@@ -117,14 +117,13 @@ label{color:var(--muted)}
   <pre id="flags"></pre>
 </section>
 <section class="ota-card">
-  <h2>Web 烧录 (OTA)</h2>
+  <h2>升级固件（救援 OTA）</h2>
   <pre id="otaInfo">-</pre>
+  <p class="action-note">主系统不能直接覆盖自己。点下方按钮进救援页，再上传 <code>eda_robot.bin</code> 大包（含语音模型）。</p>
   <div class="row">
-    <input id="otaFile" type="file" accept=".bin,application/octet-stream"/>
-    <button id="otaBtn" class="primary" onclick="otaFlash()">上传并烧录</button>
+    <button id="rescueBtn" class="primary" onclick="enterRescue()">进入救援升级</button>
   </div>
-  <div class="progress"><i id="otaBar"></i></div>
-  <pre id="otaLog">选择 build/eda_robot.bin</pre>
+  <pre id="otaLog">屏幕会显示步骤与 IP</pre>
 </section>
 <section>
   <h2>舵机 T3 / T4 (U16)</h2>
@@ -236,6 +235,11 @@ label{color:var(--muted)}
         <input id="swFanAuto" type="checkbox" onchange="setFanAuto(this.checked)"/>
         <span class="track"></span>
         <span id="labFanAuto">控风扇</span>
+      </label>
+      <label class="switch switch-fan" title="唤醒「你好小智」→ 开/关风扇（默认关，省电/避 AFE 崩溃）">
+        <input id="swVoice" type="checkbox" onchange="setVoice(this.checked)"/>
+        <span class="track"></span>
+        <span id="labVoice">语音</span>
       </label>
     </div>
   </div>
@@ -352,11 +356,25 @@ function renderVoice(v){
   const box=document.getElementById('voiceStatus');
   if(!box) return;
   if(!v){box.textContent='—';return}
-  const st=v.ok?(v.listening?'聆听命令中':(v.paused?'暂停(录音中)':'待命')):'未就绪';
+  const sw=document.getElementById('swVoice');
+  const lab=document.getElementById('labVoice');
+  if(sw && document.activeElement!==sw) sw.checked=!!v.enabled;
+  if(lab) lab.textContent=v.enabled?'语音 开':'语音';
+  const st=!v.enabled?'已关闭':(v.ok?(v.listening?'聆听命令中':(v.paused?'暂停(录音中)':'待命')):'未就绪');
+  const mb=v.modelBytes?Math.round(v.modelBytes/1048576*10)/10+'MB':'—';
   box.innerHTML=
-    `<b>${st}</b><br>`+
+    `<b>${st}</b> · 模型 ${mb}<br>`+
     `唤醒：你好小智 → 开风扇 / 关风扇<br>`+
     `${v.last||'—'}`;
+}
+async function setVoice(on){
+  const sw=document.getElementById('swVoice');
+  if(sw) sw.disabled=true;
+  try{
+    const j=await api('POST','/api/voice',{on:!!on});
+    if(!j||j.ok===false){if(sw) sw.checked=!on}
+  }finally{if(sw) sw.disabled=false}
+  refresh();
 }
 function syncLedsFromStatus(s){
   const leds=s.leds||[];
@@ -616,37 +634,21 @@ async function refreshOta(){
   const o=await api('GET','/api/ota');
   if(!o)return;
   document.getElementById('otaInfo').textContent=
-    `FW ${o.fw}\nrunning ${o.running}\nnext ${o.next}  busy=${o.busy}`;
+    `FW ${o.fw}\n运行 ${o.running} (${Math.round((o.runningSize||0)/1048576)}MB)\n`+
+    `救援 factory ${Math.round((o.factorySize||0)/1048576)}MB · 主槽 ota_0 ${Math.round((o.ota0Size||0)/1048576)}MB\n`+
+    (o.hint||'');
 }
-async function otaFlash(){
-  const f=document.getElementById('otaFile').files[0];
+async function enterRescue(){
+  if(!confirm('将重启进入救援模式，屏幕会显示升级步骤。继续？')) return;
   const log=document.getElementById('otaLog');
-  const bar=document.getElementById('otaBar');
-  const btn=document.getElementById('otaBtn');
-  if(!f){alert('请先选择 .bin');return}
-  if(!confirm('上传 '+f.name+' 并重启？'))return;
-  btn.disabled=true;bar.style.width='0%';log.textContent='上传中...';
+  log.textContent='正在进入救援…';
   try{
-    await new Promise((resolve,reject)=>{
-      const xhr=new XMLHttpRequest();
-      xhr.open('POST','/api/ota');
-      xhr.setRequestHeader('Content-Type','application/octet-stream');
-      xhr.timeout=180000;
-      xhr.upload.onprogress=e=>{
-        if(e.lengthComputable){const p=Math.round(e.loaded*100/e.total);bar.style.width=p+'%';log.textContent='上传 '+p+'%'}
-      };
-      xhr.onload=()=>{
-        let j;try{j=JSON.parse(xhr.responseText)}catch(e){j={ok:false,raw:xhr.responseText}}
-        if(xhr.status>=200&&xhr.status<300&&j.ok!==false){
-          bar.style.width='100%';log.textContent='成功，重启中…';setTimeout(()=>location.reload(),5000);resolve(j);
-        }else reject(new Error((j&&j.error)||xhr.responseText||('HTTP '+xhr.status)));
-      };
-      xhr.onerror=()=>reject(new Error('网络错误'));
-      xhr.ontimeout=()=>reject(new Error('超时'));
-      xhr.send(f);
-    });
-  }catch(e){log.textContent='失败: '+e.message;alert('OTA 失败: '+e.message);btn.disabled=false}
+    const j=await api('POST','/api/rescue',{});
+    log.textContent='已请求重启。数秒后打开同一 IP，按屏幕步骤上传大包。';
+    if(j&&j.reboot) setTimeout(()=>location.reload(),3000);
+  }catch(e){ log.textContent='失败: '+e.message; }
 }
+async function otaFlash(){ alert('请改用「进入救援升级」'); }
 let logSeq=0,logPaused=false,logBusy=false,logLines=[];
 async function refreshLogs(){
   if(logPaused||logBusy)return;
@@ -776,10 +778,10 @@ async function refreshRadarLive(){
 }
 async function radarCmd(c){await api('POST','/api/radar',{cmd:c});refreshRadarLive()}
 refresh();refreshOta();refreshLogs();refreshRadarLive();
-const refreshTimer=setInterval(refresh,1000);
-const otaTimer=setInterval(refreshOta,5000);
-const logTimer=setInterval(refreshLogs,500);
-const radarLiveTimer=setInterval(refreshRadarLive,200);
+const refreshTimer=setInterval(refresh,2500);
+const otaTimer=setInterval(refreshOta,8000);
+const logTimer=setInterval(refreshLogs,1000);
+const radarLiveTimer=setInterval(refreshRadarLive,400);
 </script>
 </body>
 </html>)HTML";

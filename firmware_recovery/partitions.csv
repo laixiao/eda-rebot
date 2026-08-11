@@ -1,5 +1,4 @@
-# 16MB Flash：1MB 救援(factory) + 14MB 主系统(ota_0，含语音模型)
-# 改分区表后须串口全量 flash 一次；之后用救援网页升主系统大包
+# Same table as ../firmware/partitions.csv (must stay identical)
 # Name,   Type, SubType, Offset,   Size, Flags
 nvs,      data, nvs,     0x9000,   0x6000,
 otadata,  data, ota,     0xf000,   0x2000,

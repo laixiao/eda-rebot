@@ -93,15 +93,17 @@ U1 当前 NC：IO1/8/11/14/15/19/20/21/35/36/37/47/48。
 
 摄像头 OV5640、SPI ST7796/XPT2046、TB6612 电机、ENC1..4 编码器计数、PCA9685 U23、舵机 T5–T7。
 
-## 固件约定（`firmware/` FW ≥ 3.5.0，对齐 v6-1）
+## 固件约定（`firmware/` FW ≥ 3.6.0，对齐 v6-1）
 
-- 构建：`cd firmware && idf.py set-target esp32s3 && idf.py build`
-- 上电：OE# 高、雷达 Q4 关、功放关；缺焊 I2C 器件不阻断启动
+- 分区：`factory` 1MB 救援 + `ota_0` 14MB 主系统（模型内嵌 `main/srmodels.bin`，无独立 model / 无双 OTA）
+- 构建主系统：`cd firmware && idf.py build`；救援：`cd firmware_recovery && idf.py build`
+- 首次改分区：串口 `scripts/flash_all.ps1 -Port COM3`；日常：主页「进入救援升级」→ 救援页上传大包
+- 上电：OE# 高、雷达 Q4 关、功放关；**缺焊 I2C 器件不阻断启动**（probe 失败则不 begin、后台不做 I2C；FW≥3.6.3）
+- 空板可只跑 WiFi/HTTP；语音默认关；I2S DMA 空闲关闭
 - 雷达：`POST /api/radar {"power":true}` 开电即自动查询（已取消独立采集开关）；UART IO9/10
 - 舵机 id `0..1`；探照灯 id `0/1/2`=LED_1/2/ALL（1/2 需 ALL）
 - 雷达→风扇：`POST /api/fan {"auto":true}`；每 **2s** 取样，连续 **3** 次相同再开/关 **LED_1**（开时顺带拉高 LED_ALL；关只关 LED_1）；有人判定不含单独呼吸/微动/OUT；默认关
-- 语音控风扇（ESP-SR）：唤醒「你好小智」→「开风扇」/「关风扇」；开时恢复上次 LED_1×LED_ALL，并**关闭雷达联动**；`POST /api/fan {"power":true|false}` 同逻辑；`GET /api/voice`
-- 首次启用语音或改分区表：须串口全量 `idf.py flash`（含 `model` 分区）；之后 app 仍可 Web OTA
+- 语音控风扇（ESP-SR）：**默认关**（NVS `cfg/voice`）；网页「语音」开关或 `POST /api/voice {"on":true|false}`；开后唤醒「你好小智」→「开风扇」/「关风扇」；开风扇时恢复上次 LED_1×LED_ALL 并**关闭雷达联动**；`GET /api/voice` / `/api/status` 含 `enabled`/`modelBytes`
 - 录音：`POST /api/rec {"on":true|false}`，`GET /api/rec/wav`；播放录音 `POST /api/play`；上传 `POST /api/play/upload`（WAV PCM16 @16kHz）
 - 音量：`POST /api/amp {"volume":0..100}`（数字缩放，默认 100；仅改音量不碰功放开关）；`/api/status` 含 `volume`；影响 play/beep/upload
 - 已删：摄像头 / LCD / 电机 / 编码器 / U23 API

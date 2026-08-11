@@ -3,6 +3,7 @@
 .cache/
 *.bin
 !main/font_cjk.bin
+!main/srmodels.bin
 *.elf
 *.map
 tools/

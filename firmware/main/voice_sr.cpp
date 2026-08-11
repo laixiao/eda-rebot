@@ -25,6 +25,7 @@ static volatile bool s_running = false;
 static volatile bool s_paused = false;
 static volatile bool s_feeding = false;
 static volatile int s_wakeup = 0;
+static bool s_mic_held = false;
 
 static const esp_afe_sr_iface_t *s_afe = nullptr;
 static esp_afe_sr_data_t *s_afe_data = nullptr;
@@ -187,12 +188,27 @@ static void detectTask(void *) {
 
 bool voice_sr_ok() { return s_ok; }
 
+size_t voice_sr_model_bytes() {
+  extern const uint8_t srmodels_bin_start[] asm("_binary_srmodels_bin_start");
+  extern const uint8_t srmodels_bin_end[] asm("_binary_srmodels_bin_end");
+  return (size_t)(+srmodels_bin_end - +srmodels_bin_start);
+}
+
 void voice_sr_pause() {
   s_paused = true;
   for (int i = 0; i < 50 && s_feeding; i++) vTaskDelay(pdMS_TO_TICKS(10));
+  if (s_mic_held) {
+    board_i2s_mic_release();
+    s_mic_held = false;
+  }
 }
 
-void voice_sr_resume() { s_paused = false; }
+void voice_sr_resume() {
+  if (s_ok && s_running && !s_mic_held) {
+    if (board_i2s_mic_acquire()) s_mic_held = true;
+  }
+  s_paused = false;
+}
 
 void voice_sr_status(char *buf, size_t buflen) {
   if (!buf || buflen == 0) return;
@@ -210,12 +226,22 @@ bool voice_sr_start(voice_sr_cmd_cb_t cb) {
   }
   s_cb = cb;
 
-  s_models = esp_srmodel_init("model");
-  if (!s_models) {
-    setLast("模型分区加载失败");
-    ESP_LOGE(TAG, "esp_srmodel_init(model) failed — flash model partition?");
+  // 模型打进 app（srmodels.bin embed），随 14MB 大包 OTA，无需独立 model 分区
+  extern const uint8_t srmodels_bin_start[] asm("_binary_srmodels_bin_start");
+  extern const uint8_t srmodels_bin_end[] asm("_binary_srmodels_bin_end");
+  const size_t srmodels_sz = (size_t)(+srmodels_bin_end - +srmodels_bin_start);
+  if (srmodels_sz < 64) {
+    setLast("内嵌模型为空");
+    ESP_LOGE(TAG, "embedded srmodels.bin empty");
     return false;
   }
+  s_models = srmodel_load(srmodels_bin_start);
+  if (!s_models) {
+    setLast("内嵌模型加载失败");
+    ESP_LOGE(TAG, "srmodel_load(embedded) failed");
+    return false;
+  }
+  ESP_LOGI(TAG, "srmodels embedded size=%u", (unsigned)srmodels_sz);
 
   afe_config_t *afe_cfg = afe_config_init("M", s_models, AFE_TYPE_SR, AFE_MODE_LOW_COST);
   if (!afe_cfg) {
@@ -237,9 +263,19 @@ bool voice_sr_start(voice_sr_cmd_cb_t cb) {
 
   s_running = true;
   s_paused = false;
+  if (!board_i2s_mic_acquire()) {
+    s_running = false;
+    setLast("麦克风占用失败");
+    return false;
+  }
+  s_mic_held = true;
   if (xTaskCreatePinnedToCore(feedTask, "sr_feed", 8 * 1024, nullptr, 5, nullptr, 0) != pdPASS ||
       xTaskCreatePinnedToCore(detectTask, "sr_det", 8 * 1024, nullptr, 5, nullptr, 1) != pdPASS) {
     s_running = false;
+    if (s_mic_held) {
+      board_i2s_mic_release();
+      s_mic_held = false;
+    }
     setLast("任务创建失败");
     return false;
   }

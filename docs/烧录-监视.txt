@@ -1,51 +1,64 @@
-======= Linux 烧录========
-source /root/ssd/home-data/.espressif/v5.5.4/esp-idf/export.sh
-cd /root/ssd/eda-rebot/firmware
-idf.py -p /dev/ttyUSB0 monitor --no-reset
-
-构建
-idf.py build
-
-降速烧录
-idf.py -p /dev/ttyUSB0 -b 115200 flash
-
-
-======= Window 烧录========
-cd firmware
-
+======= 环境 =======
 & 'C:\Espressif\tools\Microsoft.v5.5.5.PowerShell_profile.ps1'
 
-idf.py -p COM3 monitor --no-reset
+======= 产物路径（项目内）=======
+主系统：firmware/build/eda_robot.bin
+救援：  firmware_recovery/build/eda_rescue.bin
 
-idf.py build
+======= 全量刷（首次 / 改分区 / 救砖）=======
+在仓库根目录执行（COM 口按实际改）：
 
-idf.py -p COM3 -b 115200 flash
+  .\scripts\flash_all.ps1 -Port COM4
 
+会编译并写入 bootloader / 分区表 / otadata / 救援 / 主系统。
+不要用 idf.py flash（地址不对）。
 
+只刷主系统：
+  python -m esptool --chip esp32s3 -p COM4 -b 460800 write_flash 0x120000 firmware\build\eda_robot.bin
 
-────────────────────────────────────────
-Web 烧录 OTA（FW ≥ 2.1.0，无需再接线）
-────────────────────────────────────────
-前提：板子已用串口成功刷过带双 OTA 分区表的固件，且已连上 WiFi。
-强制：必须有 main/wifi_config.h（真实 SSID+密码）。禁止烧录 your-ssid/无密码固件——
-本板无法依赖 BOOT+EN 恢复，错 WiFi 会永久失去 OTA。
+说明：供电不稳也能刷；跑大包时若 BROWNOUT 需加稳 5V。语音默认关（网页「语音」开关 / POST /api/voice），不开就不 init AFE。
 
-1) 确认 wifi_config.h 存在后：idf.py build  → 得到 build/eda_robot.bin
-   自检：strings build/eda_robot.bin | grep your-ssid  （应无输出）
-2) 浏览器打开 http://<板子IP>/  → 「Web 烧录」选 .bin → 上传并烧录
-   或命令行：
-     curl -X POST --data-binary @build/eda_robot.bin \
-       -H 'Content-Type: application/octet-stream' \
-       http://<板子IP>/api/ota
-3) 成功后板子自动重启；约 5–10 秒后再访问页面，看 FW 版本
+======= 监视 =======
+cd firmware
+idf.py -p COM4 monitor --no-reset
 
-注意：分区表从单应用改为双 OTA 的那一次，必须串口全量烧录（含 partition-table）。
-此后日常升级只用 Web/OTA。
+======= 日常 OTA（大包 → ota_0）=======
+主系统不能直接刷自己（单槽），必须先救援再上传。
 
-语音模型（FW ≥ 3.5.0）：新增 model 分区。首次启用或改过分区表须串口全量：
-  idf.py -p COM3 -b 115200 flash
-（写入 partition-table + app + model）。之后仅改 app 仍可用 Web OTA。
-用法：说「你好小智」→ 短鸣 →「开风扇」/「关风扇」（恢复上次强度并关雷达联动）。
+网页：主页「进入救援升级」→ 看 IP → 上传 eda_robot.bin
 
-当前板子IP
-http://192.168.137.178/   （FW 3.2.3；雷达 UART 固件已对调）
+API（PowerShell 示例，IP 按实际改）：
+  # 1) 主系统：进救援（会重启）
+  Invoke-RestMethod -Method POST -Uri http://192.168.137.178/api/rescue
+
+  # 2) 等 OLED 显示救援 IP 后，上传大包（原始 bin，非 multipart）
+  Invoke-WebRequest -Method POST -Uri http://<救援IP>/api/ota `
+    -InFile firmware\build\eda_robot.bin -ContentType "application/octet-stream"
+
+  # 成功返回 {"ok":true,"reboot":true} 后自动回主系统
+
+curl 等价：
+  curl -X POST http://192.168.137.178/api/rescue
+  curl -X POST http://<救援IP>/api/ota --data-binary @firmware/build/eda_robot.bin
+
+语音开关（大包刷上后，默认关）：
+  Invoke-RestMethod -Method POST -Uri http://<主IP>/api/voice -ContentType application/json -Body '{"on":true}'
+  Invoke-RestMethod -Method POST -Uri http://<主IP>/api/voice -ContentType application/json -Body '{"on":false}'
+
+======= 构建 =======
+主系统：
+  cd firmware
+  idf.py build
+  → firmware\build\eda_robot.bin（开 SPIRAM 时约 5MB+，含语音模型；语音运行时默认不启动）
+
+救援：
+  cd firmware_recovery
+  idf.py build
+  → firmware_recovery\build\eda_rescue.bin
+
+大包只烧 ota_0（0x120000 / 救援 OTA），不要烧 factory（1MB）。
+
+（build 被占用打不开时，可临时：idf.py -B "$env:TEMP\eda_robot_build" build）
+
+当前板子 IP
+http://192.168.137.178/

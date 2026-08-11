@@ -5,6 +5,9 @@
 static const char *TAG = "i2c";
 static i2c_master_bus_handle_t s_bus = nullptr;
 
+// 空板/缺上拉时短超时，避免 HTTP/后台任务卡死触发 Interrupt WDT
+static constexpr int kI2cTimeoutMs = 20;
+
 bool board_i2c_init() {
   if (s_bus) return true;
   i2c_master_bus_config_t cfg = {};
@@ -13,13 +16,15 @@ bool board_i2c_init() {
   cfg.scl_io_num = (gpio_num_t)PIN_I2C_SCL;
   cfg.clk_source = I2C_CLK_SRC_DEFAULT;
   cfg.glitch_ignore_cnt = 7;
-  cfg.flags.enable_internal_pullup = false; // R11/R12 external 4.7k on board
+  // 有 R11/R12 时并联无妨；未焊上拉时必须开内部上拉，否则空总线易挂死
+  cfg.flags.enable_internal_pullup = true;
   esp_err_t err = i2c_new_master_bus(&cfg, &s_bus);
   if (err != ESP_OK) {
     ESP_LOGE(TAG, "i2c_new_master_bus failed: %s", esp_err_to_name(err));
     s_bus = nullptr;
     return false;
   }
+  ESP_LOGI(TAG, "I2C bus ready (internal pullup on, timeout=%dms)", kI2cTimeoutMs);
   return true;
 }
 
@@ -36,26 +41,28 @@ bool board_i2c_add_device(uint8_t addr7, i2c_master_dev_handle_t *out, uint32_t 
 }
 
 bool board_i2c_write(i2c_master_dev_handle_t dev, const uint8_t *data, size_t len, int timeout_ms) {
-  if (!dev) return false;
+  if (!dev || !data) return false;
+  if (timeout_ms <= 0) timeout_ms = kI2cTimeoutMs;
   return i2c_master_transmit(dev, data, len, timeout_ms) == ESP_OK;
 }
 
 bool board_i2c_write_read(i2c_master_dev_handle_t dev, const uint8_t *w, size_t wlen, uint8_t *r,
                           size_t rlen, int timeout_ms) {
-  if (!dev) return false;
+  if (!dev || !w || !r) return false;
+  if (timeout_ms <= 0) timeout_ms = kI2cTimeoutMs;
   return i2c_master_transmit_receive(dev, w, wlen, r, rlen, timeout_ms) == ESP_OK;
 }
 
 bool board_i2c_probe(uint8_t addr7) {
   if (!s_bus) return false;
-  return i2c_master_probe(s_bus, addr7, 100) == ESP_OK;
+  return i2c_master_probe(s_bus, addr7, kI2cTimeoutMs) == ESP_OK;
 }
 
 bool board_i2c_oled_ping(uint8_t addr7, uint32_t scl_hz) {
   i2c_master_dev_handle_t dev = nullptr;
   if (!board_i2c_add_device(addr7, &dev, scl_hz)) return false;
   uint8_t buf[2] = {0x00, 0xAE};
-  const bool ok = board_i2c_write(dev, buf, 2, 300);
+  const bool ok = board_i2c_write(dev, buf, 2, kI2cTimeoutMs);
   i2c_master_bus_rm_device(dev);
   return ok;
 }

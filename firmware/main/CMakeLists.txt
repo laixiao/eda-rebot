@@ -4,6 +4,12 @@ if(NOT EXISTS "${CMAKE_CURRENT_LIST_DIR}/wifi_config.h")
         "Copy wifi_config.example.h -> wifi_config.h and set WIFI_SSID / WIFI_PASS.")
 endif()
 
+if(NOT EXISTS "${CMAKE_CURRENT_LIST_DIR}/srmodels.bin")
+    message(FATAL_ERROR
+        "main/srmodels.bin missing. Build once with esp-sr movemodel.py and copy "
+        "build/srmodels/srmodels.bin -> main/srmodels.bin (see docs/烧录-监视.txt).")
+endif()
+
 idf_component_register(
     SRCS
         "main.cpp"
@@ -20,6 +26,7 @@ idf_component_register(
         "."
     EMBED_FILES
         "font_cjk.bin"
+        "srmodels.bin"
     REQUIRES
         nvs_flash
         esp_wifi

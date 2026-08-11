@@ -12,6 +12,7 @@
 #include "esp_netif.h"
 #include "esp_wifi.h"
 #include "nvs_flash.h"
+#include "nvs.h"
 #include "esp_http_server.h"
 #include "esp_timer.h"
 #include "esp_psram.h"
@@ -36,7 +37,7 @@
 #include "voice_sr.h"
 
 static const char *TAG = "eda_robot";
-static const char *FW_VERSION = "3.5.1";
+static const char *FW_VERSION = "3.6.3";
 static volatile bool otaBusy = false;
 static volatile bool shutdownPending = false;
 
@@ -211,6 +212,25 @@ static bool argsHasKey(const ReqArgs &a, const char *key) {
   return a.body.find(k) != std::string::npos;
 }
 
+static std::string i2cKnownJson() {
+  // 仅用启动时已探测的 present 标志，禁止在 /api/status 里再 probe（空总线易 Interrupt WDT）
+  std::string s = "[";
+  bool first = true;
+  auto add = [&](uint8_t addr, bool ok) {
+    if (!ok) return;
+    if (!first) s += ',';
+    first = false;
+    char b[8];
+    snprintf(b, sizeof(b), "%u", addr);
+    s += b;
+  };
+  add(ADDR_XL9555, xl.present());
+  if (oled.present()) add(oled.addr(), true);
+  add(ADDR_PCA9685, pca.present());
+  s += ']';
+  return s;
+}
+
 static std::string i2cScanJson(bool full = false) {
   std::string s = "[";
   bool first = true;
@@ -265,6 +285,12 @@ static bool pcaAllOffOrAbsent() { return !pca.present() || pca.allOff(); }
 
 static bool setPwmEnable(bool on) {
   if (!actuatorLock()) return false;
+  // 无 XL9555 时无法控 OE#；关请求视为成功，开请求失败
+  if (!xl.present()) {
+    if (!on) flagPwm = false;
+    actuatorUnlock();
+    return !on;
+  }
   bool ok = true;
   if (on) {
     ok = pcaAllOffOrAbsent();
@@ -283,6 +309,11 @@ static bool setPwmEnable(bool on) {
 
 static bool setAmp(bool on) {
   if (!actuatorLock()) return false;
+  if (!xl.present()) {
+    if (!on) flagAmp = false;
+    actuatorUnlock();
+    return !on;
+  }
   const bool ok = xl.setPin(XL_AMP_SD, on);
   if (ok) flagAmp = on;
   actuatorUnlock();
@@ -329,10 +360,16 @@ static bool recStart() {
     xSemaphoreGive(audioMutex);
     return false;
   }
+  if (!board_i2s_mic_acquire()) {
+    voice_sr_resume();
+    xSemaphoreGive(audioMutex);
+    return false;
+  }
   recSamples = 0;
   recActive = true;
   if (xTaskCreate(recTask, "rec", 4096, nullptr, 5, &recTaskHandle) != pdPASS) {
     recActive = false;
+    board_i2s_mic_release();
     voice_sr_resume();
     ok = false;
   } else {
@@ -343,9 +380,10 @@ static bool recStart() {
 }
 
 static bool recStop() {
-  if (!recActive) return true;
+  if (!recActive && !recTaskHandle) return true;
   recActive = false;
   for (int i = 0; i < 100 && recTaskHandle; i++) vTaskDelay(pdMS_TO_TICKS(20));
+  board_i2s_mic_release();
   voice_sr_resume();
   return !recActive;
 }
@@ -477,6 +515,15 @@ static bool parseWavPcm16(uint8_t *buf, size_t len, int16_t **pcm, size_t *nSamp
 /** Q4 P-MOS：拉低 IO0_1 = 开雷达 3V3；开电即自动查询 */
 static bool setRadarPower(bool on) {
   if (!actuatorLock()) return false;
+  if (!xl.present()) {
+    // 无扩展芯片无法开关雷达供电
+    if (!on) {
+      flagRadarPwr = false;
+      radar_on_power(false);
+    }
+    actuatorUnlock();
+    return !on;
+  }
   const bool ok = xl.setPin(XL_RADAR_PWR, !on);
   if (ok) flagRadarPwr = on;
   actuatorUnlock();
@@ -734,9 +781,12 @@ static void updateRadarFan(const RadarSnapshot &rs) {
 static bool emergencyStop() {
   recStop();
   if (!actuatorLock()) return false;
-  const bool oeOk = xl.setPin(XL_OE, true);
-  const bool ampOk = xl.setPin(XL_AMP_SD, false);
-  const bool radarOk = xl.setPin(XL_RADAR_PWR, true);
+  bool oeOk = true, ampOk = true, radarOk = true;
+  if (xl.present()) {
+    oeOk = xl.setPin(XL_OE, true);
+    ampOk = xl.setPin(XL_AMP_SD, false);
+    radarOk = xl.setPin(XL_RADAR_PWR, true);
+  }
   const bool pwmOk = pcaAllOffOrAbsent();
   if (oeOk) flagPwm = false;
   if (ampOk) flagAmp = false;
@@ -883,7 +933,7 @@ static esp_err_t handleApiIndex(httpd_req_t *req) {
   body += "{\"path\":\"/api/servos\"},";
   body += "{\"path\":\"/api/led\",\"note\":\"id 0=LED_1 1=LED_2 2=LED_ALL; need LED_ALL for 1/2\"},";
   body += "{\"path\":\"/api/fan\",\"note\":\"radar auto OR power=1|0 (last intensity; disables auto)\"},";
-  body += "{\"path\":\"/api/voice\",\"note\":\"GET ESP-SR; wake=你好小智; cmds=开/关风扇\"},";
+  body += "{\"path\":\"/api/voice\",\"note\":\"GET status; POST {on:true|false} 语音开关(NVS,默认关)\"},";
   body += "{\"path\":\"/api/i2c\",\"note\":\"?full=1 for bus scan\"},";
   body += "{\"path\":\"/api/mic\",\"note\":\"RMS sample\"},";
   body += "{\"path\":\"/api/rec\",\"note\":\"POST on=1|0 record; GET status; GET /api/rec/wav\"},";
@@ -973,17 +1023,52 @@ static esp_err_t handleFanPost(httpd_req_t *req) {
   return sendJson(req, 200, buf);
 }
 
+static bool voiceEnabledNvs() {
+  nvs_handle_t h;
+  uint8_t v = 0;
+  if (nvs_open("cfg", NVS_READONLY, &h) != ESP_OK) return false;
+  nvs_get_u8(h, "voice", &v);
+  nvs_close(h);
+  return v != 0;
+}
+
+static void voiceSetEnabledNvs(bool on) {
+  nvs_handle_t h;
+  if (nvs_open("cfg", NVS_READWRITE, &h) != ESP_OK) return;
+  nvs_set_u8(h, "voice", on ? 1 : 0);
+  nvs_commit(h);
+  nvs_close(h);
+}
+
+static void voiceJsonInto(char *buf, size_t buflen) {
+  char inner[160];
+  voice_sr_status(inner, sizeof(inner));
+  const char *p = inner;
+  if (*p == '{') p++;
+  size_t n = strlen(p);
+  if (n && p[n - 1] == '}') n--;
+  snprintf(buf, buflen, "{\"enabled\":%s,\"modelBytes\":%u,%.*s}",
+           voiceEnabledNvs() ? "true" : "false", (unsigned)voice_sr_model_bytes(), (int)n, p);
+}
+
 static esp_err_t handleStatus(httpd_req_t *req) {
   wifi_ap_record_t ap = {};
   int rssi = 0;
   if (esp_wifi_sta_get_ap_info(&ap) == ESP_OK) rssi = ap.rssi;
 
-  const bool psramOk = esp_psram_is_initialized();
+  const bool psramOk =
+#if CONFIG_SPIRAM
+      esp_psram_is_initialized();
   const size_t psramBytes = psramOk ? esp_psram_get_size() : 0;
+#else
+      false;
+  const size_t psramBytes = 0;
+#endif
+
   char fan[560];
   fanJsonInto(fan, sizeof(fan));
-  char voice[200];
-  voice_sr_status(voice, sizeof(voice));
+  char voice[280];
+  voiceJsonInto(voice, sizeof(voice));
   char buf[1400];
   snprintf(buf, sizeof(buf),
            "{\"ok\":true,\"fw\":\"%s\",\"board\":\"v6-1\",\"ip\":\"%s\",\"rssi\":%d,"
@@ -997,7 +1082,7 @@ static esp_err_t handleStatus(httpd_req_t *req) {
            flagPwm ? "true" : "false", flagAmp ? "true" : "false",
            (unsigned)board_i2s_get_volume(),
            flagRadarPwr ? "true" : "false", otaBusy ? "true" : "false", spotDutyPct[0],
-           spotDutyPct[1], spotDutyPct[2], fan, voice, i2cScanJson().c_str());
+           spotDutyPct[1], spotDutyPct[2], fan, voice, i2cKnownJson().c_str());
   return sendJson(req, 200, buf);
 }
 
@@ -1154,12 +1239,39 @@ static esp_err_t handleLed(httpd_req_t *req) {
   return sendJson(req, 200, b);
 }
 
+static void onVoiceSrCmd(int cmd_id);
+
 static esp_err_t handleVoiceGet(httpd_req_t *req) {
-  char voice[200];
-  voice_sr_status(voice, sizeof(voice));
-  char buf[240];
+  char voice[280];
+  voiceJsonInto(voice, sizeof(voice));
+  char buf[320];
   snprintf(buf, sizeof(buf), "{\"ok\":true,\"voice\":%s}", voice);
   return sendJson(req, 200, buf);
+}
+
+static esp_err_t handleVoicePost(httpd_req_t *req) {
+  const ReqArgs a = loadArgs(req);
+  if (!argsHasKey(a, "on")) return sendJson(req, 400, "{\"ok\":false,\"error\":\"need on\"}");
+  const bool on = argBool(a, "on", false);
+  voiceSetEnabledNvs(on);
+
+  if (!on) {
+    voice_sr_pause();
+    ESP_LOGI(TAG, "voice disabled (NVS); AFE stays paused until reboot if already started");
+    return handleVoiceGet(req);
+  }
+
+  if (!i2sReady) return sendJson(req, 500, "{\"ok\":false,\"error\":\"i2s not ready\"}");
+#if CONFIG_SPIRAM
+  if (!esp_psram_is_initialized())
+    return sendJson(req, 503, "{\"ok\":false,\"error\":\"PSRAM unavailable; voice needs SPIRAM\"}");
+  if (!voice_sr_ok() && !voice_sr_start(onVoiceSrCmd))
+    return sendJson(req, 500, "{\"ok\":false,\"error\":\"voice_sr_start failed\"}");
+  voice_sr_resume();
+  return handleVoiceGet(req);
+#else
+  return sendJson(req, 503, "{\"ok\":false,\"error\":\"PSRAM disabled in firmware\"}");
+#endif
 }
 
 static void onVoiceSrCmd(int cmd_id) {
@@ -1418,120 +1530,61 @@ static esp_err_t handleOled(httpd_req_t *req) {
 
 static esp_err_t handleOtaInfo(httpd_req_t *req) {
   const esp_partition_t *running = esp_ota_get_running_partition();
-  const esp_partition_t *next = esp_ota_get_next_update_partition(nullptr);
+  const esp_partition_t *factory =
+      esp_partition_find_first(ESP_PARTITION_TYPE_APP, ESP_PARTITION_SUBTYPE_APP_FACTORY, nullptr);
+  const esp_partition_t *ota0 =
+      esp_partition_find_first(ESP_PARTITION_TYPE_APP, ESP_PARTITION_SUBTYPE_APP_OTA_0, nullptr);
   const esp_app_desc_t *desc = esp_app_get_description();
-  char b[384];
+  char b[512];
   snprintf(b, sizeof(b),
            "{\"ok\":true,\"fw\":\"%s\",\"project\":\"%s\",\"idf\":\"%s\","
            "\"running\":\"%s\",\"runningOffset\":%u,\"runningSize\":%u,"
-           "\"next\":\"%s\",\"nextOffset\":%u,\"nextSize\":%u,\"busy\":%s,"
-           "\"hint\":\"POST raw .bin to /api/ota (application/octet-stream)\"}",
+           "\"factory\":\"%s\",\"factorySize\":%u,\"ota0\":\"%s\",\"ota0Size\":%u,\"busy\":%s,"
+           "\"hint\":\"主系统请点「进入救援升级」；在救援页上传 eda_robot.bin 大包\"}",
            FW_VERSION, desc ? desc->project_name : "?", desc ? desc->idf_ver : "?",
            running ? running->label : "?", running ? (unsigned)running->address : 0,
-           running ? (unsigned)running->size : 0, next ? next->label : "?",
-           next ? (unsigned)next->address : 0, next ? (unsigned)next->size : 0,
-           otaBusy ? "true" : "false");
+           running ? (unsigned)running->size : 0, factory ? factory->label : "?",
+           factory ? (unsigned)factory->size : 0, ota0 ? ota0->label : "?",
+           ota0 ? (unsigned)ota0->size : 0, otaBusy ? "true" : "false");
   return sendJson(req, 200, b);
+}
+
+static esp_err_t handleRescue(httpd_req_t *req) {
+  (void)loadArgs(req);
+  const esp_partition_t *factory =
+      esp_partition_find_first(ESP_PARTITION_TYPE_APP, ESP_PARTITION_SUBTYPE_APP_FACTORY, nullptr);
+  if (!factory)
+    return sendJson(req, 500, "{\"ok\":false,\"error\":\"no factory partition — serial flash new table first\"}");
+
+  nvs_handle_t h;
+  if (nvs_open("rescue", NVS_READWRITE, &h) == ESP_OK) {
+    nvs_set_u8(h, "enter", 1);
+    nvs_commit(h);
+    nvs_close(h);
+  }
+
+  const esp_err_t err = esp_ota_set_boot_partition(factory);
+  if (err != ESP_OK) {
+    char b[96];
+    snprintf(b, sizeof(b), "{\"ok\":false,\"error\":\"set boot %s\"}", esp_err_to_name(err));
+    return sendJson(req, 500, b);
+  }
+
+  sendJson(req, 200, "{\"ok\":true,\"reboot\":true,\"to\":\"factory\"}");
+  ESP_LOGW(TAG, "reboot to factory rescue");
+  vTaskDelay(pdMS_TO_TICKS(500));
+  esp_restart();
+  return ESP_OK;
 }
 
 static esp_err_t handleOta(httpd_req_t *req) {
   if (req->method == HTTP_OPTIONS) return handleOptions(req);
   if (req->method == HTTP_GET) return handleOtaInfo(req);
 
-  if (otaBusy) return sendJson(req, 400, "{\"ok\":false,\"error\":\"OTA already in progress\"}");
-  if (req->content_len <= 0)
-    return sendJson(req, 400, "{\"ok\":false,\"error\":\"Content-Length required; POST raw firmware .bin\"}");
-  if (req->content_len < 1024)
-    return sendJson(req, 400, "{\"ok\":false,\"error\":\"firmware too small\"}");
-
-  const esp_partition_t *update = esp_ota_get_next_update_partition(nullptr);
-  if (!update)
-    return sendJson(req, 500, "{\"ok\":false,\"error\":\"no OTA partition (need dual-OTA table)\"}");
-  if ((size_t)req->content_len > update->size)
-    return sendJson(req, 400, "{\"ok\":false,\"error\":\"firmware larger than OTA slot\"}");
-
-  otaBusy = true;
-  emergencyStop();
-
-  ESP_LOGI(TAG, "OTA begin -> %s @0x%x size=%d", update->label, (unsigned)update->address,
-           req->content_len);
-
-  esp_ota_handle_t ota = 0;
-  esp_err_t err = esp_ota_begin(update, OTA_WITH_SEQUENTIAL_WRITES, &ota);
-  if (err != ESP_OK) {
-    otaBusy = false;
-    char b[96];
-    snprintf(b, sizeof(b), "{\"ok\":false,\"error\":\"esp_ota_begin %s\"}", esp_err_to_name(err));
-    return sendJson(req, 500, b);
-  }
-
-  char buf[4096];
-  int remaining = req->content_len;
-  int written = 0;
-  bool magicOk = false;
-  while (remaining > 0) {
-    int want = remaining > (int)sizeof(buf) ? (int)sizeof(buf) : remaining;
-    int got = 0;
-    while (got < want) {
-      int n = httpd_req_recv(req, buf + got, want - got);
-      if (n == HTTPD_SOCK_ERR_TIMEOUT) continue;
-      if (n <= 0) {
-        esp_ota_abort(ota);
-        otaBusy = false;
-        return sendJson(req, 500, "{\"ok\":false,\"error\":\"recv aborted\"}");
-      }
-      got += n;
-    }
-
-    if (!magicOk) {
-      if ((uint8_t)buf[0] != ESP_IMAGE_HEADER_MAGIC) {
-        esp_ota_abort(ota);
-        otaBusy = false;
-        return sendJson(req, 400,
-                        "{\"ok\":false,\"error\":\"not ESP firmware (magic!=0xE9); use build/*.bin\"}");
-      }
-      magicOk = true;
-    }
-
-    err = esp_ota_write(ota, buf, got);
-    if (err != ESP_OK) {
-      esp_ota_abort(ota);
-      otaBusy = false;
-      char b[96];
-      snprintf(b, sizeof(b), "{\"ok\":false,\"error\":\"esp_ota_write %s\"}", esp_err_to_name(err));
-      return sendJson(req, 500, b);
-    }
-    remaining -= got;
-    written += got;
-    if ((written & 0x3FFFF) == 0) ESP_LOGI(TAG, "OTA %d / %d", written, req->content_len);
-  }
-
-  err = esp_ota_end(ota);
-  if (err != ESP_OK) {
-    otaBusy = false;
-    char b[96];
-    snprintf(b, sizeof(b), "{\"ok\":false,\"error\":\"esp_ota_end %s (bad image?)\"}",
-             esp_err_to_name(err));
-    return sendJson(req, 500, b);
-  }
-
-  err = esp_ota_set_boot_partition(update);
-  if (err != ESP_OK) {
-    otaBusy = false;
-    char b[96];
-    snprintf(b, sizeof(b), "{\"ok\":false,\"error\":\"set_boot %s\"}", esp_err_to_name(err));
-    return sendJson(req, 500, b);
-  }
-
-  ESP_LOGI(TAG, "OTA ok %d bytes -> %s, reboot", written, update->label);
-  char b[160];
-  snprintf(b, sizeof(b),
-           "{\"ok\":true,\"written\":%d,\"partition\":\"%s\",\"rebooting\":true}", written,
-           update->label);
-  sendJson(req, 200, b);
-  vTaskDelay(pdMS_TO_TICKS(500));
-  esp_restart();
-  return ESP_OK;
+  // 单槽 ota_0 架构：主系统不能 OTA 自己，必须进救援
+  return sendJson(req, 400,
+                  "{\"ok\":false,\"error\":\"use rescue OTA\",\"hint\":\"POST /api/rescue then upload "
+                  "eda_robot.bin on rescue page\"}");
 }
 
 static esp_err_t handleNotFound(httpd_req_t *req, httpd_err_code_t err) {
@@ -1587,6 +1640,7 @@ static void setupHttp() {
   registerUri(server, "/api/fan", HTTP_POST, handleFanPost);
   registerUri(server, "/api/fan", HTTP_OPTIONS, handleOptions);
   registerUri(server, "/api/voice", HTTP_GET, handleVoiceGet);
+  registerUri(server, "/api/voice", HTTP_POST, handleVoicePost);
   registerUri(server, "/api/voice", HTTP_OPTIONS, handleOptions);
   registerUri(server, "/api/i2c", HTTP_GET, handleI2c);
   registerUri(server, "/api/i2c", HTTP_OPTIONS, handleOptions);
@@ -1604,6 +1658,8 @@ static void setupHttp() {
   registerUri(server, "/api/ota", HTTP_GET, handleOta);
   registerUri(server, "/api/ota", HTTP_POST, handleOta);
   registerUri(server, "/api/ota", HTTP_OPTIONS, handleOptions);
+  registerUri(server, "/api/rescue", HTTP_POST, handleRescue);
+  registerUri(server, "/api/rescue", HTTP_OPTIONS, handleOptions);
 
   const char *mutating[] = {"/api/estop", "/api/shutdown", "/api/pwm", "/api/amp",
                             "/api/servo", "/api/servos", "/api/led", "/api/beep", "/api/oled"};
@@ -1673,14 +1729,17 @@ static void wifi_init() {
 
 static void background_task(void *) {
   while (true) {
-    uint8_t p0 = 0;
-    if (xl.readPort(0, p0)) radar_set_gpio_out((p0 >> XL_RADAR_OUT) & 1);
-    radar_poll();
+    // 空板：无 XL 不做 I2C；雷达未供电时 poll 立即返回
+    if (xl.present()) {
+      uint8_t p0 = 0;
+      if (xl.readPort(0, p0)) radar_set_gpio_out((p0 >> XL_RADAR_OUT) & 1);
+    }
+    if (flagRadarPwr) radar_poll();
     RadarSnapshot rs;
     radar_get_snapshot(rs);
-    updateRadarFan(rs);
-    oledShowHome(false);
-    vTaskDelay(pdMS_TO_TICKS(20));
+    if (fanAutoEnable && pca.present()) updateRadarFan(rs);
+    if (oled.present()) oledShowHome(false);
+    vTaskDelay(pdMS_TO_TICKS((xl.present() || flagRadarPwr) ? 20 : 500));
   }
 }
 
@@ -1712,12 +1771,16 @@ extern "C" void app_main(void) {
   ESP_LOGI(TAG, "radar UART=%d (power still off until /api/radar power=1)", radarBootUart);
   board_i2c_init();
 
-  bool okXl = xl.begin(ADDR_XL9555);
-  bool okOled = oled.begin(ADDR_OLED, 100000);
-  if (!okOled) okOled = oled.begin(0x3D, 100000);
-  bool okPca = pca.begin(ADDR_PCA9685, 50.0f);
+  // 空板原则：probe 失败则绝不 begin（避免缺件时长时间 I2C 事务）
+  bool okXl = board_i2c_probe(ADDR_XL9555) && xl.begin(ADDR_XL9555);
+  bool okOled = false;
+  if (board_i2c_probe(ADDR_OLED))
+    okOled = oled.begin(ADDR_OLED, 100000);
+  else if (board_i2c_probe(0x3D))
+    okOled = oled.begin(0x3D, 100000);
+  bool okPca = board_i2c_probe(ADDR_PCA9685) && pca.begin(ADDR_PCA9685, 50.0f);
 
-  ESP_LOGI(TAG, "XL9555=%d OLED=%d PCA9685=%d CJK=%u", okXl, okOled, okPca,
+  ESP_LOGI(TAG, "XL9555=%d OLED=%d PCA9685=%d CJK=%u (bare-board safe)", okXl, okOled, okPca,
            (unsigned)font_cjk_count());
   if (okOled && oledMutex && xSemaphoreTake(oledMutex, pdMS_TO_TICKS(100)) == pdTRUE) {
     oled.printfLines("EDA Robot", "汉字字库就绪", "等待 WiFi...", FW_VERSION);
@@ -1727,9 +1790,22 @@ extern "C" void app_main(void) {
 
   i2sReady = board_i2s_init();
   ESP_LOGI(TAG, "I2S=%d", i2sReady);
-  if (i2sReady) {
-    const bool vok = voice_sr_start(onVoiceSrCmd);
-    ESP_LOGI(TAG, "voice_sr=%d (wake=你好小智)", vok ? 1 : 0);
+  // 语音默认关（NVS cfg/voice）；开了才 init AFE，避免供电/PSRAM 不稳时启动即崩
+  ESP_LOGI(TAG, "voice model embed=%u bytes, nvs_enabled=%d", (unsigned)voice_sr_model_bytes(),
+           voiceEnabledNvs() ? 1 : 0);
+  if (voiceEnabledNvs() && i2sReady) {
+#if CONFIG_SPIRAM
+    if (esp_psram_is_initialized()) {
+      const bool vok = voice_sr_start(onVoiceSrCmd);
+      ESP_LOGI(TAG, "voice_sr=%d (wake=你好小智)", vok ? 1 : 0);
+    } else {
+      ESP_LOGW(TAG, "voice enabled in NVS but PSRAM missing — skipped");
+    }
+#else
+    ESP_LOGW(TAG, "voice enabled in NVS but CONFIG_SPIRAM off — skipped");
+#endif
+  } else {
+    ESP_LOGI(TAG, "voice_sr idle (enable via POST /api/voice {\"on\":true})");
   }
 
   wifi_init();

@@ -16,9 +16,12 @@ bool voice_sr_start(voice_sr_cmd_cb_t cb);
 
 bool voice_sr_ok();
 
+/** 内嵌 srmodels.bin 字节数（保证链接进大包，即使未 start）。 */
+size_t voice_sr_model_bytes();
+
 /** 录音/独占麦克风前暂停；停止后 resume。 */
 void voice_sr_pause();
 void voice_sr_resume();
 
-/** 最近一次识别摘要（供 /api/status）。 */
+/** 最近一次识别摘要（供 /api/status）。JSON 片段，无 enabled 字段。 */
 void voice_sr_status(char *buf, size_t buflen);

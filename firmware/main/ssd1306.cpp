@@ -15,26 +15,27 @@ void SSD1306::releaseDev() {
 }
 
 bool SSD1306::cmd(uint8_t c) {
+  if (!ok_ || !dev_) return false;
   uint8_t buf[2] = {0x00, c};
-  const bool ok = board_i2c_write(dev_, buf, 2, 300);
+  const bool ok = board_i2c_write(dev_, buf, 2);
   if (!ok) ok_ = false;
   return ok;
 }
 
 bool SSD1306::data(const uint8_t *d, size_t n) {
+  if (!ok_ || !dev_) return false;
   uint8_t chunk[17];
   chunk[0] = 0x40;
   while (n) {
     size_t m = n > 16 ? 16 : n;
     memcpy(chunk + 1, d, m);
-    if (!board_i2c_write(dev_, chunk, m + 1, 300)) {
+    if (!board_i2c_write(dev_, chunk, m + 1)) {
       ok_ = false;
       return false;
     }
     d += m;
     n -= m;
   }
-  ok_ = true;
   return true;
 }
 
@@ -64,13 +65,16 @@ int SSD1306::beginEx(uint8_t addr, uint32_t scl_hz) {
   releaseDev();
   addr_ = addr;
   scl_hz_ = scl_hz;
+  // 先 probe，缺件时不做 120ms 等待和整段 init（空板会拖垮启动/WDT）
+  if (!board_i2c_probe(addr)) return 0;
   if (!board_i2c_add_device(addr, &dev_, scl_hz)) return 0;
-  vTaskDelay(pdMS_TO_TICKS(120));
+  vTaskDelay(pdMS_TO_TICKS(20));
   ok_ = true;
   int r = initSequence(0x12);
   if (r >= 0) r = initSequence(0x02);
   if (r >= 0) {
     ok_ = false;
+    releaseDev();
     return r;
   }
   return -1;
@@ -220,6 +224,7 @@ void SSD1306::drawTextLarge(uint8_t col, uint8_t page, const char *text) {
 }
 
 bool SSD1306::printfLines(const char *l0, const char *l1, const char *l2, const char *l3) {
+  if (!ok_ || !dev_) return false;
   clear();
   drawText(0, 0, l0);
   drawText(0, 2, l1);
@@ -229,6 +234,7 @@ bool SSD1306::printfLines(const char *l0, const char *l1, const char *l2, const 
 }
 
 bool SSD1306::showHome(const char *ip, int fanPct) {
+  if (!ok_ || !dev_) return false;
   clear();
   // Top: 11px IP (pages 0–1)
   if (ip && ip[0]) {
@@ -257,7 +263,7 @@ bool SSD1306::showHome(const char *ip, int fanPct) {
 }
 
 bool SSD1306::show() {
-  if (!ok_) return false;
+  if (!ok_ || !dev_) return false;
   return cmd(0x21) && cmd(0) && cmd(127) && cmd(0x22) && cmd(0) && cmd(7) &&
          data(buf_, sizeof(buf_));
 }

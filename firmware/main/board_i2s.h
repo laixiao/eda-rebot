@@ -18,4 +18,8 @@ bool board_i2s_play_pcm16(const int16_t *mono, size_t n_samples);
 void board_i2s_set_volume(uint8_t pct);
 uint8_t board_i2s_get_volume();
 
+/** 长时间占用麦克风（录音 / 语音）：配对 acquire/release，避免空闲 RX DMA。 */
+bool board_i2s_mic_acquire();
+void board_i2s_mic_release();
+
 static constexpr int BOARD_I2S_RATE = 16000;
