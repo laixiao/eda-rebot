@@ -104,7 +104,7 @@ U1 当前 NC：IO1/8/11/14/15/19/20/21/35/36/37/47/48。
 - 雷达：`POST /api/radar {"power":true}` 开电即自动查询（已取消独立采集开关）；UART IO9/10
 - 舵机 id `0..1`；探照灯 id `0/1/2`=LED_1/2/ALL（1/2 需 ALL）
 - 雷达→风扇：`POST /api/fan {"auto":true}`；每 **2s** 取样；**有人 1 次即开**、**无人连续 3 次才关** **LED_1**；开时按手势档位（若手势开）或记忆强度；有人判定不含单独呼吸/微动/OUT；默认关
-- 手势切档：`POST /api/fan {"gesture":true}`（可与控风扇**同时开**）；近距 **≤0.20m** 停留 **2s** → 档位循环 **50%→75%→100%**（sticky `gear`）；切成功经 **`gest_chime` 异步**播短 beep「滴」（勿在 bg 4KB 栈同步播）；只管档位、**不关闭控风扇**；自动再开时用当前档位；触发后须离开（**>0.35m**）再武装；默认关
+- 手势切档：`POST /api/fan {"gesture":true}`（可与控风扇**同时开**）；近距 **≤0.20m** 停留 **2s** → 档位循环 **50%→75%→100%**（sticky `gear`）；切成功**无提示音**（FW≥3.6.17）；只管档位、**不关闭控风扇**；自动再开时用当前档位；触发后须离开（**>0.35m**）再武装；默认关
 - **栈教训**：`background_task`（4KB）禁止同步 I2S 播音；见 `.cursor/rules/firmware-bg-audio.mdc`
 - 语音控风扇（ESP-SR）：默认关（NVS `cfg/voice`）；网页「语音」开关或 `POST /api/voice {"on":true|false}`；开后 **MultiNet 伪唤醒「你好爱妃」**（无 WakeNet；随机播放 `firmware/assets/*.wav`，失败则双音）→ 开/关风扇、**大一点/小一点（±20%）**、最大/最小(20%)/中等(50%)；开或加大时恢复/设置 LED_1×LED_ALL 并**关闭雷达联动**；`GET /api/voice` / `/api/status` 含 `enabled`/`modelBytes`
 - 录音：`POST /api/rec {"on":true|false}`，`GET /api/rec/wav`；播放录音 `POST /api/play`；上传 `POST /api/play/upload`（WAV PCM16 @16kHz）

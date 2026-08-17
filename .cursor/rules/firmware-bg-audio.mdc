@@ -27,7 +27,8 @@ alwaysApply: false
 
 ## 现有安全样板
 
-- 手势切档成功 → `gestureAckChime()` → `gestChimeTask` 异步短 beep「滴」
+- 手势切档成功：**无提示音**（FW≥3.6.17 已去掉 `gest_chime`）
 - 语音指令短 beep 在语音/HTTP 路径调用（非 bg 4KB 栈）
+- 若以后再加 bg 触发的音效：必须另起 ≥6KB 任务 + `audioMutex`/`playBusy`，禁止在 bg 4KB 栈同步播
 
 改风扇/雷达/手势反馈时，先确认调用栈落在哪个任务、栈多大，再决定能否同步播音。
