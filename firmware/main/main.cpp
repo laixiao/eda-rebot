@@ -2,6 +2,8 @@
 #include <stdlib.h>
 #include <string.h>
 #include <strings.h>
+#include <time.h>
+#include <sys/time.h>
 #include <string>
 
 #include "freertos/FreeRTOS.h"
@@ -11,6 +13,7 @@
 #include "esp_event.h"
 #include "esp_netif.h"
 #include "esp_wifi.h"
+#include "esp_sntp.h"
 #include "nvs_flash.h"
 #include "nvs.h"
 #include "esp_http_server.h"
@@ -38,7 +41,7 @@
 #include "wake_reply.h"
 
 static const char *TAG = "eda_robot";
-static const char *FW_VERSION = "3.6.17";
+static const char *FW_VERSION = "3.6.21";
 static volatile bool otaBusy = false;
 static volatile bool shutdownPending = false;
 static volatile bool cfgDirty = false;
@@ -76,6 +79,13 @@ static SSD1306 oled;
 static bool flagPwm = false;
 static bool flagAmp = false;
 static bool flagRadarPwr = false;
+/** 每日时刻表（SNTP 校时后生效；分钟 0..1439，-1=未设） */
+static bool radarScheduleEnable = false;
+static int radarSchedOnMin = -1;
+static int radarSchedOffMin = -1;
+static int64_t schedLastCheckUs = 0;
+static volatile bool timeSynced = false;
+static bool sntpStarted = false;
 static bool flagPeriphOff = false;  // 「关闭所有外设」开关
 static bool savedPwm = false;
 static bool savedAmp = false;
@@ -547,6 +557,136 @@ static bool parseWavPcm16(uint8_t *buf, size_t len, int16_t **pcm, size_t *nSamp
   *nSamples = frames;
   *owned = true;
   return true;
+}
+
+static bool setRadarPower(bool on);
+
+static int localTimeMinute() {
+  if (!timeSynced) return -1;
+  const time_t t = time(nullptr);
+  if (t < 1600000000) return -1;
+  struct tm lt;
+  localtime_r(&t, &lt);
+  return lt.tm_hour * 60 + lt.tm_min;
+}
+
+/** 当前是否落在 [开, 关) 窗口；跨日（如 22:00→08:00）时窗外为关。关时刻起即关。 */
+static bool radarScheduleWantOn(int curMin) {
+  if (curMin < 0) return false;
+  const int on = radarSchedOnMin;
+  const int off = radarSchedOffMin;
+  if (on < 0 && off < 0) return false;
+  if (on < 0) return curMin < off;
+  if (off < 0) return curMin >= on;
+  if (on == off) return true;
+  if (on < off) return curMin >= on && curMin < off;
+  return curMin >= on || curMin < off;
+}
+
+static void radarScheduleApply() {
+  if (!radarScheduleEnable || !timeSynced || flagPeriphOff) return;
+  if (radarSchedOnMin < 0 && radarSchedOffMin < 0) return;
+  const int curMin = localTimeMinute();
+  if (curMin < 0) return;
+  const bool want = radarScheduleWantOn(curMin);
+  if (want == flagRadarPwr) return;
+  if (setRadarPower(want)) {
+    ESP_LOGI(TAG, "radar schedule: %s at %02d:%02d (window %d-%d)", want ? "ON" : "OFF",
+             curMin / 60, curMin % 60, radarSchedOnMin, radarSchedOffMin);
+    cfgSave();
+  } else {
+    ESP_LOGW(TAG, "radar schedule: %s failed", want ? "ON" : "OFF");
+  }
+}
+
+static void localTimeStr(char *buf, size_t n) {
+  buf[0] = 0;
+  if (!timeSynced) return;
+  const time_t t = time(nullptr);
+  if (t < 1600000000) return;
+  struct tm lt;
+  localtime_r(&t, &lt);
+  strftime(buf, n, "%H:%M:%S", &lt);
+}
+
+static void formatHm(int min, char *buf, size_t n) {
+  if (min < 0 || min >= 1440) {
+    buf[0] = 0;
+    return;
+  }
+  snprintf(buf, n, "%02d:%02d", min / 60, min % 60);
+}
+
+/** 空串或 null → -1（禁用）；否则解析 HH:MM */
+static bool parseHm(const char *s, int &outMin) {
+  if (!s || !*s) {
+    outMin = -1;
+    return true;
+  }
+  int h = 0, m = 0;
+  if (sscanf(s, "%d:%d", &h, &m) != 2) return false;
+  if (h < 0 || h > 23 || m < 0 || m > 59) return false;
+  outMin = h * 60 + m;
+  return true;
+}
+
+static void sntpSyncCb(struct timeval *tv) {
+  (void)tv;
+  timeSynced = true;
+  schedLastCheckUs = 0;
+  ESP_LOGI(TAG, "SNTP time synced");
+}
+
+static void timeSyncOnGotIp() {
+  if (!sntpStarted) {
+    setenv("TZ", "CST-8", 1);
+    tzset();
+    esp_sntp_setoperatingmode(SNTP_OPMODE_POLL);
+    esp_sntp_setservername(0, "ntp.aliyun.com");
+    esp_sntp_setservername(1, "cn.pool.ntp.org");
+    esp_sntp_set_time_sync_notification_cb(sntpSyncCb);
+    esp_sntp_init();
+    sntpStarted = true;
+    ESP_LOGI(TAG, "SNTP started (CST-8)");
+  } else {
+    esp_sntp_restart();
+    ESP_LOGI(TAG, "SNTP restart");
+  }
+}
+
+static void radarScheduleJsonInto(char *buf, size_t buflen) {
+  char onHm[8], offHm[8], localTime[16];
+  formatHm(radarSchedOnMin, onHm, sizeof(onHm));
+  formatHm(radarSchedOffMin, offHm, sizeof(offHm));
+  localTimeStr(localTime, sizeof(localTime));
+  const bool active = radarScheduleEnable && timeSynced && !flagPeriphOff &&
+                      (radarSchedOnMin >= 0 || radarSchedOffMin >= 0);
+  const int curMin = localTimeMinute();
+  const bool wantOn = active && radarScheduleWantOn(curMin);
+  snprintf(buf, buflen,
+           ",\"timeSynced\":%s,\"localTime\":\"%s\""
+           ",\"schedule\":{\"enable\":%s,\"on\":\"%s\",\"off\":\"%s\",\"active\":%s,\"wantOn\":%s}",
+           timeSynced ? "true" : "false", localTime, radarScheduleEnable ? "true" : "false", onHm,
+           offHm, active ? "true" : "false", wantOn ? "true" : "false");
+}
+
+static void radarAppendPowerAndTimer(std::string &body) {
+  if (body.empty() || body.back() != '}') return;
+  body.pop_back();
+  body += ",\"power\":";
+  body += flagRadarPwr ? "true" : "false";
+  char sbuf[160];
+  radarScheduleJsonInto(sbuf, sizeof(sbuf));
+  body += sbuf;
+  body += '}';
+}
+
+static void radarScheduleTick() {
+  if (!radarScheduleEnable || !timeSynced || flagPeriphOff) return;
+  const int64_t nowUs = esp_timer_get_time();
+  if (schedLastCheckUs != 0 && (nowUs - schedLastCheckUs) < 1000000LL) return;
+  schedLastCheckUs = nowUs;
+  radarScheduleApply();
 }
 
 /** Q4 P-MOS：拉低 IO0_1 = 开雷达 3V3；开电即自动查询 */
@@ -1200,14 +1340,8 @@ static esp_err_t handleRadarPage(httpd_req_t *req) {
 static esp_err_t handleRadarGet(httpd_req_t *req) {
   char buf[1536];
   radar_json_summary(buf, sizeof(buf));
-  // append power flag without rewriting radar module
   std::string body = buf;
-  if (!body.empty() && body.back() == '}') {
-    body.pop_back();
-    body += ",\"power\":";
-    body += flagRadarPwr ? "true" : "false";
-    body += '}';
-  }
+  radarAppendPowerAndTimer(body);
   return sendJson(req, 200, body);
 }
 
@@ -1232,19 +1366,42 @@ static esp_err_t handleLogs(httpd_req_t *req) {
 
 static esp_err_t handleRadarPost(httpd_req_t *req) {
   auto a = loadArgs(req);
+  bool changed = false;
+  if (argsHasKey(a, "scheduleEnable")) {
+    radarScheduleEnable = argBool(a, "scheduleEnable", false);
+    changed = true;
+  }
+  if (argsHasKey(a, "scheduleOn")) {
+    int m = 0;
+    if (!parseHm(argStr(a, "scheduleOn", "").c_str(), m))
+      return sendJson(req, 400, "{\"ok\":false,\"error\":\"scheduleOn use HH:MM or empty\"}");
+    radarSchedOnMin = m;
+    changed = true;
+  }
+  if (argsHasKey(a, "scheduleOff")) {
+    int m = 0;
+    if (!parseHm(argStr(a, "scheduleOff", "").c_str(), m))
+      return sendJson(req, 400, "{\"ok\":false,\"error\":\"scheduleOff use HH:MM or empty\"}");
+    radarSchedOffMin = m;
+    changed = true;
+  }
   if (argsHasKey(a, "power")) {
-    if (!setRadarPower(argBool(a, "power", true)))
+    const bool on = argBool(a, "power", true);
+    if (!setRadarPower(on))
       return sendJson(req, 500, "{\"ok\":false,\"error\":\"radar power write failed\"}");
     cfgSave();
+    changed = true;
+  }
+  if (changed) {
+    if (argsHasKey(a, "scheduleEnable") || argsHasKey(a, "scheduleOn") ||
+        argsHasKey(a, "scheduleOff")) {
+      cfgSave();
+      radarScheduleApply();
+    }
     char buf[1536];
     radar_json_summary(buf, sizeof(buf));
     std::string body = buf;
-    if (!body.empty() && body.back() == '}') {
-      body.pop_back();
-      body += ",\"power\":";
-      body += flagRadarPwr ? "true" : "false";
-      body += '}';
-    }
+    radarAppendPowerAndTimer(body);
     return sendJson(req, 200, body);
   }
   // 旧客户端若仍传 on=：忽略（供电开即查询）
@@ -1265,7 +1422,8 @@ static esp_err_t handleRadarPost(httpd_req_t *req) {
   bool commandOk = false;
   if (cmd == "version") commandOk = radar_cmd_get_version();
   else if (cmd == "poll") commandOk = radar_cmd_get_det();
-  else return sendJson(req, 400, "{\"ok\":false,\"error\":\"use power or cmd=version|poll\"}");
+  else return sendJson(req, 400,
+                       "{\"ok\":false,\"error\":\"use power, scheduleEnable/On/Off, or cmd=version|poll\"}");
   if (!commandOk) {
     if (cmd == "poll" && !flagRadarPwr)
       return sendJson(req, 409, "{\"ok\":false,\"error\":\"radar power is off\"}");
@@ -1300,7 +1458,7 @@ static esp_err_t handleApiIndex(httpd_req_t *req) {
   body += "{\"path\":\"/api/beep\"},{\"path\":\"/api/oled\"},";
   body += "{\"path\":\"/api/ota\",\"methods\":[\"GET\",\"POST\"]},";
   body += "{\"path\":\"/api/logs\"},";
-  body += "{\"path\":\"/api/radar\",\"note\":\"power on/off (auto query when powered)\"},";
+  body += "{\"path\":\"/api/radar\",\"note\":\"power; scheduleOn/Off HH:MM + scheduleEnable\"},";
   body += "{\"path\":\"/api/radar/live\"},{\"path\":\"/radar\"}";
   body += "]}";
   return sendJson(req, 200, body);
@@ -1457,6 +1615,9 @@ static void cfgSave() {
   nvs_set_u8(h, "led2", clampU8(cfgSnapLed[2]));
   nvs_set_u8(h, "srv0", clampU8(cfgSnapSrv[0]));
   nvs_set_u8(h, "srv1", clampU8(cfgSnapSrv[1]));
+  nvs_set_u8(h, "rsch_en", radarScheduleEnable ? 1 : 0);
+  nvs_set_u16(h, "rsch_on", radarSchedOnMin < 0 ? 65535 : (uint16_t)radarSchedOnMin);
+  nvs_set_u16(h, "rsch_off", radarSchedOffMin < 0 ? 65535 : (uint16_t)radarSchedOffMin);
   nvs_commit(h);
   nvs_close(h);
   cfgDirty = false;
@@ -1494,6 +1655,13 @@ static void cfgLoad() {
     cfgSnapSrv[1] = v > 180 ? 180 : (int)v;
     servoAngleDeg[1] = cfgSnapSrv[1];
   }
+  if (nvs_get_u8(h, "rsch_en", &v) == ESP_OK) radarScheduleEnable = v != 0;
+  uint16_t u16 = 65535;
+  if (nvs_get_u16(h, "rsch_on", &u16) == ESP_OK)
+    radarSchedOnMin = u16 >= 1440 ? -1 : (int)u16;
+  u16 = 65535;
+  if (nvs_get_u16(h, "rsch_off", &u16) == ESP_OK)
+    radarSchedOffMin = u16 >= 1440 ? -1 : (int)u16;
   nvs_close(h);
   cfgLoaded = true;
   ESP_LOGI(TAG,
@@ -1591,14 +1759,18 @@ static esp_err_t handleStatus(httpd_req_t *req) {
   fanJsonInto(fan, sizeof(fan));
   char voice[280];
   voiceJsonInto(voice, sizeof(voice));
-  char buf[1600];
+  char localTime[16];
+  localTimeStr(localTime, sizeof(localTime));
+  char buf[1700];
   snprintf(buf, sizeof(buf),
            "{\"ok\":true,\"fw\":\"%s\",\"board\":\"v6-1\",\"ip\":\"%s\",\"rssi\":%d,"
+           "\"timeSynced\":%s,\"localTime\":\"%s\","
            "\"psram\":%s,\"psramBytes\":%u,"
            "\"xl9555\":%s,\"oled\":%s,\"pca9685\":%s,\"i2s\":%s,"
            "\"pwmEnable\":%s,\"ampEnable\":%s,\"volume\":%u,\"radarPower\":%s,\"peripheralsOff\":%s,\"otaBusy\":%s,"
            "\"leds\":[%d,%d,%d],\"fan\":%s,\"voice\":%s,\"i2c\":%s}",
-           FW_VERSION, ipStr, rssi, psramOk ? "true" : "false", (unsigned)psramBytes,
+           FW_VERSION, ipStr, rssi, timeSynced ? "true" : "false", localTime,
+           psramOk ? "true" : "false", (unsigned)psramBytes,
            xl.present() ? "true" : "false", oled.present() ? "true" : "false",
            pca.present() ? "true" : "false", i2sReady ? "true" : "false",
            flagPwm ? "true" : "false", flagAmp ? "true" : "false",
@@ -2260,6 +2432,7 @@ static void wifi_event_handler(void *, esp_event_base_t base, int32_t id, void *
   } else if (base == WIFI_EVENT && id == WIFI_EVENT_STA_DISCONNECTED) {
     const bool hadIp = ipStr[0] != 0;
     wifiOk = false;
+    timeSynced = false;
     ipStr[0] = 0;
     if (hadIp) oledShowHome(true);
     esp_wifi_connect();
@@ -2268,6 +2441,7 @@ static void wifi_event_handler(void *, esp_event_base_t base, int32_t id, void *
     snprintf(ipStr, sizeof(ipStr), IPSTR, IP2STR(&event->ip_info.ip));
     wifiOk = true;
     ESP_LOGI(TAG, "Got IP: %s", ipStr);
+    timeSyncOnGotIp();
     oledShowHome(true);
   }
 }
@@ -2307,6 +2481,7 @@ static void background_task(void *) {
     radar_get_snapshot(rs);
     if (fanGestureEnable && pca.present()) updateFanGesture(rs);
     if (fanAutoEnable && pca.present()) updateRadarFan(rs);
+    radarScheduleTick();
     if (oled.present()) oledShowHome(false);
     const int64_t now = esp_timer_get_time();
     if (cfgDirty && (now - lastCfgFlushUs) >= 2000000) {

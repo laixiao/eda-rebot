@@ -36,6 +36,7 @@ idf_component_register(
         esp_event
         esp_http_server
         esp_timer
+        lwip
         esp_psram
         esp_hw_support
         app_update

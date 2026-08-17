@@ -145,6 +145,18 @@ class RobotApi:
     def radar_power(self, on: bool = True) -> dict:
         return self._call("/api/radar", {"power": on}, method="POST")
 
+    def radar_schedule(self, enable: bool | None = None, on_at: str | None = None,
+                       off_at: str | None = None) -> dict:
+        """Daily HH:MM schedule (requires SNTP). Empty on_at/off_at clears that side."""
+        body: dict[str, Any] = {}
+        if enable is not None:
+            body["scheduleEnable"] = bool(enable)
+        if on_at is not None:
+            body["scheduleOn"] = on_at
+        if off_at is not None:
+            body["scheduleOff"] = off_at
+        return self._call("/api/radar", body, method="POST")
+
     def radar_enable(self, on: bool = True) -> dict:
         """Deprecated: acquisition follows power. Maps to radar_power()."""
         return self.radar_power(on)

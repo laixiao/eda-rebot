@@ -40,9 +40,12 @@ python scripts/pack_font_cjk.py
 
 ## 雷达
 
-1. `POST /api/radar {"power":true}` — 打开 Q4 供电
-2. `POST /api/radar {"on":true}` — 开始采集（须已供电；关供电会同步关采集）
-3. 浏览器首页「设备日志」右侧雷达调试区，或 `GET /api/radar/live`（`/radar` 会跳转首页）
+1. `POST /api/radar {"power":true}` — 打开 Q4 供电（开电即自动查询）
+2. **每日时刻**（WiFi 获 IP 后 SNTP 校时，北京时间 CST-8）：
+   - `POST /api/radar {"scheduleEnable":true,"scheduleOn":"08:00","scheduleOff":"22:00"}`
+   - 空串 `scheduleOn`/`scheduleOff` 清除该侧；未校时前不执行
+   - 网页开关与时刻改完即生效（无保存按钮）
+3. `GET /api/radar` 含 `timeSynced`、`localTime`、`schedule`；`GET /api/status` 含校时状态
 
 ## Web 烧录
 

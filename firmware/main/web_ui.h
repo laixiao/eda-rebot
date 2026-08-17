@@ -263,6 +263,16 @@ header .switch-periph.on{border-color:#f85149;background:#3b1212;color:#ff7b72}
         <span id="labFanGest">手势切档</span>
       </label>
     </div>
+    <div class="row radar-sched" style="margin:0">
+      <label class="switch switch-acq" title="WiFi 校时后每天到点开/关雷达供电">
+        <input id="swRadarSched" type="checkbox" onchange="setRadarSchedule()"/>
+        <span class="track"></span>
+        <span id="labRadarSched">每日时刻</span>
+      </label>
+      <label>开</label><input id="rdSchedOn" type="time" value="08:00" onchange="setRadarSchedule()"/>
+      <label>关</label><input id="rdSchedOff" type="time" value="22:00" onchange="setRadarSchedule()"/>
+      <span id="rdSchedStatus" class="log-meta"></span>
+    </div>
   </div>
   <div class="radar-body">
     <div class="radar-viz">
@@ -360,6 +370,30 @@ function phaseLabel(p){
 }
 function gestPhaseLabel(p){
   return ({disabled:'未启用',no_power:'雷达未供电',idle:'待命',holding:'近距停留中',wait_leave:'已切档·移开手'}[p])||p||'—';
+}
+function renderRadarSchedule(rd,s){
+  const st=document.getElementById('rdSchedStatus');
+  const sch=rd&&rd.schedule;
+  const synced=!!(rd&&rd.timeSynced)||!!(s&&s.timeSynced);
+  const lt=(rd&&rd.localTime)||(s&&s.localTime)||'';
+  if(sch){
+    const sw=document.getElementById('swRadarSched');
+    const lab=document.getElementById('labRadarSched');
+    if(sw && document.activeElement!==sw) sw.checked=!!sch.enable;
+    if(lab) lab.textContent=sch.enable?'每日时刻 开':'每日时刻';
+    const onEl=document.getElementById('rdSchedOn');
+    const offEl=document.getElementById('rdSchedOff');
+    if(onEl && sch.on && document.activeElement!==onEl) onEl.value=sch.on;
+    if(offEl && sch.off && document.activeElement!==offEl) offEl.value=sch.off;
+  }
+  if(!st) return;
+  if(!sch||!sch.enable){st.textContent=synced&&lt?`校时 ${lt}`:'';return}
+  let msg;
+  if(!synced) msg='已设时刻，等待 WiFi 校时…';
+  else if(!sch.active) msg='已设时刻，等待校时…';
+  else msg=(sch.wantOn?'窗口内 · 应供电':'窗口外 · 应关电')+` · ${sch.on||'—'}开/${sch.off||'—'}关`;
+  if(lt) msg+=` · ${lt}`;
+  st.textContent=msg;
 }
 const ledTimers=[0,0,0];
 function renderFan(f){
@@ -459,7 +493,24 @@ async function refresh(){
     const labP=document.getElementById('labRadarPwr');
     if(pwr && document.activeElement!==pwr) pwr.checked=!!rd.power;
     if(labP) labP.textContent=rd.power?'供电 开':'供电';
+    renderRadarSchedule(rd,s);
   }
+}
+async function setRadarSchedule(){
+  const sw=document.getElementById('swRadarSched');
+  const onEl=document.getElementById('rdSchedOn');
+  const offEl=document.getElementById('rdSchedOff');
+  const body={
+    scheduleEnable:!!(sw&&sw.checked),
+    scheduleOn:(onEl&&onEl.value)||'',
+    scheduleOff:(offEl&&offEl.value)||''
+  };
+  if(sw) sw.disabled=true;
+  try{
+    const j=await api('POST','/api/radar',body);
+    if(j&&j.ok===false && sw) sw.checked=!body.scheduleEnable;
+  }finally{if(sw) sw.disabled=false}
+  refresh();
 }
 async function setFanAuto(on){
   const sw=document.getElementById('swFanAuto');
