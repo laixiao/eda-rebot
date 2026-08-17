@@ -36,33 +36,62 @@ input[type=file]{max-width:100%;color:var(--muted)}
 .progress>i{display:block;height:100%;width:0;background:var(--acc);transition:width .15s}
 pre{margin:0;white-space:pre-wrap;word-break:break-all;font:12px/1.4 ui-monospace,Consolas,monospace;color:#c9d1d9;max-height:180px;overflow:auto}
 .span-all{grid-column:1/-1}
-.radar-card{display:flex;flex-direction:column;gap:12px}
-.radar-head{display:flex;flex-wrap:wrap;gap:10px 16px;align-items:center;justify-content:space-between}
-.radar-head h2{margin:0}
-.radar-head-left{display:flex;flex-wrap:wrap;gap:8px 10px;align-items:center;min-width:0}
+.radar-card{display:flex;flex-direction:column;gap:16px;padding:16px 18px}
+.radar-head{display:flex;flex-wrap:wrap;gap:10px 16px;align-items:center;justify-content:space-between;padding-bottom:12px;border-bottom:1px solid var(--line)}
+.radar-head h2{margin:0;font-size:12px;letter-spacing:.12em}
 .radar-status{display:flex;flex-wrap:wrap;gap:6px;align-items:center}
-.radar-actions{margin:0}
-.radar-body{display:grid;grid-template-columns:minmax(240px,380px) 1fr;gap:14px;align-items:start}
+.radar-status .badge{background:#21262d;color:var(--muted);border:1px solid var(--line);font-weight:500}
+.radar-status .badge.off{background:#161b22;color:#6e7681}
+.radar-status .badge.warn{background:#3b2a08;border-color:#9e6a03;color:#f0c674}
+.radar-status .badge:not(.off):not(.warn){background:#0d3b24;border-color:#238636;color:var(--acc)}
+.radar-body{display:grid;grid-template-columns:minmax(260px,1.1fr) minmax(280px,.95fr);gap:18px;align-items:start}
 @media(max-width:900px){.radar-body{grid-template-columns:1fr}}
-.radar-viz{min-width:0}
-.radar-viz .hint{text-align:center;color:var(--muted);font-size:11px;margin:6px 0 0}
-.radar-side{min-width:0;display:flex;flex-direction:column;gap:10px}
-.fan-box{background:#0d1117;border:1px solid var(--line);border-radius:8px;padding:10px}
-.fan-box .fan-title{font-size:11px;color:var(--muted);text-transform:uppercase;letter-spacing:.04em;margin-bottom:6px}
-.fan-box .fan-line{font:12px/1.45 ui-monospace,Consolas,monospace;color:#c9d1d9}
-.radar-side pre{max-height:none;overflow:visible}
-.kpi{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:6px;margin-top:10px}
-.kpi div{background:#0d1117;border:1px solid var(--line);border-radius:8px;padding:8px}
-.kpi b{display:block;font-size:15px;font-variant-numeric:tabular-nums;margin-top:2px}
-.kpi span{color:var(--muted);font-size:11px}
-.chips{display:flex;flex-wrap:wrap;gap:6px;margin-top:8px}
-.chip{padding:3px 8px;border-radius:999px;background:#21262d;border:1px solid var(--line);font-size:11px}
+.radar-viz{min-width:0;display:flex;flex-direction:column;gap:10px}
+.radar-stage{position:relative;width:100%;max-width:min(100%,72vh);aspect-ratio:1;margin:0 auto;background:#0a0d12;border:1px solid var(--line);border-radius:14px;overflow:hidden}
+#cv{position:absolute;inset:0;width:100%;height:100%;display:block;background:transparent}
+.radar-viz .hint{position:absolute;left:0;right:0;bottom:12px;margin:0;text-align:center;color:#8b949e;font-size:11px;letter-spacing:.1em;pointer-events:none}
+.radar-side{min-width:0;display:flex;flex-direction:column;gap:12px}
+.radar-ctl{background:#0d1117;border:1px solid var(--line);border-radius:12px;padding:6px 4px}
+.ctl-row{display:flex;flex-wrap:wrap;gap:4px 4px;align-items:center;padding:10px 12px}
+.ctl-row+.ctl-row{border-top:1px solid #21262d}
+.radar-ctl .switch{padding:4px 8px;border-radius:8px;gap:8px;color:var(--fg);font-size:13px}
+.radar-ctl .switch .track{width:36px;height:20px}
+.radar-ctl .switch .track::after{width:16px;height:16px}
+.radar-ctl .switch input:checked+.track::after{transform:translateX(16px)}
+.radar-ctl .switch-pwr input:checked+.track{background:#d29922}
+.radar-ctl .switch-fan input:checked+.track{background:#3fb950}
+.radar-ctl .switch-gest input:checked+.track{background:#39c5cf}
+.radar-ctl .switch-ign input:checked+.track{background:#f85149}
+.radar-ctl .switch-acq input:checked+.track{background:#58a6ff}
+.ang-pair,.time-pair{display:inline-flex;align-items:center;gap:6px;margin-left:4px}
+.ang-pair input[type=number]{width:54px;padding:5px 6px;text-align:center;font-variant-numeric:tabular-nums}
+.time-pair input[type=time]{width:118px;background:#161b22;color:var(--fg);border:1px solid var(--line);border-radius:6px;padding:5px 8px;color-scheme:dark}
+.fan-box,.radar-targets{background:#0d1117;border:1px solid var(--line);border-radius:12px;padding:12px 14px}
+.fan-box .fan-title,.radar-targets .fan-title{font-size:10px;color:var(--muted);text-transform:uppercase;letter-spacing:.1em;margin-bottom:8px}
+.fan-box .fan-line{font:12px/1.5 ui-monospace,Consolas,monospace;color:#c9d1d9}
+.fan-kv{display:grid;grid-template-columns:auto 1fr auto 1fr;gap:6px 12px;align-items:baseline;font-size:12px}
+.fan-kv span{color:var(--muted)}
+.fan-kv b{font-weight:600;font-variant-numeric:tabular-nums}
+.fan-note{margin-top:8px;font-size:12px;color:#c9d1d9;line-height:1.45}
+.fan-note.dim{color:var(--muted)}
+.radar-side pre{max-height:none;overflow:visible;font-size:11px}
+.kpi{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));background:#0d1117;border:1px solid var(--line);border-radius:12px;overflow:hidden}
+.kpi div{padding:10px 12px;background:transparent;border:none;border-radius:0}
+.kpi div+div{border-left:1px solid var(--line)}
+.kpi b{display:block;font-size:16px;font-weight:600;font-variant-numeric:tabular-nums;margin-top:4px}
+.kpi span{color:var(--muted);font-size:10px;letter-spacing:.08em;text-transform:uppercase}
+.chips{display:flex;flex-wrap:wrap;gap:6px}
+.chip{padding:3px 8px;border-radius:999px;background:#161b22;border:1px solid var(--line);font-size:11px;color:var(--muted)}
 .chip.on{background:#0d3b24;border-color:#238636;color:var(--acc)}
 .chip.hot{background:#3b2208;border-color:#f0883e;color:#f0883e}
-#cv{width:100%;height:auto;aspect-ratio:1;max-height:min(52vh,420px);background:#0d1117;border:1px solid var(--line);border-radius:8px;display:block}
 .radar-side table{width:100%;border-collapse:collapse;font-size:12px}
-.radar-side td,.radar-side th{padding:4px;border-bottom:1px solid var(--line);text-align:left}
-.radar-side th{color:var(--muted);font-weight:500}
+.radar-side td,.radar-side th{padding:6px 4px;border-bottom:1px solid #21262d;text-align:left}
+.radar-side th{color:var(--muted);font-weight:500;font-size:11px}
+.radar-more{border:1px solid var(--line);border-radius:10px;padding:8px 12px;background:#0d1117}
+.radar-more summary{cursor:pointer;color:var(--muted);font-size:11px;letter-spacing:.06em;list-style:none}
+.radar-more summary::-webkit-details-marker{display:none}
+.radar-more summary::before{content:"▸ ";color:#6e7681}
+.radar-more[open] summary::before{content:"▾ "}
 .log-card .log-console{min-height:220px;height:min(40vh,420px);max-height:none;background:#0d1117;border:1px solid var(--line);border-radius:6px;padding:8px;white-space:pre;overflow:auto}
 .log-meta{font-size:12px;color:var(--muted)}
 .ok{color:var(--acc)}.bad{color:var(--bad)}.warn{color:var(--warn)}
@@ -86,15 +115,6 @@ label{color:var(--muted)}
 .switch input:checked+.track{background:#238636}
 .switch input:checked+.track::after{transform:translateX(20px)}
 .switch input:disabled+.track{opacity:.45}
-.radar-actions .switch{padding:6px 10px;border-radius:8px;border:1px solid transparent;gap:8px}
-.radar-actions .switch-pwr{background:#3b2208;border-color:#9e6a03;color:#f0c674}
-.radar-actions .switch-pwr input:checked+.track{background:#d29922}
-.radar-actions .switch-acq{background:#0d2d4a;border-color:#1f6feb;color:#79c0ff}
-.radar-actions .switch-acq input:checked+.track{background:#1f6feb}
-.radar-actions .switch-fan{background:#0d3b24;border-color:#238636;color:#3fb950}
-.radar-actions .switch-fan input:checked+.track{background:#238636}
-.radar-actions .switch-gest{background:#0d2f2f;border-color:#1b9e9e;color:#56d4c8}
-.radar-actions .switch-gest input:checked+.track{background:#1b9e9e}
 .rec-voice{margin-top:12px;padding-top:12px;border-top:1px solid var(--line)}
 .rec-voice .switch-voice{padding:6px 10px;border-radius:8px;border:1px solid #238636;background:#0d3b24;color:#3fb950;gap:8px}
 .rec-voice .switch-voice input:checked+.track{background:#238636}
@@ -238,46 +258,19 @@ header .switch-periph.on{border-color:#f85149;background:#3b1212;color:#ff7b72}
 </section>
 <section class="span-all radar-card" id="radarPanel">
   <div class="radar-head">
-    <div class="radar-head-left">
-      <h2>60G 雷达 · LED_1 风扇</h2>
-      <div class="radar-status" title="链路 / 供电 / OUT">
-        <span id="rdLink" class="badge off">等待数据</span>
-        <span id="rdPwr" class="badge off">未供电</span>
-        <span id="rdOut" class="badge off">OUT 低</span>
-      </div>
-    </div>
-    <div class="row radar-actions">
-      <label class="switch switch-pwr" title="Q4 雷达 3V3（开电即查询）">
-        <input id="swRadarPwr" type="checkbox" onchange="setRadarPower(this.checked)"/>
-        <span class="track"></span>
-        <span id="labRadarPwr">供电</span>
-      </label>
-      <label class="switch switch-fan" title="有人→按档位开；无人 2s×3 才关。可与手势切档同时开">
-        <input id="swFanAuto" type="checkbox" onchange="setFanAuto(this.checked)"/>
-        <span class="track"></span>
-        <span id="labFanAuto">控风扇</span>
-      </label>
-      <label class="switch switch-gest" title="近距≤0.20m 停留2s 循环档位 50%→75%→100；只管档位，不关控风扇">
-        <input id="swFanGest" type="checkbox" onchange="setFanGesture(this.checked)"/>
-        <span class="track"></span>
-        <span id="labFanGest">手势切档</span>
-      </label>
-    </div>
-    <div class="row radar-sched" style="margin:0">
-      <label class="switch switch-acq" title="WiFi 校时后每天到点开/关雷达供电">
-        <input id="swRadarSched" type="checkbox" onchange="setRadarSchedule()"/>
-        <span class="track"></span>
-        <span id="labRadarSched">每日时刻</span>
-      </label>
-      <label>开</label><input id="rdSchedOn" type="time" value="08:00" onchange="setRadarSchedule()"/>
-      <label>关</label><input id="rdSchedOff" type="time" value="22:00" onchange="setRadarSchedule()"/>
-      <span id="rdSchedStatus" class="log-meta"></span>
+    <h2>60G 雷达</h2>
+    <div class="radar-status" title="链路 / 供电 / OUT">
+      <span id="rdLink" class="badge off">等待数据</span>
+      <span id="rdPwr" class="badge off">未供电</span>
+      <span id="rdOut" class="badge off">OUT 低</span>
     </div>
   </div>
   <div class="radar-body">
     <div class="radar-viz">
-      <canvas id="cv" width="420" height="420"></canvas>
-      <div class="hint">FOV ±60° · 10m</div>
+      <div class="radar-stage">
+        <canvas id="cv" width="420" height="420"></canvas>
+        <div class="hint" id="rdFovHint">FOV ±60° · 10m</div>
+      </div>
       <div class="kpi">
         <div><span>存在</span><b id="kPresent">—</b></div>
         <div><span>距离</span><b id="kRange">—</b></div>
@@ -287,24 +280,70 @@ header .switch-periph.on{border-color:#f85149;background:#3b1212;color:#ff7b72}
       <div class="chips" id="rdChips"></div>
     </div>
     <div class="radar-side">
+      <div class="radar-ctl">
+        <div class="ctl-row">
+          <label class="switch switch-pwr" title="Q4 雷达 3V3（开电即查询）">
+            <input id="swRadarPwr" type="checkbox" onchange="setRadarPower(this.checked)"/>
+            <span class="track"></span>
+            <span id="labRadarPwr">供电</span>
+          </label>
+          <label class="switch switch-fan" title="有人→按档位开；无人 2s×3 才关。可与手势切档同时开">
+            <input id="swFanAuto" type="checkbox" onchange="setFanAuto(this.checked)"/>
+            <span class="track"></span>
+            <span id="labFanAuto">控风扇</span>
+          </label>
+          <label class="switch switch-gest" title="近距≤0.20m 停留2s 循环档位 50%→75%→100；只管档位，不关控风扇">
+            <input id="swFanGest" type="checkbox" onchange="setFanGesture(this.checked)"/>
+            <span class="track"></span>
+            <span id="labFanGest">手势切档</span>
+          </label>
+        </div>
+        <div class="ctl-row">
+          <label class="switch switch-ign" title="开：填写角度区间内的目标不参与控风扇/手势切档；画布仍显示。默认 0°～-60°">
+            <input id="swIgnoreAng" type="checkbox" onchange="setIgnoreAng()"/>
+            <span class="track"></span>
+            <span id="labIgnoreAng">忽略扇区</span>
+          </label>
+          <span class="ang-pair">
+            <input id="rdIgnFrom" type="number" min="-60" max="60" step="1" value="0" title="起始角度" onchange="setIgnoreAng()"/>
+            <span class="log-meta">°</span>
+            <span class="log-meta">~</span>
+            <input id="rdIgnTo" type="number" min="-60" max="60" step="1" value="-60" title="结束角度" onchange="setIgnoreAng()"/>
+            <span class="log-meta">°</span>
+          </span>
+        </div>
+        <div class="ctl-row">
+          <label class="switch switch-acq" title="WiFi 校时后每天到点开/关雷达供电">
+            <input id="swRadarSched" type="checkbox" onchange="setRadarSchedule()"/>
+            <span class="track"></span>
+            <span id="labRadarSched">每日时刻</span>
+          </label>
+          <span class="time-pair">
+            <input id="rdSchedOn" type="time" value="08:00" onchange="setRadarSchedule()" title="开"/>
+            <span class="log-meta">→</span>
+            <input id="rdSchedOff" type="time" value="22:00" onchange="setRadarSchedule()" title="关"/>
+          </span>
+          <span id="rdSchedStatus" class="log-meta"></span>
+        </div>
+      </div>
       <div class="fan-box">
         <div class="fan-title">风扇联动</div>
         <div id="fanStatus" class="fan-line">加载中...</div>
       </div>
-      <div>
-        <h2 style="margin:0 0 6px">目标</h2>
+      <div class="radar-targets">
+        <div class="fan-title">目标</div>
         <table>
           <thead><tr><th>slot</th><th>距离</th><th>角度</th><th>速度</th></tr></thead>
           <tbody id="objs"><tr><td colspan="4" style="color:var(--muted)">等待数据…</td></tr></tbody>
         </table>
       </div>
-      <details open>
-        <summary style="cursor:pointer;color:var(--muted);font-size:12px">检测摘要</summary>
-        <pre id="detLine" style="margin-top:6px">—</pre>
+      <details class="radar-more">
+        <summary>检测摘要</summary>
+        <pre id="detLine" style="margin-top:8px">—</pre>
       </details>
-      <details>
-        <summary style="cursor:pointer;color:var(--muted);font-size:12px">模块 / 诊断</summary>
-        <div class="row" style="margin-top:6px">
+      <details class="radar-more">
+        <summary>模块 / 诊断</summary>
+        <div class="row" style="margin-top:8px">
           <button onclick="radarCmd('version')" title="向 MS60 发 0xFE 读 SDK/硬件版本">读模块版本</button>
         </div>
         <pre id="moduleInfo" style="margin-top:6px">—</pre>
@@ -380,7 +419,7 @@ function renderRadarSchedule(rd,s){
     const sw=document.getElementById('swRadarSched');
     const lab=document.getElementById('labRadarSched');
     if(sw && document.activeElement!==sw) sw.checked=!!sch.enable;
-    if(lab) lab.textContent=sch.enable?'每日时刻 开':'每日时刻';
+    if(lab) lab.textContent='每日时刻';
     const onEl=document.getElementById('rdSchedOn');
     const offEl=document.getElementById('rdSchedOff');
     if(onEl && sch.on && document.activeElement!==onEl) onEl.value=sch.on;
@@ -402,11 +441,11 @@ function renderFan(f){
   const sw=document.getElementById('swFanAuto');
   const lab=document.getElementById('labFanAuto');
   if(sw && document.activeElement!==sw) sw.checked=!!f.auto;
-  if(lab) lab.textContent=f.auto?'控风扇 开':'控风扇';
+  if(lab) lab.textContent='控风扇';
   const swG=document.getElementById('swFanGest');
   const labG=document.getElementById('labFanGest');
   if(swG && document.activeElement!==swG) swG.checked=!!f.gesture;
-  if(labG) labG.textContent=f.gesture?'手势切档 开':'手势切档';
+  if(labG) labG.textContent='手势切档';
   let prog='';
   const needOn=f.need||1;
   const needOff=f.offNeed||f.confirm||3;
@@ -429,11 +468,11 @@ function renderFan(f){
     gest=`手势档 <b>${f.gear??0}%</b>（${lv}）· <b>${gestPhaseLabel(f.gestPhase)}</b> · ${hold}/${need} ms · 距 ${rng}<br>`;
   }
   box.innerHTML=
-    `<b>${phaseLabel(f.phase)}</b> · LED_1 ${f.on?'<span class=ok>开</span>':'关'} · ${prog}<br>`+
-    gest+
-    `强度 ${f.intensity??0}% · 记忆 ${f.savedIntensity??'—'}%（${f.savedLed1??'—'}/${f.savedLedAll??'—'}）<br>`+
-    `判定：${f.reason||'—'}<br>`+
-    `上次：${f.lastAction||'—'}`;
+    `<div class="fan-kv"><span>状态</span><b>${phaseLabel(f.phase)}</b><span>LED_1</span><b class="${f.on?'ok':''}">${f.on?'开':'关'}</b></div>`+
+    `<div class="fan-kv" style="margin-top:6px"><span>进度</span><b>${prog}</b><span>强度</span><b>${f.intensity??0}%</b></div>`+
+    (gest?`<div class="fan-note">${gest.replace(/<br>/g,' · ')}</div>`:'')+
+    `<div class="fan-note dim">记忆 ${f.savedIntensity??'—'}% · ${f.reason||'—'}</div>`+
+    `<div class="fan-note dim">上次 ${f.lastAction||'—'}</div>`;
 }
 function renderVoice(v){
   const box=document.getElementById('voiceStatus');
@@ -492,7 +531,8 @@ async function refresh(){
     const pwr=document.getElementById('swRadarPwr');
     const labP=document.getElementById('labRadarPwr');
     if(pwr && document.activeElement!==pwr) pwr.checked=!!rd.power;
-    if(labP) labP.textContent=rd.power?'供电 开':'供电';
+    if(labP) labP.textContent='供电';
+    renderIgnore(rd);
     renderRadarSchedule(rd,s);
   }
 }
@@ -538,6 +578,46 @@ async function setRadarPower(on){
     if(!j||j.ok===false){if(sw) sw.checked=!on}
   }finally{if(sw) sw.disabled=false}
   refresh();
+}
+function clampAng(v){
+  v=Math.round(+v);
+  if(!Number.isFinite(v)) v=0;
+  return Math.max(-60,Math.min(60,v));
+}
+function ignoreInfo(s){
+  const ig=(s&&s.ignore)||{};
+  const en=!!(ig.enable??s.ignoreNeg60);
+  let a=Number(ig.from), b=Number(ig.to);
+  if(!Number.isFinite(a)) a=0;
+  if(!Number.isFinite(b)) b=-60;
+  return {en, from:a, to:b, lo:Math.min(a,b), hi:Math.max(a,b)};
+}
+function renderIgnore(s){
+  const ig=ignoreInfo(s);
+  const sw=document.getElementById('swIgnoreAng');
+  const lab=document.getElementById('labIgnoreAng');
+  if(sw && document.activeElement!==sw) sw.checked=ig.en;
+  if(lab) lab.textContent='忽略扇区';
+  const fromEl=document.getElementById('rdIgnFrom');
+  const toEl=document.getElementById('rdIgnTo');
+  if(fromEl && document.activeElement!==fromEl) fromEl.value=String(ig.from);
+  if(toEl && document.activeElement!==toEl) toEl.value=String(ig.to);
+}
+async function setIgnoreAng(){
+  const sw=document.getElementById('swIgnoreAng');
+  const fromEl=document.getElementById('rdIgnFrom');
+  const toEl=document.getElementById('rdIgnTo');
+  const from=clampAng(fromEl&&fromEl.value);
+  const to=clampAng(toEl&&toEl.value);
+  if(fromEl) fromEl.value=String(from);
+  if(toEl) toEl.value=String(to);
+  const body={ignoreEnable:!!(sw&&sw.checked), ignoreFrom:from, ignoreTo:to};
+  if(sw) sw.disabled=true;
+  try{
+    const j=await api('POST','/api/radar',body);
+    if(j&&j.ok===false && sw) sw.checked=!body.ignoreEnable;
+  }finally{if(sw) sw.disabled=false}
+  refresh();refreshRadarLive();
 }
 async function shutdownDevice(){
   if(!confirm('关闭所有外设并进入深度睡眠？需断电或按 EN 恢复。'))return;
@@ -780,13 +860,25 @@ async function refreshLogs(){
 function toggleLogs(){logPaused=!logPaused;document.getElementById('logPause').textContent=logPaused?'继续':'暂停';if(!logPaused)refreshLogs()}
 function clearLogs(){logLines=[];document.getElementById('deviceLog').textContent='显示已清空'}
 const cv=document.getElementById('cv'),ctx=cv.getContext('2d');
+let lastRadar=null,radarCx=210,radarCy=210;
+function syncRadarCanvas(){
+  const box=cv.parentElement;
+  const css=Math.max(160,Math.round((box&&box.clientWidth)||420));
+  const dpr=Math.max(1,Math.min(2,window.devicePixelRatio||1));
+  const px=Math.round(css*dpr);
+  if(cv.width!==px||cv.height!==px){cv.width=px;cv.height=px}
+  ctx.setTransform(dpr,0,0,dpr,0,0);
+  return css;
+}
 function polar(r_mm,a_deg,R){
   const r=Math.min(r_mm/10000,1)*R*0.92;
   const rad=(a_deg-90)*Math.PI/180;
-  return [cv.width/2+r*Math.cos(rad), cv.height/2+r*Math.sin(rad)];
+  return [radarCx+r*Math.cos(rad), radarCy+r*Math.sin(rad)];
 }
 function drawRadar(s){
-  const W=cv.width,H=cv.height,cx=W/2,cy=H/2,R=Math.min(W,H)/2-12;
+  lastRadar=s||lastRadar||{};
+  const W=syncRadarCanvas(),H=W,cx=W/2,cy=H/2,R=Math.min(W,H)/2-12;
+  radarCx=cx;radarCy=cy;
   ctx.clearRect(0,0,W,H);
   ctx.fillStyle='#0d1117';ctx.fillRect(0,0,W,H);
   ctx.beginPath();ctx.moveTo(cx,cy);
@@ -802,6 +894,13 @@ function drawRadar(s){
     const[x,y]=polar(10000,a,R);
     ctx.beginPath();ctx.moveTo(cx,cy);ctx.lineTo(x,y);ctx.strokeStyle='#21262d';ctx.stroke();
     ctx.fillStyle='#8b949e';ctx.fillText(a+'°',x-8,y-4);
+  }
+  const ig=ignoreInfo(s);
+  if(ig.en){
+    ctx.beginPath();ctx.moveTo(cx,cy);
+    ctx.arc(cx,cy,R,(ig.lo-90)*Math.PI/180,(ig.hi-90)*Math.PI/180);ctx.closePath();
+    ctx.fillStyle='rgba(248,81,73,0.14)';ctx.fill();
+    ctx.strokeStyle='rgba(248,81,73,0.5)';ctx.lineWidth=1.5;ctx.stroke();
   }
   const trail=s.trail||[];
   for(let i=0;i<trail.length;i++){
@@ -821,13 +920,28 @@ function drawRadar(s){
   const objs=powered?((s.multiValid&&s.objs&&s.objs.length)?s.objs:(s.primaryValid&&s.range_mm?[{slot:0,range_mm:s.range_mm,angle_deg:s.angle_deg}]:[])):[];
   objs.forEach((o,i)=>{
     const[x,y]=polar(o.range_mm,o.angle_deg,R);
+    const ignored=angleIgnored(s,o.angle_deg);
     ctx.beginPath();ctx.arc(x,y,8,0,6.28);
-    ctx.fillStyle=i===0?'#3dd68c':'#58a6ff';ctx.fill();
-    ctx.strokeStyle='#fff';ctx.lineWidth=1.5;ctx.stroke();
-    ctx.fillStyle='#e6edf3';ctx.font='12px sans-serif';
-    ctx.fillText('slot '+(o.slot??i)+' '+(o.range_mm/1000).toFixed(2)+'m '+o.angle_deg+'°',x+10,y-6);
+    ctx.fillStyle=ignored?'#6e7681':(i===0?'#3dd68c':'#58a6ff');ctx.fill();
+    ctx.strokeStyle=ignored?'#8b949e':'#fff';ctx.lineWidth=1.5;ctx.stroke();
+    ctx.fillStyle=ignored?'#8b949e':'#e6edf3';ctx.font='12px sans-serif';
+    ctx.fillText('slot '+(o.slot??i)+' '+(o.range_mm/1000).toFixed(2)+'m '+o.angle_deg+'°'+(ignored?' 忽略':''),x+10,y-6);
   });
   ctx.beginPath();ctx.arc(cx,cy,5,0,6.28);ctx.fillStyle='#f0883e';ctx.fill();
+}
+function angleIgnored(s,a){
+  const ig=ignoreInfo(s);
+  return ig.en && a!=null && a>=ig.lo && a<=ig.hi;
+}
+function radarHasUsable(s){
+  if(!s) return false;
+  if((s.primaryValid||s.is_detected)&&!angleIgnored(s,s.angle_deg)) return true;
+  if(s.multiValid&&s.objs){
+    for(const o of s.objs){
+      if(o && !angleIgnored(s,o.angle_deg)) return true;
+    }
+  }
+  return false;
 }
 function setRadarChips(s){
   const powered=!!(s.power||s.enabled);
@@ -841,6 +955,10 @@ function setRadarChips(s){
 }
 function renderRadarLive(s){
   const powered=!!(s.power||s.enabled);
+  const ig=ignoreInfo(s);
+  renderIgnore(s);
+  const hint=document.getElementById('rdFovHint');
+  if(hint) hint.textContent=ig.en?('FOV ±60° · 10m · 已忽略 '+ig.lo+'~'+ig.hi+'°'):'FOV ±60° · 10m';
   document.getElementById('rdLink').textContent=s.uart?(s.link?'链路OK':'等待数据'):'UART关';
   document.getElementById('rdLink').className='badge'+(s.uart?(s.link?'':' warn'):' off');
   const pwrEl=document.getElementById('rdPwr');
@@ -850,7 +968,8 @@ function renderRadarLive(s){
   }
   document.getElementById('rdOut').textContent=s.gpioOut?'OUT 高':'OUT 低';
   document.getElementById('rdOut').className='badge'+(s.gpioOut?'':' off');
-  document.getElementById('kPresent').innerHTML=!powered?'<span class=warn>未供电</span>':(s.present?'<span class=ok>有</span>':'<span class=bad>无</span>');
+  const presentUi=ig.en?radarHasUsable(s):!!s.present;
+  document.getElementById('kPresent').innerHTML=!powered?'<span class=warn>未供电</span>':(presentUi?'<span class=ok>有</span>':'<span class=bad>无</span>');
   document.getElementById('kRange').textContent=powered&&s.range_mm?(s.range_mm/1000).toFixed(2)+' m':'—';
   document.getElementById('kAngle').textContent=powered&&s.angle_deg!=null?s.angle_deg+'°':'—';
   document.getElementById('kGest').textContent=powered?(s.gesture||'—'):'未供电';
@@ -858,10 +977,11 @@ function renderRadarLive(s){
     `det=${s.det||'-'} result=0x${(s.detResult||0).toString(16)} type=${s.reportType}  `+
     `置信度 r=${s.rbConf} a=${s.angleConf} frame=${s.frameIdx}  呼吸=${s.br||0} 心率=${s.hr||0}`;
   const body=document.getElementById('objs');
+  const angCell=a=>a+'°'+(angleIgnored(s,a)?' <span class=warn>忽略</span>':'');
   if(powered&&s.multiValid&&s.objs&&s.objs.length){
-    body.innerHTML=s.objs.map(o=>`<tr><td>${o.slot}</td><td>${(o.range_mm/1000).toFixed(2)} m</td><td>${o.angle_deg}°</td><td>${o.velo||0}</td></tr>`).join('');
+    body.innerHTML=s.objs.map(o=>`<tr><td>${o.slot}</td><td>${(o.range_mm/1000).toFixed(2)} m</td><td>${angCell(o.angle_deg)}</td><td>${o.velo||0}</td></tr>`).join('');
   }else if(powered&&s.primaryValid&&s.range_mm){
-    body.innerHTML=`<tr><td>主目标</td><td>${(s.range_mm/1000).toFixed(2)} m</td><td>${s.angle_deg}°</td><td>${s.velo||0}</td></tr>`;
+    body.innerHTML=`<tr><td>主目标</td><td>${(s.range_mm/1000).toFixed(2)} m</td><td>${angCell(s.angle_deg)}</td><td>${s.velo||0}</td></tr>`;
   }else body.innerHTML='<tr><td colspan="4" style="color:var(--muted)">无目标</td></tr>';
   document.getElementById('moduleInfo').textContent=
     `链路 ${s.link?'正常':'等待'} · RX IO10 / TX IO9 · 版本 ${s.version||'未读'}\n`+
@@ -891,6 +1011,11 @@ const refreshTimer=setInterval(refresh,2500);
 const otaTimer=setInterval(refreshOta,8000);
 const logTimer=setInterval(refreshLogs,1000);
 const radarLiveTimer=setInterval(refreshRadarLive,400);
+if(window.ResizeObserver){
+  new ResizeObserver(()=>{if(lastRadar)drawRadar(lastRadar)}).observe(cv.parentElement);
+}else{
+  window.addEventListener('resize',()=>{if(lastRadar)drawRadar(lastRadar)});
+}
 </script>
 </body>
 </html>)HTML";

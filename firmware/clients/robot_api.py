@@ -145,6 +145,24 @@ class RobotApi:
     def radar_power(self, on: bool = True) -> dict:
         return self._call("/api/radar", {"power": on}, method="POST")
 
+    def radar_ignore(self, enable: bool | None = None, from_deg: int | None = None,
+                     to_deg: int | None = None) -> dict:
+        """Ignore targets in [from_deg, to_deg] for fan auto / gesture. Default range 0..-60."""
+        body: dict[str, Any] = {}
+        if enable is not None:
+            body["ignoreEnable"] = bool(enable)
+        if from_deg is not None:
+            body["ignoreFrom"] = int(from_deg)
+        if to_deg is not None:
+            body["ignoreTo"] = int(to_deg)
+        if not body:
+            body["ignoreEnable"] = True
+        return self._call("/api/radar", body, method="POST")
+
+    def radar_ignore_neg60(self, on: bool = True) -> dict:
+        """Deprecated alias: enable ignore with default 0° to -60°."""
+        return self.radar_ignore(enable=on, from_deg=0, to_deg=-60)
+
     def radar_schedule(self, enable: bool | None = None, on_at: str | None = None,
                        off_at: str | None = None) -> dict:
         """Daily HH:MM schedule (requires SNTP). Empty on_at/off_at clears that side."""

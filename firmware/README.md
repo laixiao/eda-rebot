@@ -45,7 +45,10 @@ python scripts/pack_font_cjk.py
    - `POST /api/radar {"scheduleEnable":true,"scheduleOn":"08:00","scheduleOff":"22:00"}`
    - 空串 `scheduleOn`/`scheduleOff` 清除该侧；未校时前不执行
    - 网页开关与时刻改完即生效（无保存按钮）
-3. `GET /api/radar` 含 `timeSynced`、`localTime`、`schedule`；`GET /api/status` 含校时状态
+3. `GET /api/radar` 含 `timeSynced`、`localTime`、`schedule`、`ignore`；`GET /api/status` 含校时状态
+4. **忽略扇区**（默认关，区间默认 0°～-60°，NVS 持久化）：
+   - `POST /api/radar {"ignoreEnable":true,"ignoreFrom":0,"ignoreTo":-60}`
+   - 开后该扇区目标不参与控风扇 / 手势切档；画布仍显示并标红
 
 ## Web 烧录
 

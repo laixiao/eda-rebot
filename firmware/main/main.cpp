@@ -41,7 +41,7 @@
 #include "wake_reply.h"
 
 static const char *TAG = "eda_robot";
-static const char *FW_VERSION = "3.6.21";
+static const char *FW_VERSION = "3.6.25";
 static volatile bool otaBusy = false;
 static volatile bool shutdownPending = false;
 static volatile bool cfgDirty = false;
@@ -83,6 +83,10 @@ static bool flagRadarPwr = false;
 static bool radarScheduleEnable = false;
 static int radarSchedOnMin = -1;
 static int radarSchedOffMin = -1;
+/** 忽略扇区：默认 0°～-60°，区间由用户填写 */
+static bool radarIgnoreEnable = false;
+static int radarIgnoreFrom = 0;
+static int radarIgnoreTo = -60;
 static int64_t schedLastCheckUs = 0;
 static volatile bool timeSynced = false;
 static bool sntpStarted = false;
@@ -670,14 +674,22 @@ static void radarScheduleJsonInto(char *buf, size_t buflen) {
            offHm, active ? "true" : "false", wantOn ? "true" : "false");
 }
 
+static void radarIgnoreJsonInto(char *buf, size_t buflen) {
+  snprintf(buf, buflen, ",\"ignore\":{\"enable\":%s,\"from\":%d,\"to\":%d}",
+           radarIgnoreEnable ? "true" : "false", radarIgnoreFrom, radarIgnoreTo);
+}
+
 static void radarAppendPowerAndTimer(std::string &body) {
   if (body.empty() || body.back() != '}') return;
   body.pop_back();
   body += ",\"power\":";
   body += flagRadarPwr ? "true" : "false";
-  char sbuf[160];
+  char sbuf[200];
   radarScheduleJsonInto(sbuf, sizeof(sbuf));
   body += sbuf;
+  char ibuf[96];
+  radarIgnoreJsonInto(ibuf, sizeof(ibuf));
+  body += ibuf;
   body += '}';
 }
 
@@ -926,10 +938,67 @@ static void voiceAckBeep() {
   if (!was) setAmp(false);
 }
 
+static int clampRadarAng(int a) {
+  if (a < -60) return -60;
+  if (a > 60) return 60;
+  return a;
+}
+
+static void radarIgnoreBounds(int &lo, int &hi) {
+  lo = radarIgnoreFrom;
+  hi = radarIgnoreTo;
+  if (lo > hi) {
+    const int t = lo;
+    lo = hi;
+    hi = t;
+  }
+}
+
+static bool radarAngleIgnored(int16_t deg) {
+  if (!radarIgnoreEnable) return false;
+  int lo = 0, hi = 0;
+  radarIgnoreBounds(lo, hi);
+  return deg >= lo && deg <= hi;
+}
+
+/** 可用扇区内最近目标。忽略开关关时任意有效目标。 */
+static bool radarPickUsable(const RadarSnapshot &rs, uint16_t *range_mm, int16_t *angle_deg) {
+  uint16_t best = 0;
+  int16_t bestA = 0;
+  bool found = false;
+  auto consider = [&](bool valid, uint16_t r, int16_t a) {
+    if (!valid) return;
+    if (radarAngleIgnored(a)) return;
+    if (!found || (r > 0 && (best == 0 || r < best))) {
+      found = true;
+      best = r;
+      bestA = a;
+    }
+  };
+  consider(rs.primary_valid || rs.is_detected != 0, rs.range_mm, rs.angle_deg);
+  if (rs.multi_valid) {
+    for (uint8_t i = 0; i < rs.obj_num && i < RADAR_OBJ_MAX; i++)
+      consider(rs.objs[i].valid, rs.objs[i].range_mm, rs.objs[i].angle_deg);
+  }
+  if (!found) return false;
+  if (range_mm) *range_mm = best;
+  if (angle_deg) *angle_deg = bestA;
+  return true;
+}
+
 /** 明确有人：主目标 / is_detected / 明显运动。不含单独呼吸、微动、OUT。 */
 static bool classifyFanPresent(const RadarSnapshot &rs, char *reason, size_t n) {
   if (!flagRadarPwr) {
     snprintf(reason, n, "雷达未供电");
+    return false;
+  }
+  uint16_t range = 0;
+  int16_t ang = 0;
+  const bool usable = radarPickUsable(rs, &range, &ang);
+  if (radarIgnoreEnable && !usable) {
+    int lo = 0, hi = 0;
+    radarIgnoreBounds(lo, hi);
+    snprintf(reason, n, "无人（忽略%d~%d°）", lo, hi);
     return false;
   }
   if (rs.gesture[0] && strstr(rs.gesture, "扫") != nullptr) {
@@ -941,10 +1010,10 @@ static bool classifyFanPresent(const RadarSnapshot &rs, char *reason, size_t n) 
     snprintf(reason, n, "运动:%.20s", src);
     return true;
   }
-  if (rs.primary_valid || rs.is_detected) {
-    if (rs.range_mm > 0)
-      snprintf(reason, n, "人 %u.%um", (unsigned)(rs.range_mm / 1000),
-               (unsigned)((rs.range_mm % 1000) / 100));
+  if (usable) {
+    if (range > 0)
+      snprintf(reason, n, "人 %u.%um", (unsigned)(range / 1000),
+               (unsigned)((range % 1000) / 100));
     else
       snprintf(reason, n, "检测到人");
     return true;
@@ -1104,14 +1173,8 @@ static void gestResetTracking() {
 
 static uint16_t nearestRangeMm(const RadarSnapshot &rs) {
   uint16_t best = 0;
-  if ((rs.primary_valid || rs.is_detected) && rs.range_mm > 0) best = rs.range_mm;
-  if (rs.multi_valid) {
-    for (uint8_t i = 0; i < rs.obj_num && i < RADAR_OBJ_MAX; i++) {
-      if (!rs.objs[i].valid || rs.objs[i].range_mm == 0) continue;
-      if (best == 0 || rs.objs[i].range_mm < best) best = rs.objs[i].range_mm;
-    }
-  }
-  return best;
+  if (radarPickUsable(rs, &best, nullptr)) return best;
+  return 0;
 }
 
 /** 档位索引：0=50% / 1=75% / 2=100%；低于约 25% 返回 -1（下一档从 50% 起）。 */
@@ -1348,7 +1411,15 @@ static esp_err_t handleRadarGet(httpd_req_t *req) {
 static esp_err_t handleRadarLive(httpd_req_t *req) {
   char buf[3072];
   radar_json_live(buf, sizeof(buf));
-  return sendJson(req, 200, buf);
+  std::string body = buf;
+  if (!body.empty() && body.back() == '}') {
+    body.pop_back();
+    char ibuf[96];
+    radarIgnoreJsonInto(ibuf, sizeof(ibuf));
+    body += ibuf;
+    body += '}';
+  }
+  return sendJson(req, 200, body);
 }
 
 static esp_err_t handleLogs(httpd_req_t *req) {
@@ -1392,6 +1463,22 @@ static esp_err_t handleRadarPost(httpd_req_t *req) {
     cfgSave();
     changed = true;
   }
+  if (argsHasKey(a, "ignoreEnable") || argsHasKey(a, "ignoreNeg60")) {
+    radarIgnoreEnable = argsHasKey(a, "ignoreEnable") ? argBool(a, "ignoreEnable", false)
+                                                      : argBool(a, "ignoreNeg60", false);
+    cfgSave();
+    changed = true;
+  }
+  if (argsHasKey(a, "ignoreFrom")) {
+    radarIgnoreFrom = clampRadarAng(argInt(a, "ignoreFrom", 0));
+    cfgSave();
+    changed = true;
+  }
+  if (argsHasKey(a, "ignoreTo")) {
+    radarIgnoreTo = clampRadarAng(argInt(a, "ignoreTo", -60));
+    cfgSave();
+    changed = true;
+  }
   if (changed) {
     if (argsHasKey(a, "scheduleEnable") || argsHasKey(a, "scheduleOn") ||
         argsHasKey(a, "scheduleOff")) {
@@ -1423,7 +1510,7 @@ static esp_err_t handleRadarPost(httpd_req_t *req) {
   if (cmd == "version") commandOk = radar_cmd_get_version();
   else if (cmd == "poll") commandOk = radar_cmd_get_det();
   else return sendJson(req, 400,
-                       "{\"ok\":false,\"error\":\"use power, scheduleEnable/On/Off, or cmd=version|poll\"}");
+                       "{\"ok\":false,\"error\":\"use power, scheduleEnable/On/Off, ignoreEnable/From/To, or cmd=version|poll\"}");
   if (!commandOk) {
     if (cmd == "poll" && !flagRadarPwr)
       return sendJson(req, 409, "{\"ok\":false,\"error\":\"radar power is off\"}");
@@ -1458,7 +1545,7 @@ static esp_err_t handleApiIndex(httpd_req_t *req) {
   body += "{\"path\":\"/api/beep\"},{\"path\":\"/api/oled\"},";
   body += "{\"path\":\"/api/ota\",\"methods\":[\"GET\",\"POST\"]},";
   body += "{\"path\":\"/api/logs\"},";
-  body += "{\"path\":\"/api/radar\",\"note\":\"power; scheduleOn/Off HH:MM + scheduleEnable\"},";
+  body += "{\"path\":\"/api/radar\",\"note\":\"power; scheduleOn/Off HH:MM + scheduleEnable; ignoreEnable/From/To\"},";
   body += "{\"path\":\"/api/radar/live\"},{\"path\":\"/radar\"}";
   body += "]}";
   return sendJson(req, 200, body);
@@ -1618,6 +1705,9 @@ static void cfgSave() {
   nvs_set_u8(h, "rsch_en", radarScheduleEnable ? 1 : 0);
   nvs_set_u16(h, "rsch_on", radarSchedOnMin < 0 ? 65535 : (uint16_t)radarSchedOnMin);
   nvs_set_u16(h, "rsch_off", radarSchedOffMin < 0 ? 65535 : (uint16_t)radarSchedOffMin);
+  nvs_set_u8(h, "rign_en", radarIgnoreEnable ? 1 : 0);
+  nvs_set_i8(h, "rign_a", (int8_t)clampRadarAng(radarIgnoreFrom));
+  nvs_set_i8(h, "rign_b", (int8_t)clampRadarAng(radarIgnoreTo));
   nvs_commit(h);
   nvs_close(h);
   cfgDirty = false;
@@ -1662,15 +1752,23 @@ static void cfgLoad() {
   u16 = 65535;
   if (nvs_get_u16(h, "rsch_off", &u16) == ESP_OK)
     radarSchedOffMin = u16 >= 1440 ? -1 : (int)u16;
+  if (nvs_get_u8(h, "rign_en", &v) == ESP_OK)
+    radarIgnoreEnable = v != 0;
+  else if (nvs_get_u8(h, "rign60", &v) == ESP_OK)
+    radarIgnoreEnable = v != 0;
+  int8_t i8 = 0;
+  if (nvs_get_i8(h, "rign_a", &i8) == ESP_OK) radarIgnoreFrom = clampRadarAng(i8);
+  if (nvs_get_i8(h, "rign_b", &i8) == ESP_OK) radarIgnoreTo = clampRadarAng(i8);
   nvs_close(h);
   cfgLoaded = true;
   ESP_LOGI(TAG,
            "cfg NVS: voice=%d vol=%u pwm=%d amp=%d radar=%d fauto=%d fgest=%d gear=%d "
-           "led=[%d,%d,%d] srv=[%d,%d]",
+           "ign=%d(%d~%d) led=[%d,%d,%d] srv=[%d,%d]",
            flagVoice ? 1 : 0, (unsigned)board_i2s_get_volume(), cfgWantPwm ? 1 : 0,
            cfgWantAmp ? 1 : 0, cfgWantRadar ? 1 : 0, fanAutoEnable ? 1 : 0,
-           fanGestureEnable ? 1 : 0, fanGearPct, cfgSnapLed[0], cfgSnapLed[1], cfgSnapLed[2],
-           cfgSnapSrv[0], cfgSnapSrv[1]);
+           fanGestureEnable ? 1 : 0, fanGearPct, radarIgnoreEnable ? 1 : 0, radarIgnoreFrom,
+           radarIgnoreTo, cfgSnapLed[0], cfgSnapLed[1], cfgSnapLed[2], cfgSnapSrv[0],
+           cfgSnapSrv[1]);
 }
 
 /** 按 snap 写回 LED/舵机（调用方已保证 PWM/OE 已开）。 */
