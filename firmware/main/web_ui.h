@@ -53,7 +53,7 @@ pre{margin:0;white-space:pre-wrap;word-break:break-all;font:12px/1.4 ui-monospac
 .radar-side{min-width:0;display:flex;flex-direction:column;gap:12px}
 .radar-ctl{background:#0d1117;border:1px solid var(--line);border-radius:12px;padding:6px 4px}
 .ctl-row{display:flex;flex-wrap:wrap;gap:4px 4px;align-items:center;padding:10px 12px}
-.ctl-row+.ctl-row{border-top:1px solid #21262d}
+.ctl-row+.ctl-row,.ctl-row+.ign-list,.ign-list+.ctl-row{border-top:1px solid #21262d}
 .radar-ctl .switch{padding:4px 8px;border-radius:8px;gap:8px;color:var(--fg);font-size:13px}
 .radar-ctl .switch .track{width:36px;height:20px}
 .radar-ctl .switch .track::after{width:16px;height:16px}
@@ -65,6 +65,13 @@ pre{margin:0;white-space:pre-wrap;word-break:break-all;font:12px/1.4 ui-monospac
 .radar-ctl .switch-acq input:checked+.track{background:#58a6ff}
 .ang-pair,.time-pair{display:inline-flex;align-items:center;gap:6px;margin-left:4px}
 .ang-pair input[type=number]{width:54px;padding:5px 6px;text-align:center;font-variant-numeric:tabular-nums}
+.ign-add{width:28px;height:28px;padding:0;margin-left:auto;border-radius:8px;font-size:18px;line-height:1;background:#161b22}
+.ign-list{display:flex;flex-direction:column;gap:6px;padding:8px 12px 10px}
+.ign-item{display:flex;align-items:center;gap:6px}
+.ign-item input[type=number]{width:54px;padding:5px 6px;text-align:center;font-variant-numeric:tabular-nums}
+.ign-del{width:26px;height:26px;padding:0;border-radius:6px;color:var(--muted);background:transparent}
+.ign-del:hover{color:var(--bad);border-color:var(--bad)}
+.ign-empty{color:var(--muted);font-size:12px;padding:2px 0}
 .time-pair input[type=time]{width:118px;background:#161b22;color:var(--fg);border:1px solid var(--line);border-radius:6px;padding:5px 8px;color-scheme:dark}
 .fan-box,.radar-targets{background:#0d1117;border:1px solid var(--line);border-radius:12px;padding:12px 14px}
 .fan-box .fan-title,.radar-targets .fan-title{font-size:10px;color:var(--muted);text-transform:uppercase;letter-spacing:.1em;margin-bottom:8px}
@@ -299,19 +306,14 @@ header .switch-periph.on{border-color:#f85149;background:#3b1212;color:#ff7b72}
           </label>
         </div>
         <div class="ctl-row">
-          <label class="switch switch-ign" title="开：填写角度区间内的目标不参与控风扇/手势切档；画布仍显示。默认 0°～-60°">
-            <input id="swIgnoreAng" type="checkbox" onchange="setIgnoreAng()"/>
+          <label class="switch switch-ign" title="开：列表中的扇区目标不参与控风扇/手势切档；画布仍显示。可添加多段。">
+            <input id="swIgnoreAng" type="checkbox" onchange="setIgnoreEnable()"/>
             <span class="track"></span>
             <span id="labIgnoreAng">忽略扇区</span>
           </label>
-          <span class="ang-pair">
-            <input id="rdIgnFrom" type="number" min="-60" max="60" step="1" value="0" title="起始角度" onchange="setIgnoreAng()"/>
-            <span class="log-meta">°</span>
-            <span class="log-meta">~</span>
-            <input id="rdIgnTo" type="number" min="-60" max="60" step="1" value="-60" title="结束角度" onchange="setIgnoreAng()"/>
-            <span class="log-meta">°</span>
-          </span>
+          <button type="button" class="ign-add" onclick="addIgnore()" title="添加扇区">＋</button>
         </div>
+        <div class="ign-list" id="ignList"></div>
         <div class="ctl-row">
           <label class="switch switch-acq" title="WiFi 校时后每天到点开/关雷达供电">
             <input id="swRadarSched" type="checkbox" onchange="setRadarSchedule()"/>
@@ -587,10 +589,21 @@ function clampAng(v){
 function ignoreInfo(s){
   const ig=(s&&s.ignore)||{};
   const en=!!(ig.enable??s.ignoreNeg60);
-  let a=Number(ig.from), b=Number(ig.to);
-  if(!Number.isFinite(a)) a=0;
-  if(!Number.isFinite(b)) b=-60;
-  return {en, from:a, to:b, lo:Math.min(a,b), hi:Math.max(a,b)};
+  let sectors=[];
+  if(Array.isArray(ig.sectors)&&ig.sectors.length){
+    sectors=ig.sectors.map(x=>({from:Number(x.from),to:Number(x.to)}))
+      .filter(x=>Number.isFinite(x.from)&&Number.isFinite(x.to));
+  }else if(ig.from!=null||ig.to!=null){
+    let a=Number(ig.from), b=Number(ig.to);
+    if(!Number.isFinite(a)) a=0;
+    if(!Number.isFinite(b)) b=-60;
+    sectors=[{from:a,to:b}];
+  }
+  const first=sectors[0]||{from:0,to:-60};
+  return {en, sectors, from:first.from, to:first.to};
+}
+function sectorBounds(sec){
+  return {lo:Math.min(sec.from,sec.to), hi:Math.max(sec.from,sec.to)};
 }
 function renderIgnore(s){
   const ig=ignoreInfo(s);
@@ -598,25 +611,59 @@ function renderIgnore(s){
   const lab=document.getElementById('labIgnoreAng');
   if(sw && document.activeElement!==sw) sw.checked=ig.en;
   if(lab) lab.textContent='忽略扇区';
-  const fromEl=document.getElementById('rdIgnFrom');
-  const toEl=document.getElementById('rdIgnTo');
-  if(fromEl && document.activeElement!==fromEl) fromEl.value=String(ig.from);
-  if(toEl && document.activeElement!==toEl) toEl.value=String(ig.to);
+  const list=document.getElementById('ignList');
+  const addBtn=document.querySelector('.ign-add');
+  if(addBtn){
+    addBtn.disabled=ig.sectors.length>=8;
+    addBtn.title=ig.sectors.length>=8?'最多 8 段':'添加扇区';
+  }
+  if(!list) return;
+  if(list.contains(document.activeElement)) return;
+  if(!ig.sectors.length){
+    list.innerHTML='<div class="ign-empty">无扇区，点 ＋ 添加</div>';
+    return;
+  }
+  list.innerHTML=ig.sectors.map((sec,i)=>
+    `<div class="ign-item" data-i="${i}">`+
+    `<input type="number" min="-60" max="60" step="1" value="${sec.from}" title="起始角度" onchange="updIgnore(${i})"/>`+
+    `<span class="log-meta">°</span><span class="log-meta">~</span>`+
+    `<input type="number" min="-60" max="60" step="1" value="${sec.to}" title="结束角度" onchange="updIgnore(${i})"/>`+
+    `<span class="log-meta">°</span>`+
+    `<button type="button" class="ign-del" onclick="delIgnore(${i})" title="删除">×</button>`+
+    `</div>`).join('');
 }
-async function setIgnoreAng(){
+async function setIgnoreEnable(){
   const sw=document.getElementById('swIgnoreAng');
-  const fromEl=document.getElementById('rdIgnFrom');
-  const toEl=document.getElementById('rdIgnTo');
-  const from=clampAng(fromEl&&fromEl.value);
-  const to=clampAng(toEl&&toEl.value);
-  if(fromEl) fromEl.value=String(from);
-  if(toEl) toEl.value=String(to);
-  const body={ignoreEnable:!!(sw&&sw.checked), ignoreFrom:from, ignoreTo:to};
+  const body={ignoreEnable:!!(sw&&sw.checked)};
   if(sw) sw.disabled=true;
   try{
     const j=await api('POST','/api/radar',body);
     if(j&&j.ok===false && sw) sw.checked=!body.ignoreEnable;
   }finally{if(sw) sw.disabled=false}
+  refresh();refreshRadarLive();
+}
+async function addIgnore(){
+  const btn=document.querySelector('.ign-add');
+  if(btn) btn.disabled=true;
+  try{
+    const j=await api('POST','/api/radar',{ignoreAdd:true, ignoreFrom:0, ignoreTo:-60});
+    if(j&&j.ok===false && btn) btn.title=j.error||'添加失败';
+  }finally{if(btn) btn.disabled=false}
+  refresh();refreshRadarLive();
+}
+async function delIgnore(i){
+  await api('POST','/api/radar',{ignoreDel:i});
+  refresh();refreshRadarLive();
+}
+async function updIgnore(i){
+  const row=document.querySelector('.ign-item[data-i="'+i+'"]');
+  if(!row) return;
+  const ins=row.querySelectorAll('input[type=number]');
+  const from=clampAng(ins[0]&&ins[0].value);
+  const to=clampAng(ins[1]&&ins[1].value);
+  if(ins[0]) ins[0].value=String(from);
+  if(ins[1]) ins[1].value=String(to);
+  await api('POST','/api/radar',{ignoreId:i, ignoreFrom:from, ignoreTo:to});
   refresh();refreshRadarLive();
 }
 async function shutdownDevice(){
@@ -897,10 +944,13 @@ function drawRadar(s){
   }
   const ig=ignoreInfo(s);
   if(ig.en){
-    ctx.beginPath();ctx.moveTo(cx,cy);
-    ctx.arc(cx,cy,R,(ig.lo-90)*Math.PI/180,(ig.hi-90)*Math.PI/180);ctx.closePath();
-    ctx.fillStyle='rgba(248,81,73,0.14)';ctx.fill();
-    ctx.strokeStyle='rgba(248,81,73,0.5)';ctx.lineWidth=1.5;ctx.stroke();
+    for(const sec of ig.sectors){
+      const b=sectorBounds(sec);
+      ctx.beginPath();ctx.moveTo(cx,cy);
+      ctx.arc(cx,cy,R,(b.lo-90)*Math.PI/180,(b.hi-90)*Math.PI/180);ctx.closePath();
+      ctx.fillStyle='rgba(248,81,73,0.14)';ctx.fill();
+      ctx.strokeStyle='rgba(248,81,73,0.5)';ctx.lineWidth=1.5;ctx.stroke();
+    }
   }
   const trail=s.trail||[];
   for(let i=0;i<trail.length;i++){
@@ -931,7 +981,11 @@ function drawRadar(s){
 }
 function angleIgnored(s,a){
   const ig=ignoreInfo(s);
-  return ig.en && a!=null && a>=ig.lo && a<=ig.hi;
+  if(!ig.en||a==null) return false;
+  return ig.sectors.some(sec=>{
+    const b=sectorBounds(sec);
+    return a>=b.lo && a<=b.hi;
+  });
 }
 function radarHasUsable(s){
   if(!s) return false;
@@ -958,7 +1012,13 @@ function renderRadarLive(s){
   const ig=ignoreInfo(s);
   renderIgnore(s);
   const hint=document.getElementById('rdFovHint');
-  if(hint) hint.textContent=ig.en?('FOV ±60° · 10m · 已忽略 '+ig.lo+'~'+ig.hi+'°'):'FOV ±60° · 10m';
+  if(hint){
+    if(!ig.en||!ig.sectors.length) hint.textContent='FOV ±60° · 10m';
+    else if(ig.sectors.length===1){
+      const b=sectorBounds(ig.sectors[0]);
+      hint.textContent='FOV ±60° · 10m · 已忽略 '+b.lo+'~'+b.hi+'°';
+    }else hint.textContent='FOV ±60° · 10m · 已忽略 '+ig.sectors.length+' 段';
+  }
   document.getElementById('rdLink').textContent=s.uart?(s.link?'链路OK':'等待数据'):'UART关';
   document.getElementById('rdLink').className='badge'+(s.uart?(s.link?'':' warn'):' off');
   const pwrEl=document.getElementById('rdPwr');

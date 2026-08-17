@@ -98,11 +98,11 @@ U1 当前 NC：IO1/8/11/14/15/19/20/21/35/36/37/47/48。
 - 分区：`factory` 1MB 救援 + `ota_0` 14MB 主系统（模型内嵌 `main/srmodels.bin`，无独立 model / 无双 OTA）
 - 构建主系统：`cd firmware && idf.py build`；救援：`cd firmware_recovery && idf.py build`
 - 首次改分区：串口 `scripts/flash_all.ps1 -Port COM3`；日常：主页「进入救援升级」→ 救援页上传大包
-- **设置持久化（NVS `cfg/*`，FW≥3.6.16）**：语音、音量、PWM/功放/雷达供电、控风扇/手势、档位与记忆强度、LED 占空比、舵机角度、雷达每日时刻、**忽略扇区**（`rign_en`/`rign_a`/`rign_b`，FW≥3.6.23，默认区间 0°～-60°）；上电按 NVS 恢复。急停清运行态但保留 `cfgSnap*` 意图镜像（避免随后改音量把 NVS 写成全 0）；解除急停时按 snap 恢复 LED/舵机；自动风扇/手势改输出约 2s 防抖落盘
+- **设置持久化（NVS `cfg/*`，FW≥3.6.16）**：语音、音量、PWM/功放/雷达供电、控风扇/手势、档位与记忆强度、LED 占空比、舵机角度、雷达每日时刻、**忽略扇区**（`rign_en`/`rign_n`/`rigns` blob，FW≥3.6.26 多段；旧键 `rign_a`/`rign_b` 仍作第 0 段兼容，默认区间 0°～-60°）；上电按 NVS 恢复。急停清运行态但保留 `cfgSnap*` 意图镜像（避免随后改音量把 NVS 写成全 0）；解除急停时按 snap 恢复 LED/舵机；自动风扇/手势改输出约 2s 防抖落盘
 - 上电：先按安全默认再 `cfgApplyBoot` 恢复；**缺焊 I2C 器件不阻断启动**（probe 失败则不 begin、后台不做 I2C；FW≥3.6.3）
 - 空板可只跑 WiFi/HTTP；语音默认关（无 NVS 记录时）；I2S DMA 空闲关闭
 - 雷达：`POST /api/radar {"power":true}` 开电即自动查询（已取消独立采集开关）；UART IO9/10
-- **忽略扇区**：`POST /api/radar {"ignoreEnable":true,"ignoreFrom":0,"ignoreTo":-60}`（网页「忽略扇区」+ 起止角度，默认关、默认 0°～-60°）；该扇区目标不参与控风扇/手势切档，画布仍显示；NVS `cfg/rign_en` `rign_a` `rign_b`
+- **忽略扇区**：网页「忽略扇区」可 **＋ 添加 / × 删除** 多段（最多 8）；`POST /api/radar {"ignoreEnable":true,"ignoreAdd":true,"ignoreFrom":0,"ignoreTo":-60}` / `{"ignoreDel":0}` / `{"ignoreId":0,"ignoreFrom":10,"ignoreTo":20}`；目标不参与控风扇/手势切档，画布仍显示；NVS `cfg/rign_en` `rign_n` `rigns`
 - 舵机 id `0..1`；探照灯 id `0/1/2`=LED_1/2/ALL（1/2 需 ALL）
 - 雷达→风扇：`POST /api/fan {"auto":true}`；每 **2s** 取样；**有人 1 次即开**、**无人连续 3 次才关** **LED_1**；开时按手势档位（若手势开）或记忆强度；有人判定不含单独呼吸/微动/OUT；默认关
 - 手势切档：`POST /api/fan {"gesture":true}`（可与控风扇**同时开**）；近距 **≤0.20m** 停留 **2s** → 档位循环 **50%→75%→100%**（sticky `gear`）；切成功**无提示音**（FW≥3.6.17）；只管档位、**不关闭控风扇**；自动再开时用当前档位；触发后须离开（**>0.35m**）再武装；默认关

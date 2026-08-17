@@ -146,18 +146,49 @@ class RobotApi:
         return self._call("/api/radar", {"power": on}, method="POST")
 
     def radar_ignore(self, enable: bool | None = None, from_deg: int | None = None,
-                     to_deg: int | None = None) -> dict:
-        """Ignore targets in [from_deg, to_deg] for fan auto / gesture. Default range 0..-60."""
+                     to_deg: int | None = None, *, add: bool = False,
+                     delete_index: int | None = None, index: int | None = None,
+                     clear: bool = False) -> dict:
+        """Ignore sectors for fan auto / gesture. Canvas still shows ignored targets.
+
+        - enable: master switch
+        - add=True + from_deg/to_deg: append a sector (default 0..-60)
+        - delete_index: remove by index
+        - index + from_deg/to_deg: update that sector
+        - from_deg/to_deg without add/index: update sector 0 (legacy)
+        - clear=True: remove all sectors
+        """
         body: dict[str, Any] = {}
         if enable is not None:
             body["ignoreEnable"] = bool(enable)
-        if from_deg is not None:
-            body["ignoreFrom"] = int(from_deg)
-        if to_deg is not None:
-            body["ignoreTo"] = int(to_deg)
+        if clear:
+            body["ignoreClear"] = True
+        if add:
+            body["ignoreAdd"] = True
+            body["ignoreFrom"] = 0 if from_deg is None else int(from_deg)
+            body["ignoreTo"] = -60 if to_deg is None else int(to_deg)
+        elif delete_index is not None:
+            body["ignoreDel"] = int(delete_index)
+        elif index is not None:
+            body["ignoreId"] = int(index)
+            if from_deg is not None:
+                body["ignoreFrom"] = int(from_deg)
+            if to_deg is not None:
+                body["ignoreTo"] = int(to_deg)
+        else:
+            if from_deg is not None:
+                body["ignoreFrom"] = int(from_deg)
+            if to_deg is not None:
+                body["ignoreTo"] = int(to_deg)
         if not body:
             body["ignoreEnable"] = True
         return self._call("/api/radar", body, method="POST")
+
+    def radar_ignore_add(self, from_deg: int = 0, to_deg: int = -60) -> dict:
+        return self.radar_ignore(add=True, from_deg=from_deg, to_deg=to_deg)
+
+    def radar_ignore_del(self, index: int) -> dict:
+        return self.radar_ignore(delete_index=index)
 
     def radar_ignore_neg60(self, on: bool = True) -> dict:
         """Deprecated alias: enable ignore with default 0° to -60°."""

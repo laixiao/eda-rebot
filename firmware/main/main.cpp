@@ -41,7 +41,7 @@
 #include "wake_reply.h"
 
 static const char *TAG = "eda_robot";
-static const char *FW_VERSION = "3.6.25";
+static const char *FW_VERSION = "3.6.26";
 static volatile bool otaBusy = false;
 static volatile bool shutdownPending = false;
 static volatile bool cfgDirty = false;
@@ -83,10 +83,15 @@ static bool flagRadarPwr = false;
 static bool radarScheduleEnable = false;
 static int radarSchedOnMin = -1;
 static int radarSchedOffMin = -1;
-/** 忽略扇区：默认 0°～-60°，区间由用户填写 */
+/** 忽略扇区：可多段，默认一段 0°～-60°（开关默认关） */
+static constexpr int RADAR_IGN_MAX = 8;
+struct RadarIgnSec {
+  int from;
+  int to;
+};
 static bool radarIgnoreEnable = false;
-static int radarIgnoreFrom = 0;
-static int radarIgnoreTo = -60;
+static RadarIgnSec radarIgnoreSec[RADAR_IGN_MAX] = {{0, -60}};
+static int radarIgnoreCount = 1;
 static int64_t schedLastCheckUs = 0;
 static volatile bool timeSynced = false;
 static bool sntpStarted = false;
@@ -674,9 +679,22 @@ static void radarScheduleJsonInto(char *buf, size_t buflen) {
            offHm, active ? "true" : "false", wantOn ? "true" : "false");
 }
 
-static void radarIgnoreJsonInto(char *buf, size_t buflen) {
-  snprintf(buf, buflen, ",\"ignore\":{\"enable\":%s,\"from\":%d,\"to\":%d}",
-           radarIgnoreEnable ? "true" : "false", radarIgnoreFrom, radarIgnoreTo);
+static std::string radarIgnoreJson() {
+  std::string s = ",\"ignore\":{\"enable\":";
+  s += radarIgnoreEnable ? "true" : "false";
+  const int f0 = radarIgnoreCount > 0 ? radarIgnoreSec[0].from : 0;
+  const int t0 = radarIgnoreCount > 0 ? radarIgnoreSec[0].to : -60;
+  char tmp[48];
+  snprintf(tmp, sizeof(tmp), ",\"from\":%d,\"to\":%d,\"count\":%d,\"sectors\":[", f0, t0,
+           radarIgnoreCount);
+  s += tmp;
+  for (int i = 0; i < radarIgnoreCount; i++) {
+    snprintf(tmp, sizeof(tmp), "%s{\"from\":%d,\"to\":%d}", i ? "," : "", radarIgnoreSec[i].from,
+             radarIgnoreSec[i].to);
+    s += tmp;
+  }
+  s += "]}";
+  return s;
 }
 
 static void radarAppendPowerAndTimer(std::string &body) {
@@ -687,9 +705,7 @@ static void radarAppendPowerAndTimer(std::string &body) {
   char sbuf[200];
   radarScheduleJsonInto(sbuf, sizeof(sbuf));
   body += sbuf;
-  char ibuf[96];
-  radarIgnoreJsonInto(ibuf, sizeof(ibuf));
-  body += ibuf;
+  body += radarIgnoreJson();
   body += '}';
 }
 
@@ -944,21 +960,44 @@ static int clampRadarAng(int a) {
   return a;
 }
 
-static void radarIgnoreBounds(int &lo, int &hi) {
-  lo = radarIgnoreFrom;
-  hi = radarIgnoreTo;
+static bool radarIgnoreAdd(int from, int to) {
+  if (radarIgnoreCount >= RADAR_IGN_MAX) return false;
+  radarIgnoreSec[radarIgnoreCount].from = clampRadarAng(from);
+  radarIgnoreSec[radarIgnoreCount].to = clampRadarAng(to);
+  radarIgnoreCount++;
+  return true;
+}
+
+static bool radarIgnoreDel(int idx) {
+  if (idx < 0 || idx >= radarIgnoreCount) return false;
+  for (int i = idx; i < radarIgnoreCount - 1; i++) radarIgnoreSec[i] = radarIgnoreSec[i + 1];
+  radarIgnoreCount--;
+  return true;
+}
+
+static bool radarIgnoreSet(int idx, int from, int to) {
+  if (idx < 0 || idx >= radarIgnoreCount) return false;
+  radarIgnoreSec[idx].from = clampRadarAng(from);
+  radarIgnoreSec[idx].to = clampRadarAng(to);
+  return true;
+}
+
+static bool radarSectorHit(const RadarIgnSec &s, int16_t deg) {
+  int lo = s.from, hi = s.to;
   if (lo > hi) {
     const int t = lo;
     lo = hi;
     hi = t;
   }
+  return deg >= lo && deg <= hi;
 }
 
 static bool radarAngleIgnored(int16_t deg) {
-  if (!radarIgnoreEnable) return false;
-  int lo = 0, hi = 0;
-  radarIgnoreBounds(lo, hi);
-  return deg >= lo && deg <= hi;
+  if (!radarIgnoreEnable || radarIgnoreCount <= 0) return false;
+  for (int i = 0; i < radarIgnoreCount; i++) {
+    if (radarSectorHit(radarIgnoreSec[i], deg)) return true;
+  }
+  return false;
 }
 
 /** 可用扇区内最近目标。忽略开关关时任意有效目标。 */
@@ -995,10 +1034,8 @@ static bool classifyFanPresent(const RadarSnapshot &rs, char *reason, size_t n) 
   uint16_t range = 0;
   int16_t ang = 0;
   const bool usable = radarPickUsable(rs, &range, &ang);
-  if (radarIgnoreEnable && !usable) {
-    int lo = 0, hi = 0;
-    radarIgnoreBounds(lo, hi);
-    snprintf(reason, n, "无人（忽略%d~%d°）", lo, hi);
+  if (radarIgnoreEnable && radarIgnoreCount > 0 && !usable) {
+    snprintf(reason, n, "无人（忽略扇区）");
     return false;
   }
   if (rs.gesture[0] && strstr(rs.gesture, "扫") != nullptr) {
@@ -1414,9 +1451,7 @@ static esp_err_t handleRadarLive(httpd_req_t *req) {
   std::string body = buf;
   if (!body.empty() && body.back() == '}') {
     body.pop_back();
-    char ibuf[96];
-    radarIgnoreJsonInto(ibuf, sizeof(ibuf));
-    body += ibuf;
+    body += radarIgnoreJson();
     body += '}';
   }
   return sendJson(req, 200, body);
@@ -1469,13 +1504,47 @@ static esp_err_t handleRadarPost(httpd_req_t *req) {
     cfgSave();
     changed = true;
   }
-  if (argsHasKey(a, "ignoreFrom")) {
-    radarIgnoreFrom = clampRadarAng(argInt(a, "ignoreFrom", 0));
+  if (argsHasKey(a, "ignoreClear") && argBool(a, "ignoreClear", false)) {
+    radarIgnoreCount = 0;
     cfgSave();
     changed = true;
   }
-  if (argsHasKey(a, "ignoreTo")) {
-    radarIgnoreTo = clampRadarAng(argInt(a, "ignoreTo", -60));
+  if (argsHasKey(a, "ignoreAdd") && argBool(a, "ignoreAdd", false)) {
+    const int from = argsHasKey(a, "ignoreFrom") ? argInt(a, "ignoreFrom", 0) : 0;
+    const int to = argsHasKey(a, "ignoreTo") ? argInt(a, "ignoreTo", -60) : -60;
+    if (!radarIgnoreAdd(from, to))
+      return sendJson(req, 400, "{\"ok\":false,\"error\":\"ignore sectors full (max 8)\"}");
+    cfgSave();
+    changed = true;
+  } else if (argsHasKey(a, "ignoreDel")) {
+    if (!radarIgnoreDel(argInt(a, "ignoreDel", -1)))
+      return sendJson(req, 400, "{\"ok\":false,\"error\":\"ignoreDel index out of range\"}");
+    cfgSave();
+    changed = true;
+  } else if (argsHasKey(a, "ignoreId")) {
+    const int idx = argInt(a, "ignoreId", -1);
+    if (idx < 0 || idx >= radarIgnoreCount)
+      return sendJson(req, 400, "{\"ok\":false,\"error\":\"ignoreId out of range\"}");
+    const int from = argsHasKey(a, "ignoreFrom") ? argInt(a, "ignoreFrom", radarIgnoreSec[idx].from)
+                                                 : radarIgnoreSec[idx].from;
+    const int to = argsHasKey(a, "ignoreTo") ? argInt(a, "ignoreTo", radarIgnoreSec[idx].to)
+                                             : radarIgnoreSec[idx].to;
+    radarIgnoreSet(idx, from, to);
+    cfgSave();
+    changed = true;
+  } else if (argsHasKey(a, "ignoreFrom") || argsHasKey(a, "ignoreTo")) {
+    const int from = argsHasKey(a, "ignoreFrom")
+                         ? argInt(a, "ignoreFrom", 0)
+                         : (radarIgnoreCount > 0 ? radarIgnoreSec[0].from : 0);
+    const int to = argsHasKey(a, "ignoreTo")
+                       ? argInt(a, "ignoreTo", -60)
+                       : (radarIgnoreCount > 0 ? radarIgnoreSec[0].to : -60);
+    if (radarIgnoreCount <= 0) {
+      if (!radarIgnoreAdd(from, to))
+        return sendJson(req, 400, "{\"ok\":false,\"error\":\"ignore sectors full (max 8)\"}");
+    } else {
+      radarIgnoreSet(0, from, to);
+    }
     cfgSave();
     changed = true;
   }
@@ -1510,7 +1579,7 @@ static esp_err_t handleRadarPost(httpd_req_t *req) {
   if (cmd == "version") commandOk = radar_cmd_get_version();
   else if (cmd == "poll") commandOk = radar_cmd_get_det();
   else return sendJson(req, 400,
-                       "{\"ok\":false,\"error\":\"use power, scheduleEnable/On/Off, ignoreEnable/From/To, or cmd=version|poll\"}");
+                       "{\"ok\":false,\"error\":\"use power, scheduleEnable/On/Off, ignoreEnable/Add/Del/Id/From/To, or cmd=version|poll\"}");
   if (!commandOk) {
     if (cmd == "poll" && !flagRadarPwr)
       return sendJson(req, 409, "{\"ok\":false,\"error\":\"radar power is off\"}");
@@ -1545,7 +1614,7 @@ static esp_err_t handleApiIndex(httpd_req_t *req) {
   body += "{\"path\":\"/api/beep\"},{\"path\":\"/api/oled\"},";
   body += "{\"path\":\"/api/ota\",\"methods\":[\"GET\",\"POST\"]},";
   body += "{\"path\":\"/api/logs\"},";
-  body += "{\"path\":\"/api/radar\",\"note\":\"power; scheduleOn/Off HH:MM + scheduleEnable; ignoreEnable/From/To\"},";
+  body += "{\"path\":\"/api/radar\",\"note\":\"power; scheduleOn/Off HH:MM + scheduleEnable; ignoreEnable + ignoreAdd/Del/Id/From/To\"},";
   body += "{\"path\":\"/api/radar/live\"},{\"path\":\"/radar\"}";
   body += "]}";
   return sendJson(req, 200, body);
@@ -1706,8 +1775,20 @@ static void cfgSave() {
   nvs_set_u16(h, "rsch_on", radarSchedOnMin < 0 ? 65535 : (uint16_t)radarSchedOnMin);
   nvs_set_u16(h, "rsch_off", radarSchedOffMin < 0 ? 65535 : (uint16_t)radarSchedOffMin);
   nvs_set_u8(h, "rign_en", radarIgnoreEnable ? 1 : 0);
-  nvs_set_i8(h, "rign_a", (int8_t)clampRadarAng(radarIgnoreFrom));
-  nvs_set_i8(h, "rign_b", (int8_t)clampRadarAng(radarIgnoreTo));
+  nvs_set_u8(h, "rign_n", (uint8_t)radarIgnoreCount);
+  {
+    int8_t packed[RADAR_IGN_MAX * 2] = {0};
+    for (int i = 0; i < radarIgnoreCount; i++) {
+      packed[i * 2] = (int8_t)clampRadarAng(radarIgnoreSec[i].from);
+      packed[i * 2 + 1] = (int8_t)clampRadarAng(radarIgnoreSec[i].to);
+    }
+    if (radarIgnoreCount > 0)
+      nvs_set_blob(h, "rigns", packed, (size_t)radarIgnoreCount * 2);
+    const int a0 = radarIgnoreCount > 0 ? radarIgnoreSec[0].from : 0;
+    const int b0 = radarIgnoreCount > 0 ? radarIgnoreSec[0].to : -60;
+    nvs_set_i8(h, "rign_a", (int8_t)clampRadarAng(a0));
+    nvs_set_i8(h, "rign_b", (int8_t)clampRadarAng(b0));
+  }
   nvs_commit(h);
   nvs_close(h);
   cfgDirty = false;
@@ -1756,19 +1837,47 @@ static void cfgLoad() {
     radarIgnoreEnable = v != 0;
   else if (nvs_get_u8(h, "rign60", &v) == ESP_OK)
     radarIgnoreEnable = v != 0;
-  int8_t i8 = 0;
-  if (nvs_get_i8(h, "rign_a", &i8) == ESP_OK) radarIgnoreFrom = clampRadarAng(i8);
-  if (nvs_get_i8(h, "rign_b", &i8) == ESP_OK) radarIgnoreTo = clampRadarAng(i8);
+  {
+    int8_t packed[RADAR_IGN_MAX * 2] = {0};
+    size_t blobLen = sizeof(packed);
+    uint8_t n = 0;
+    const bool hasN = nvs_get_u8(h, "rign_n", &n) == ESP_OK;
+    const bool hasBlob = nvs_get_blob(h, "rigns", packed, &blobLen) == ESP_OK && blobLen >= 2;
+    if (hasN) {
+      radarIgnoreCount = n > RADAR_IGN_MAX ? RADAR_IGN_MAX : (int)n;
+      if (hasBlob) {
+        const int fromBlob = (int)(blobLen / 2);
+        if (radarIgnoreCount > fromBlob) radarIgnoreCount = fromBlob;
+        for (int i = 0; i < radarIgnoreCount; i++) {
+          radarIgnoreSec[i].from = clampRadarAng(packed[i * 2]);
+          radarIgnoreSec[i].to = clampRadarAng(packed[i * 2 + 1]);
+        }
+      } else if (radarIgnoreCount > 0) {
+        int8_t i8 = 0;
+        radarIgnoreCount = 1;
+        if (nvs_get_i8(h, "rign_a", &i8) == ESP_OK) radarIgnoreSec[0].from = clampRadarAng(i8);
+        if (nvs_get_i8(h, "rign_b", &i8) == ESP_OK) radarIgnoreSec[0].to = clampRadarAng(i8);
+      }
+    } else {
+      int8_t i8 = 0;
+      radarIgnoreCount = 1;
+      if (nvs_get_i8(h, "rign_a", &i8) == ESP_OK) radarIgnoreSec[0].from = clampRadarAng(i8);
+      if (nvs_get_i8(h, "rign_b", &i8) == ESP_OK) radarIgnoreSec[0].to = clampRadarAng(i8);
+    }
+  }
   nvs_close(h);
   cfgLoaded = true;
-  ESP_LOGI(TAG,
-           "cfg NVS: voice=%d vol=%u pwm=%d amp=%d radar=%d fauto=%d fgest=%d gear=%d "
-           "ign=%d(%d~%d) led=[%d,%d,%d] srv=[%d,%d]",
-           flagVoice ? 1 : 0, (unsigned)board_i2s_get_volume(), cfgWantPwm ? 1 : 0,
-           cfgWantAmp ? 1 : 0, cfgWantRadar ? 1 : 0, fanAutoEnable ? 1 : 0,
-           fanGestureEnable ? 1 : 0, fanGearPct, radarIgnoreEnable ? 1 : 0, radarIgnoreFrom,
-           radarIgnoreTo, cfgSnapLed[0], cfgSnapLed[1], cfgSnapLed[2], cfgSnapSrv[0],
-           cfgSnapSrv[1]);
+  {
+    const int a0 = radarIgnoreCount > 0 ? radarIgnoreSec[0].from : 0;
+    const int b0 = radarIgnoreCount > 0 ? radarIgnoreSec[0].to : -60;
+    ESP_LOGI(TAG,
+             "cfg NVS: voice=%d vol=%u pwm=%d amp=%d radar=%d fauto=%d fgest=%d gear=%d "
+             "ign=%d n=%d(%d~%d) led=[%d,%d,%d] srv=[%d,%d]",
+             flagVoice ? 1 : 0, (unsigned)board_i2s_get_volume(), cfgWantPwm ? 1 : 0,
+             cfgWantAmp ? 1 : 0, cfgWantRadar ? 1 : 0, fanAutoEnable ? 1 : 0,
+             fanGestureEnable ? 1 : 0, fanGearPct, radarIgnoreEnable ? 1 : 0, radarIgnoreCount, a0,
+             b0, cfgSnapLed[0], cfgSnapLed[1], cfgSnapLed[2], cfgSnapSrv[0], cfgSnapSrv[1]);
+  }
 }
 
 /** 按 snap 写回 LED/舵机（调用方已保证 PWM/OE 已开）。 */
