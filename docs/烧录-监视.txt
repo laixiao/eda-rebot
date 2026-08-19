@@ -25,7 +25,7 @@
 ======= 全量刷（首次 / 改分区 / 救砖）=======
 在仓库根目录执行（COM 口按实际改）：
 
-  .\scripts\flash_all.ps1 -Port COM4
+.\scripts\flash_all.ps1 -Port COM4
 
 会编译并写入 bootloader / 分区表 / otadata / 救援 / 主系统。
 不要用 idf.py flash（地址不对）。
