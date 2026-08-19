@@ -23,6 +23,7 @@ idf_component_register(
         "radar_at6010.cpp"
         "voice_sr.cpp"
         "wake_reply.cpp"
+        "board_camera.cpp"
     INCLUDE_DIRS
         "."
         "${CMAKE_CURRENT_BINARY_DIR}"
@@ -48,6 +49,7 @@ idf_component_register(
         esp_driver_i2s
         esp_driver_uart
         espressif__esp-sr
+        espressif__esp32-camera
 )
 
 # 早期展开阶段不能 GLOB / target_add_binary_data

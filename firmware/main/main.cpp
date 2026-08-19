@@ -29,6 +29,7 @@
 #include "board_config.h"
 #include "board_i2c.h"
 #include "board_i2s.h"
+#include "board_camera.h"
 #include "xl9555.h"
 #include "pca9685.h"
 #include "ssd1306.h"
@@ -103,6 +104,8 @@ static bool savedFanAuto = false;
 static bool savedFanGesture = false;
 static int spotDutyPct[SPOT_COUNT] = {0, 0, 0};
 static bool i2sReady = false;
+static bool cameraReady = false;
+static volatile bool mjpegStreaming = false;
 static bool wifiOk = false;
 static char ipStr[16] = {0};
 
@@ -1615,7 +1618,11 @@ static esp_err_t handleApiIndex(httpd_req_t *req) {
   body += "{\"path\":\"/api/ota\",\"methods\":[\"GET\",\"POST\"]},";
   body += "{\"path\":\"/api/logs\"},";
   body += "{\"path\":\"/api/radar\",\"note\":\"power; scheduleOn/Off HH:MM + scheduleEnable; ignoreEnable + ignoreAdd/Del/Id/From/To\"},";
-  body += "{\"path\":\"/api/radar/live\"},{\"path\":\"/radar\"}";
+  body += "{\"path\":\"/api/radar/live\"},{\"path\":\"/radar\"},";
+  body += "{\"path\":\"/api/camera\",\"note\":\"GET status; POST init + resolution 0..4\"},";
+  body += "{\"path\":\"/api/camera/photo\",\"note\":\"GET JPEG snapshot\"},";
+  body += "{\"path\":\"/api/camera/stream\",\"note\":\"GET MJPEG stream; POST /stop to end\"},";
+  body += "{\"path\":\"/api/camera/resolution\",\"note\":\"POST resolution 0..4 (QVGA/VGA/SVGA/XGA/SXGA)\"}";
   body += "]}";
   return sendJson(req, 200, body);
 }
@@ -1975,6 +1982,7 @@ static esp_err_t handleStatus(httpd_req_t *req) {
            "\"psram\":%s,\"psramBytes\":%u,"
            "\"xl9555\":%s,\"oled\":%s,\"pca9685\":%s,\"i2s\":%s,"
            "\"pwmEnable\":%s,\"ampEnable\":%s,\"volume\":%u,\"radarPower\":%s,\"peripheralsOff\":%s,\"otaBusy\":%s,"
+           "\"camera\":%s,\"cameraRes\":%d,"
            "\"leds\":[%d,%d,%d],\"fan\":%s,\"voice\":%s,\"i2c\":%s}",
            FW_VERSION, ipStr, rssi, timeSynced ? "true" : "false", localTime,
            psramOk ? "true" : "false", (unsigned)psramBytes,
@@ -1983,7 +1991,9 @@ static esp_err_t handleStatus(httpd_req_t *req) {
            flagPwm ? "true" : "false", flagAmp ? "true" : "false",
            (unsigned)board_i2s_get_volume(),
            flagRadarPwr ? "true" : "false", flagPeriphOff ? "true" : "false",
-           otaBusy ? "true" : "false", spotDutyPct[0],
+           otaBusy ? "true" : "false",
+           cameraReady ? "true" : "false", board_camera_get_resolution(),
+           spotDutyPct[0],
            spotDutyPct[1], spotDutyPct[2], fan, voice, i2cKnownJson().c_str());
   return sendJson(req, 200, buf);
 }
@@ -2533,6 +2543,107 @@ static esp_err_t handleOta(httpd_req_t *req) {
                   "eda_robot.bin on rescue page\"}");
 }
 
+// ---- camera handlers ----
+static esp_err_t handleCameraInit(httpd_req_t *req) {
+  auto a = loadArgs(req);
+  if (argsHasKey(a, "resolution")) {
+    int r = argInt(a, "resolution", 1);
+    board_camera_set_resolution(r);
+  }
+  if (!cameraReady) {
+    cameraReady = board_camera_init();
+    if (!cameraReady)
+      return sendJson(req, 500, "{\"ok\":false,\"error\":\"camera init failed\"}");
+  }
+  char b[96];
+  snprintf(b, sizeof(b), "{\"ok\":true,\"camera\":true,\"resolution\":%d}", board_camera_get_resolution());
+  return sendJson(req, 200, b);
+}
+
+static esp_err_t handleCameraStatus(httpd_req_t *req) {
+  char b[128];
+  snprintf(b, sizeof(b), "{\"ok\":true,\"camera\":%s,\"resolution\":%d,\"streaming\":%s}",
+           cameraReady ? "true" : "false", board_camera_get_resolution(),
+           mjpegStreaming ? "true" : "false");
+  return sendJson(req, 200, b);
+}
+
+static esp_err_t handleCameraPhoto(httpd_req_t *req) {
+  if (!cameraReady) {
+    cameraReady = board_camera_init();
+    if (!cameraReady)
+      return sendJson(req, 503, "{\"ok\":false,\"error\":\"camera not ready\"}");
+  }
+  uint8_t *jpg = nullptr;
+  size_t len = 0;
+  if (!board_camera_capture_jpeg(&jpg, &len))
+    return sendJson(req, 500, "{\"ok\":false,\"error\":\"capture failed\"}");
+  addCors(req);
+  httpd_resp_set_type(req, "image/jpeg");
+  httpd_resp_set_hdr(req, "Content-Disposition", "inline; filename=\"photo.jpg\"");
+  httpd_resp_set_hdr(req, "Cache-Control", "no-cache");
+  esp_err_t res = httpd_resp_send(req, (const char *)jpg, len);
+  board_camera_fb_return();
+  return res;
+}
+
+static esp_err_t handleCameraStream(httpd_req_t *req) {
+  if (!cameraReady) {
+    cameraReady = board_camera_init();
+    if (!cameraReady)
+      return sendJson(req, 503, "{\"ok\":false,\"error\":\"camera not ready\"}");
+  }
+  if (mjpegStreaming)
+    return sendJson(req, 409, "{\"ok\":false,\"error\":\"another stream active\"}");
+
+  static const char *STREAM_CONTENT_TYPE = "multipart/x-mixed-replace;boundary=frame";
+  static const char *STREAM_BOUNDARY = "\r\n--frame\r\n";
+  static const char *STREAM_PART = "Content-Type: image/jpeg\r\nContent-Length: %u\r\n\r\n";
+
+  addCors(req);
+  httpd_resp_set_type(req, STREAM_CONTENT_TYPE);
+  httpd_resp_set_hdr(req, "Cache-Control", "no-cache");
+  httpd_resp_set_hdr(req, "X-Framerate", "15");
+
+  mjpegStreaming = true;
+  esp_err_t res = ESP_OK;
+  while (mjpegStreaming) {
+    uint8_t *jpg = nullptr;
+    size_t len = 0;
+    if (!board_camera_capture_jpeg(&jpg, &len)) {
+      vTaskDelay(pdMS_TO_TICKS(50));
+      continue;
+    }
+    char hdr[80];
+    snprintf(hdr, sizeof(hdr), STREAM_PART, (unsigned)len);
+    res = httpd_resp_send_chunk(req, STREAM_BOUNDARY, strlen(STREAM_BOUNDARY));
+    if (res == ESP_OK) res = httpd_resp_send_chunk(req, hdr, strlen(hdr));
+    if (res == ESP_OK) res = httpd_resp_send_chunk(req, (const char *)jpg, len);
+    board_camera_fb_return();
+    if (res != ESP_OK) break;
+    vTaskDelay(pdMS_TO_TICKS(66)); // ~15 fps
+  }
+  mjpegStreaming = false;
+  return res;
+}
+
+static esp_err_t handleCameraStreamStop(httpd_req_t *req) {
+  mjpegStreaming = false;
+  return sendJson(req, 200, "{\"ok\":true,\"streaming\":false}");
+}
+
+static esp_err_t handleCameraResolution(httpd_req_t *req) {
+  auto a = loadArgs(req);
+  int r = argInt(a, "resolution", -1);
+  if (r < 0 || r > 4)
+    return sendJson(req, 400, "{\"ok\":false,\"error\":\"resolution 0..4\"}");
+  if (!board_camera_set_resolution(r))
+    return sendJson(req, 500, "{\"ok\":false,\"error\":\"set resolution failed\"}");
+  char b[64];
+  snprintf(b, sizeof(b), "{\"ok\":true,\"resolution\":%d}", r);
+  return sendJson(req, 200, b);
+}
+
 static esp_err_t handleNotFound(httpd_req_t *req, httpd_err_code_t err) {
   (void)err;
   if (req->method == HTTP_OPTIONS) return handleOptions(req);
@@ -2557,7 +2668,7 @@ static bool registerUri(httpd_handle_t s, const char *path, httpd_method_t metho
 static void setupHttp() {
   httpRegistrationOk = true;
   httpd_config_t config = HTTPD_DEFAULT_CONFIG();
-  config.max_uri_handlers = 64;
+  config.max_uri_handlers = 80;
   config.stack_size = 10240;
   config.uri_match_fn = httpd_uri_match_wildcard;
   config.recv_wait_timeout = 120;
@@ -2606,6 +2717,18 @@ static void setupHttp() {
   registerUri(server, "/api/ota", HTTP_OPTIONS, handleOptions);
   registerUri(server, "/api/rescue", HTTP_POST, handleRescue);
   registerUri(server, "/api/rescue", HTTP_OPTIONS, handleOptions);
+
+  registerUri(server, "/api/camera", HTTP_GET, handleCameraStatus);
+  registerUri(server, "/api/camera", HTTP_POST, handleCameraInit);
+  registerUri(server, "/api/camera", HTTP_OPTIONS, handleOptions);
+  registerUri(server, "/api/camera/photo", HTTP_GET, handleCameraPhoto);
+  registerUri(server, "/api/camera/photo", HTTP_OPTIONS, handleOptions);
+  registerUri(server, "/api/camera/stream", HTTP_GET, handleCameraStream);
+  registerUri(server, "/api/camera/stream", HTTP_OPTIONS, handleOptions);
+  registerUri(server, "/api/camera/stream/stop", HTTP_POST, handleCameraStreamStop);
+  registerUri(server, "/api/camera/stream/stop", HTTP_OPTIONS, handleOptions);
+  registerUri(server, "/api/camera/resolution", HTTP_POST, handleCameraResolution);
+  registerUri(server, "/api/camera/resolution", HTTP_OPTIONS, handleOptions);
 
   const char *mutating[] = {"/api/estop", "/api/shutdown", "/api/pwm", "/api/amp",
                             "/api/servo", "/api/servos", "/api/led", "/api/beep", "/api/oled"};

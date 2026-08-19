@@ -263,6 +263,32 @@ header .switch-periph.on{border-color:#f85149;background:#3b1212;color:#ff7b72}
     <button onclick="oled('clear')">清空</button>
   </div>
 </section>
+<section>
+  <h2>摄像头</h2>
+  <div class="row">
+    <button id="camInitBtn" class="primary" onclick="camInit()">初始化摄像头</button>
+    <span id="camStatus" class="badge off">未初始化</span>
+  </div>
+  <div class="row">
+    <label>分辨率</label>
+    <select id="camRes" onchange="camSetRes(+this.value)">
+      <option value="0">QVGA 320×240</option>
+      <option value="1" selected>VGA 640×480</option>
+      <option value="2">SVGA 800×600</option>
+      <option value="3">XGA 1024×768</option>
+      <option value="4">SXGA 1280×1024</option>
+    </select>
+  </div>
+  <div class="row" style="gap:8px">
+    <button id="camPhotoBtn" onclick="camPhoto()" disabled>📷 拍照</button>
+    <button id="camVideoBtn" onclick="camToggleStream()" disabled>🎬 视频</button>
+    <a id="camDownload" hidden download="photo.jpg" style="display:none">下载</a>
+  </div>
+  <div id="camPreview" style="margin-top:10px;text-align:center;min-height:40px">
+    <img id="camImg" style="max-width:100%;border-radius:8px;display:none"/>
+  </div>
+  <pre id="camLog" style="margin-top:6px">—</pre>
+</section>
 <section class="span-all radar-card" id="radarPanel">
   <div class="radar-head">
     <h2>60G 雷达</h2>
@@ -528,6 +554,7 @@ async function refresh(){
   renderFan(s.fan);
   renderVoice(s.voice);
   syncLedsFromStatus(s);
+  if(typeof camSyncFromStatus==='function') camSyncFromStatus(s);
   const rd=await api('GET','/api/radar');
   if(rd){
     const pwr=document.getElementById('swRadarPwr');
@@ -1066,6 +1093,96 @@ async function refreshRadarLive(){
   }
 }
 async function radarCmd(c){await api('POST','/api/radar',{cmd:c});refreshRadarLive()}
+// ---- Camera ----
+let camStreaming=false;
+async function camInit(){
+  const btn=document.getElementById('camInitBtn');
+  btn.disabled=true;
+  const log=document.getElementById('camLog');
+  log.textContent='初始化中…';
+  try{
+    const res=+document.getElementById('camRes').value;
+    const j=await api('POST','/api/camera',{resolution:res});
+    if(j&&j.ok!==false){
+      log.textContent='摄像头就绪 · 分辨率 '+res;
+      camUpdateUi(true,res);
+    }else{
+      log.textContent='初始化失败: '+(j&&j.error||'未知错误');
+    }
+  }catch(e){log.textContent='错误: '+e.message}
+  finally{btn.disabled=false}
+}
+function camUpdateUi(ready,res){
+  const st=document.getElementById('camStatus');
+  const photoBtn=document.getElementById('camPhotoBtn');
+  const videoBtn=document.getElementById('camVideoBtn');
+  st.textContent=ready?'已就绪':'未初始化';
+  st.className='badge'+(ready?'':' off');
+  if(photoBtn) photoBtn.disabled=!ready;
+  if(videoBtn) videoBtn.disabled=!ready;
+  if(res!=null){
+    const sel=document.getElementById('camRes');
+    if(sel && document.activeElement!==sel) sel.value=String(res);
+  }
+}
+async function camSetRes(level){
+  const log=document.getElementById('camLog');
+  const j=await api('POST','/api/camera/resolution',{resolution:level});
+  if(j&&j.ok!==false) log.textContent='分辨率已设为 '+level;
+  else log.textContent='设置失败: '+(j&&j.error||'');
+}
+async function camPhoto(){
+  const btn=document.getElementById('camPhotoBtn');
+  const log=document.getElementById('camLog');
+  const img=document.getElementById('camImg');
+  btn.disabled=true;
+  log.textContent='拍照中…';
+  try{
+    const r=await fetch('/api/camera/photo');
+    if(!r.ok) throw new Error('HTTP '+r.status);
+    const blob=await r.blob();
+    const url=URL.createObjectURL(blob);
+    img.src=url;
+    img.style.display='block';
+    img.onload=()=>{
+      const dl=document.getElementById('camDownload');
+      dl.href=url;dl.hidden=false;dl.style.display='inline';dl.textContent='💾 下载 ('+Math.round(blob.size/1024)+'KB)';
+    };
+    log.textContent='拍照完成 · '+Math.round(blob.size/1024)+' KB';
+  }catch(e){log.textContent='拍照失败: '+e.message}
+  finally{btn.disabled=false}
+}
+function camToggleStream(){
+  if(camStreaming) camStopStream();
+  else camStartStream();
+}
+function camStartStream(){
+  const img=document.getElementById('camImg');
+  const btn=document.getElementById('camVideoBtn');
+  const log=document.getElementById('camLog');
+  img.src='/api/camera/stream';
+  img.style.display='block';
+  camStreaming=true;
+  btn.textContent='⏹ 停止';
+  btn.classList.add('danger');
+  log.textContent='视频流播放中…';
+  const dl=document.getElementById('camDownload');
+  dl.hidden=true;dl.style.display='none';
+}
+async function camStopStream(){
+  const img=document.getElementById('camImg');
+  const btn=document.getElementById('camVideoBtn');
+  const log=document.getElementById('camLog');
+  camStreaming=false;
+  img.src='';img.style.display='none';
+  btn.textContent='🎬 视频';
+  btn.classList.remove('danger');
+  try{await api('POST','/api/camera/stream/stop')}catch(e){}
+  log.textContent='视频已停止';
+}
+function camSyncFromStatus(s){
+  if(s.camera!=null) camUpdateUi(!!s.camera, s.cameraRes);
+}
 refresh();refreshOta();refreshLogs();refreshRadarLive();
 const refreshTimer=setInterval(refresh,2500);
 const otaTimer=setInterval(refreshOta,8000);
