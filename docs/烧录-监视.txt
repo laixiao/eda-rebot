@@ -1,6 +1,9 @@
 ======= 环境 =======
 & 'C:\Espressif\tools\Microsoft.v5.5.5.PowerShell_profile.ps1'
 
+======= 监视 =======
+cd firmware
+idf.py -p COM4 monitor --no-reset
 
 ======= 构建 =======
 主系统：
@@ -35,9 +38,7 @@
 
 说明：供电不稳也能刷；跑大包时若 BROWNOUT 需加稳 5V。语音默认关（网页「语音」开关 / POST /api/voice），不开就不 init AFE。
 
-======= 监视 =======
-cd firmware
-idf.py -p COM4 monitor --no-reset
+
 
 ======= 日常 OTA（大包 → ota_0）=======
 主系统不能直接刷自己（单槽），必须先救援再上传。

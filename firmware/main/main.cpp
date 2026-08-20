@@ -25,9 +25,14 @@
 #include "esp_partition.h"
 #include "esp_sleep.h"
 #include "esp_system.h"
+#include "driver/gpio.h"
 
 #include "board_config.h"
 #include "board_i2c.h"
+#include "board_spi.h"
+#include "camera_board.h"
+#include "st7796.h"
+#include "xpt2046.h"
 #include "board_i2s.h"
 #include "xl9555.h"
 #include "pca9685.h"
@@ -41,15 +46,15 @@
 #include "wake_reply.h"
 
 static const char *TAG = "eda_robot";
-static const char *FW_VERSION = "3.6.26";
+static const char *FW_VERSION = "3.7.4-v5";
 static volatile bool otaBusy = false;
 static volatile bool shutdownPending = false;
 static volatile bool cfgDirty = false;
 static bool flagVoice = false;
-static int servoAngleDeg[2] = {90, 90};
+static int servoAngleDeg[5] = {90, 90, 90, 90, 90};
 /** 持久化镜像：急停清 spotDutyPct 时仍保留，避免随后 cfgSave 把 NVS 写成全 0 */
 static int cfgSnapLed[3] = {0, 0, 0};
-static int cfgSnapSrv[2] = {90, 90};
+static int cfgSnapSrv[5] = {90, 90, 90, 90, 90};
 static bool cfgWantPwm = false;
 static bool cfgWantAmp = false;
 static bool cfgWantRadar = false;
@@ -73,11 +78,30 @@ static TaskHandle_t recTaskHandle = nullptr;
 static SemaphoreHandle_t audioMutex = nullptr;
 
 static XL9555 xl;
-static PCA9685 pca;
+static PCA9685 pcaServo;
+static PCA9685 pcaMotor;
 static SSD1306 oled;
+static ST7796 lcd;
+static XPT2046 touch;
 
 static bool flagPwm = false;
 static bool flagAmp = false;
+static volatile int32_t enc1 = 0;
+static volatile int32_t enc2 = 0;
+static volatile int32_t enc3 = 0;
+static volatile int32_t enc4 = 0;
+static uint8_t prevXlA = 0;
+static bool enc34Initialized = false;
+static portMUX_TYPE encMux = portMUX_INITIALIZER_UNLOCKED;
+static bool flagStby = false;
+static bool lcdOk = false;
+static bool touchOk = false;
+static volatile uint8_t motorActiveMask = 0;
+static int64_t lastMotorCommandUs = 0;
+static const int64_t MOTOR_FAILSAFE_US = 1500000;
+static SemaphoreHandle_t cameraMutex = nullptr;
+static SemaphoreHandle_t streamSlot = nullptr;
+
 static bool flagRadarPwr = false;
 /** 每日时刻表（SNTP 校时后生效；分钟 0..1439，-1=未设） */
 static bool radarScheduleEnable = false;
@@ -120,6 +144,50 @@ static void actuatorUnlock() {
 }
 
 // ---- HTTP helpers ----
+// ---- encoders ----
+static void IRAM_ATTR onEnc1(void *) {
+  const int a = gpio_get_level((gpio_num_t)PIN_ENC1_A);
+  const int b = gpio_get_level((gpio_num_t)PIN_ENC1_B);
+  portENTER_CRITICAL_ISR(&encMux);
+  enc1 += (a == b) ? 1 : -1;
+  portEXIT_CRITICAL_ISR(&encMux);
+}
+
+static void IRAM_ATTR onEnc2(void *) {
+  const int a = gpio_get_level((gpio_num_t)PIN_ENC2_A);
+  const int b = gpio_get_level((gpio_num_t)PIN_ENC2_B);
+  portENTER_CRITICAL_ISR(&encMux);
+  enc2 += (a == b) ? 1 : -1;
+  portEXIT_CRITICAL_ISR(&encMux);
+}
+
+static void updateEnc34() {
+  uint8_t p0 = 0;
+  if (!xl.readPort(0, p0)) return;
+  radar_set_gpio_out((p0 >> XL_RADAR_OUT) & 1);
+  portENTER_CRITICAL(&encMux);
+  if (!enc34Initialized) {
+    prevXlA = p0;
+    enc34Initialized = true;
+    portEXIT_CRITICAL(&encMux);
+    return;
+  }
+  const uint8_t changed = p0 ^ prevXlA;
+  if (changed & (1u << XL_ENC3_A)) {
+    const bool a = (p0 >> XL_ENC3_A) & 1;
+    const bool b = (p0 >> XL_ENC3_B) & 1;
+    enc3 += (a == b) ? 1 : -1;
+  }
+  if (changed & (1u << XL_ENC4_A)) {
+    const bool a = (p0 >> XL_ENC4_A) & 1;
+    const bool b = (p0 >> XL_ENC4_B) & 1;
+    enc4 += (a == b) ? 1 : -1;
+  }
+  prevXlA = p0;
+  portEXIT_CRITICAL(&encMux);
+}
+
+
 static void addCors(httpd_req_t *req) {
   httpd_resp_set_hdr(req, "Access-Control-Allow-Origin", "*");
   httpd_resp_set_hdr(req, "Access-Control-Allow-Methods", "GET, POST, OPTIONS");
@@ -269,7 +337,8 @@ static std::string i2cKnownJson() {
   };
   add(ADDR_XL9555, xl.present());
   if (oled.present()) add(oled.addr(), true);
-  add(ADDR_PCA9685, pca.present());
+  add(ADDR_PCA_SERVO, pcaServo.present());
+  add(ADDR_PCA_MOTOR, pcaMotor.present());
   s += ']';
   return s;
 }
@@ -288,7 +357,7 @@ static std::string i2cScanJson(bool full = false) {
   if (full) {
     for (uint8_t addr = 0x08; addr < 0x78; addr++) append(addr);
   } else {
-    static const uint8_t kAddrs[] = {ADDR_XL9555, ADDR_OLED, 0x3D, ADDR_PCA9685};
+    static const uint8_t kAddrs[] = {ADDR_XL9555, ADDR_OLED, 0x3D, ADDR_PCA_SERVO, ADDR_PCA_MOTOR};
     for (uint8_t addr : kAddrs) append(addr);
   }
   s += ']';
@@ -324,7 +393,104 @@ static bool oledTryInit(uint8_t &addrOut, uint32_t &hzOut, int &failStep, std::s
 }
 
 // ---- actuators ----
-static bool pcaAllOffOrAbsent() { return !pca.present() || pca.allOff(); }
+static bool pcaAllOffOrAbsent() {
+  const bool sOk = !pcaServo.present() || pcaServo.allOff();
+  const bool mOk = !pcaMotor.present() || pcaMotor.allOff();
+  return sOk && mOk;
+}
+
+static bool motorStop(uint8_t id) {
+  if (id > 3) return false;
+  if (!actuatorLock()) return false;
+  const bool a = pcaMotor.setDuty(MOTOR_IN1[id], 0);
+  const bool b = pcaMotor.setDuty(MOTOR_IN2[id], 0);
+  if (a && b) motorActiveMask &= ~(1u << id);
+  else lastMotorCommandUs = 0;
+  actuatorUnlock();
+  return a && b;
+}
+
+static void encoders_init() {
+  gpio_config_t io = {};
+  io.intr_type = GPIO_INTR_ANYEDGE;
+  io.mode = GPIO_MODE_INPUT;
+  // ENC1 临时给雷达 UART（IO9/10），仅初始化 ENC2
+  const bool radarOwnsEnc1 =
+      (PIN_RADAR_UART_RX == PIN_ENC1_A || PIN_RADAR_UART_TX == PIN_ENC1_A ||
+       PIN_RADAR_UART_RX == PIN_ENC1_B || PIN_RADAR_UART_TX == PIN_ENC1_B);
+  io.pin_bit_mask = (1ULL << PIN_ENC2_A) | (1ULL << PIN_ENC2_B);
+  if (!radarOwnsEnc1) io.pin_bit_mask |= (1ULL << PIN_ENC1_A) | (1ULL << PIN_ENC1_B);
+  io.pull_up_en = GPIO_PULLUP_ENABLE;
+  io.pull_down_en = GPIO_PULLDOWN_DISABLE;
+  gpio_config(&io);
+  gpio_install_isr_service(0);
+  if (!radarOwnsEnc1) gpio_isr_handler_add((gpio_num_t)PIN_ENC1_A, onEnc1, nullptr);
+  gpio_isr_handler_add((gpio_num_t)PIN_ENC2_A, onEnc2, nullptr);
+}
+
+static bool setStby(bool on) {
+  if (!actuatorLock()) return false;
+  bool ok = true;
+  if (on) {
+    ok = pcaMotor.allOff();
+    if (ok) {
+      motorActiveMask = 0;
+      ok = xl.setPin(XL_STBY, true);
+    }
+  } else {
+    const bool stbyOk = xl.setPin(XL_STBY, false);
+    const bool pwmOk = pcaMotor.allOff();
+    if (stbyOk || pwmOk) motorActiveMask = 0;
+    ok = stbyOk && pwmOk;
+  }
+  if (on) {
+    if (ok) flagStby = true;
+  } else if (xl.present()) {
+    flagStby = false;
+  }
+  actuatorUnlock();
+  return ok;
+}
+
+static bool motorStopAll() {
+  if (!actuatorLock()) return false;
+  bool ok = true;
+  for (uint8_t i = 0; i < 4; i++) {
+    const bool a = pcaMotor.setDuty(MOTOR_IN1[i], 0);
+    const bool b = pcaMotor.setDuty(MOTOR_IN2[i], 0);
+    ok = a && b && ok;
+  }
+  if (ok) motorActiveMask = 0;
+  else lastMotorCommandUs = 0;
+  actuatorUnlock();
+  return ok;
+}
+
+static bool motorDrive(uint8_t id, int dir, int dutyPct) {
+  if (id > 3) return false;
+  if (dutyPct < 0) dutyPct = 0;
+  if (dutyPct > 100) dutyPct = 100;
+  uint16_t duty = (uint16_t)((dutyPct * 4095L) / 100);
+  if (dir == 0 || duty == 0) return motorStop(id);
+  if (!actuatorLock()) return false;
+  const bool clearedA = pcaMotor.setDuty(MOTOR_IN1[id], 0);
+  const bool clearedB = pcaMotor.setDuty(MOTOR_IN2[id], 0);
+  bool driven = false;
+  if (clearedA && clearedB) {
+    driven = dir > 0 ? pcaMotor.setDuty(MOTOR_IN1[id], duty)
+                     : pcaMotor.setDuty(MOTOR_IN2[id], duty);
+  }
+  if (driven) {
+    motorActiveMask |= (1u << id);
+    lastMotorCommandUs = esp_timer_get_time();
+  } else {
+    const bool stoppedA = pcaMotor.setDuty(MOTOR_IN1[id], 0);
+    const bool stoppedB = pcaMotor.setDuty(MOTOR_IN2[id], 0);
+    if (stoppedA && stoppedB) motorActiveMask &= ~(1u << id);
+  }
+  actuatorUnlock();
+  return driven;
+}
 
 static bool setPwmEnable(bool on) {
   if (!actuatorLock()) return false;
@@ -729,7 +895,7 @@ static bool setRadarPower(bool on) {
     actuatorUnlock();
     return !on;
   }
-  const bool ok = xl.setPin(XL_RADAR_PWR, !on);
+  const bool ok = true;  // v5: no MOSFET; soft power flag only
   if (ok) {
     flagRadarPwr = on;
     if (on) flagPeriphOff = false;
@@ -745,7 +911,7 @@ static bool servoAngle(uint8_t id, int angle) {
   if (angle > 180) angle = 180;
   uint16_t us =
       SERVO_US_MIN + (uint16_t)((uint32_t)(SERVO_US_MAX - SERVO_US_MIN) * angle / 180);
-  const bool ok = pca.setPulseUs(SERVO_CH[id], us);
+  const bool ok = pcaServo.setPulseUs(SERVO_CH[id], us);
   if (ok) {
     servoAngleDeg[id] = angle;
     cfgSnapSrv[id] = angle;
@@ -795,7 +961,7 @@ static bool setSpotDuty(uint8_t id, int dutyPct) {
   if (dutyPct < 0) dutyPct = 0;
   if (dutyPct > 100) dutyPct = 100;
   uint16_t d = (uint16_t)((dutyPct * 4095L) / 100);
-  const bool ok = pca.setDuty(SPOT_CH[id], d);
+  const bool ok = pcaMotor.setDuty(SPOT_CH[id], d);
   if (ok) {
     spotDutyPct[id] = dutyPct;
     cfgSnapLed[id] = dutyPct;
@@ -861,7 +1027,7 @@ static void fanDisableAuto(const char *why) {
  * 同时关闭雷达控风扇。
  */
 static bool applyManualFan(bool on, const char *src) {
-  if (!pca.present()) return false;
+  if (!pcaMotor.present()) return false;
   fanDisableAuto(src && strstr(src, "语音") ? "语音接管" : "手动接管");
   if (on) {
     if (!flagPwm && !setPwmEnable(true)) return false;
@@ -909,7 +1075,7 @@ static bool fanIsOn() { return spotDutyPct[0] > 0 && spotDutyPct[2] > 0; }
 
 /** 语音设绝对风量：LED_ALL=100、LED_1=pct（有效强度≈pct）。低于 20 抬到 20；0 则关。 */
 static bool applyManualFanLevel(int pct, const char *src) {
-  if (!pca.present()) return false;
+  if (!pcaMotor.present()) return false;
   if (pct <= 0) return applyManualFan(false, src);
   if (pct < 20) pct = 20;
   if (pct > 100) pct = 100;
@@ -1060,7 +1226,7 @@ static bool classifyFanPresent(const RadarSnapshot &rs, char *reason, size_t n) 
 }
 
 static bool applyRadarFan(bool on) {
-  if (!pca.present()) return false;
+  if (!pcaMotor.present()) return false;
   if (on) {
     // 手势切档开启时：按档位恢复；档位 0 则保持关（控风扇仍记「有人会话」由调用方处理）
     if (fanGestureEnable && fanGearPct <= 0) return true;
@@ -1237,7 +1403,7 @@ static int fanLevelIndex() {
 
 /** 手势设档：不关闭「控风扇」；与自动开/关分工。 */
 static bool applyGestureFanLevel(int pct) {
-  if (!pca.present()) return false;
+  if (!pcaMotor.present()) return false;
   if (pct < 0) pct = 0;
   if (pct > 100) pct = 100;
   fanGearPct = pct;
@@ -1346,7 +1512,7 @@ static bool emergencyStop() {
   if (xl.present()) {
     oeOk = xl.setPin(XL_OE, true);
     ampOk = xl.setPin(XL_AMP_SD, false);
-    radarOk = xl.setPin(XL_RADAR_PWR, true);
+    radarOk = true;  // v5: external VCC, soft flag
   }
   const bool pwmOk = pcaAllOffOrAbsent();
   if (oeOk) flagPwm = false;
@@ -1590,12 +1756,374 @@ static esp_err_t handleRadarPost(httpd_req_t *req) {
   return sendJson(req, 200, buf);
 }
 
+static esp_err_t handleStby(httpd_req_t *req) {
+  auto a = loadArgs(req);
+  bool on = argBool(a, "on", true);
+  if (!setStby(on)) return sendJson(req, 500, "{\"ok\":false,\"error\":\"xl9555 STBY write failed\"}");
+  char b[64];
+  snprintf(b, sizeof(b), "{\"ok\":true,\"motorStby\":%s}", on ? "true" : "false");
+  return sendJson(req, 200, b);
+}
+
+static esp_err_t handleMotor(httpd_req_t *req) {
+  auto a = loadArgs(req);
+  int id = argInt(a, "id", -1);
+  int dir = argInt(a, "dir", 0);
+  int duty = argInt(a, "duty", 40);
+  if (id < 0 || id > 3) return sendJson(req, 400, "{\"ok\":false,\"error\":\"id 0..3\"}");
+  if (duty < 0) duty = 0;
+  if (duty > 100) duty = 100;
+  if (dir != 0 && duty != 0 && (!flagPwm || !flagStby))
+    return sendJson(req, 400, "{\"ok\":false,\"error\":\"enable PWM and STBY first\"}");
+  if (!motorDrive((uint8_t)id, dir, duty))
+    return sendJson(req, 500, "{\"ok\":false,\"error\":\"motor write failed\"}");
+  char b[96];
+  snprintf(b, sizeof(b),
+           "{\"ok\":true,\"id\":%d,\"dir\":%d,\"duty\":%d,\"failsafeMs\":%u}",
+           id, dir, duty, (unsigned)(MOTOR_FAILSAFE_US / 1000));
+  return sendJson(req, 200, b);
+}
+
+static esp_err_t handleMotorStopAll(httpd_req_t *req) {
+  (void)loadArgs(req);
+  if (!motorStopAll()) return sendJson(req, 500, "{\"ok\":false,\"error\":\"motor stop failed\"}");
+  return sendJson(req, 200, "{\"ok\":true}");
+}
+
+static esp_err_t handleEncoders(httpd_req_t *req) {
+  uint8_t p0 = 0;
+  xl.readPort(0, p0);
+  portENTER_CRITICAL(&encMux);
+  int32_t e1 = enc1, e2 = enc2, e3 = enc3, e4 = enc4;
+  portEXIT_CRITICAL(&encMux);
+  char b[160];
+  snprintf(b, sizeof(b),
+           "{\"ok\":true,\"enc1\":%ld,\"enc2\":%ld,\"enc3\":%ld,\"enc4\":%ld,\"xlPort0\":%u}",
+           (long)e1, (long)e2, (long)e3, (long)e4, p0);
+  return sendJson(req, 200, b);
+}
+
+static esp_err_t handleEncReset(httpd_req_t *req) {
+  (void)loadArgs(req);
+  portENTER_CRITICAL(&encMux);
+  enc1 = 0;
+  enc2 = 0;
+  enc3 = 0;
+  enc4 = 0;
+  portEXIT_CRITICAL(&encMux);
+  return sendJson(req, 200, "{\"ok\":true}");
+}
+
+static esp_err_t handleCamera(httpd_req_t *req) {
+  auto a = loadArgs(req);
+  bool pwdnH = true, rstH = true;
+  const bool haveLvl = cameraCtrlLevels(xl, pwdnH, rstH);
+  if (req->method == HTTP_GET) {
+    char b[360];
+    snprintf(b, sizeof(b),
+             "{\"ok\":true,\"camera\":%s,\"res\":\"%s\","
+             "\"resOptions\":[\"qqvga\",\"qvga\",\"vga\",\"svga\",\"hd\",\"sxga\"],"
+             "\"pwdn_high\":%s,\"rst_high\":%s,\"levels_ok\":%s,"
+             "\"capture\":\"/api/camera/capture\",\"stream\":\"/stream\"}",
+             cameraOk() ? "true" : "false", cameraFramesizeName(),
+             haveLvl ? (pwdnH ? "true" : "false") : "null",
+             haveLvl ? (rstH ? "true" : "false") : "null",
+             haveLvl ? "true" : "false");
+    return sendJson(req, 200, b);
+  }
+
+  // 仅改分辨率（摄像头已开时立即生效；未开则记偏好）
+  if (argsHasKey(a, "res") && !argsHasKey(a, "on") && !argsHasKey(a, "hold")) {
+    const std::string res = argStr(a, "res", "qvga");
+    if (!cameraMutex || xSemaphoreTake(cameraMutex, pdMS_TO_TICKS(1000)) != pdTRUE)
+      return sendJson(req, 503, "{\"ok\":false,\"error\":\"camera busy\"}");
+    const bool ok = cameraSetFramesizeName(res.c_str());
+    xSemaphoreGive(cameraMutex);
+    if (!ok) return sendJson(req, 400, "{\"ok\":false,\"error\":\"bad or unsupported res\"}");
+    char b[120];
+    snprintf(b, sizeof(b), "{\"ok\":true,\"res\":\"%s\",\"camera\":%s}", cameraFramesizeName(),
+             cameraOk() ? "true" : "false");
+    return sendJson(req, 200, b);
+  }
+
+  bool on = argBool(a, "on", true);
+  const bool holdOnly = argBool(a, "hold", false);
+  if (argsHasKey(a, "res")) {
+    const std::string res = argStr(a, "res", "qvga");
+    if (!cameraSetFramesizeName(res.c_str()))
+      return sendJson(req, 400, "{\"ok\":false,\"error\":\"bad or unsupported res\"}");
+  }
+  if (!on && streamSlot && uxSemaphoreGetCount(streamSlot) == 0)
+    return sendJson(req, 409, "{\"ok\":false,\"error\":\"stop the active stream before powering camera off\"}");
+  if (!cameraMutex || xSemaphoreTake(cameraMutex, pdMS_TO_TICKS(1000)) != pdTRUE)
+    return sendJson(req, 503, "{\"ok\":false,\"error\":\"camera busy\"}");
+  if (on) {
+    bool ok = holdOnly ? cameraHoldPower(xl) : cameraBegin(xl);
+    cameraCtrlLevels(xl, pwdnH, rstH);
+    uint8_t in = 0, out = 0, cfg = 0;
+    const bool dump = xl.dumpPort0(in, out, cfg);
+    xSemaphoreGive(cameraMutex);
+    char b[420];
+    if (!ok) {
+      snprintf(b, sizeof(b),
+               "{\"ok\":false,\"error\":\"%s\",\"pwdn_high\":%s,\"rst_high\":%s,"
+               "\"p0_in\":%u,\"p0_out\":%u,\"p0_cfg\":%u,\"dump_ok\":%s,"
+               "\"hint\":\"Do NOT use ohm mode. Measure VOLTAGE U6.17 to GND; expect ~0V while held. "
+               "11.6kΩ is R22 and always looks similar.\"}",
+               holdOnly ? "camera hold power failed (XL cannot pull PWDN low?)" : "camera init failed",
+               pwdnH ? "true" : "false", rstH ? "true" : "false", (unsigned)in, (unsigned)out,
+               (unsigned)cfg, dump ? "true" : "false");
+      return sendJson(req, 500, b);
+    }
+    snprintf(b, sizeof(b),
+             "{\"ok\":true,\"camera\":%s,\"hold\":%s,\"res\":\"%s\",\"pwdn_high\":%s,\"rst_high\":%s,"
+             "\"p0_in\":%u,\"p0_out\":%u,\"p0_cfg\":%u}",
+             cameraOk() ? "true" : "false", holdOnly ? "true" : "false", cameraFramesizeName(),
+             pwdnH ? "true" : "false", rstH ? "true" : "false", (unsigned)in, (unsigned)out,
+             (unsigned)cfg);
+    return sendJson(req, 200, b);
+  }
+  cameraEnd(xl);
+  cameraCtrlLevels(xl, pwdnH, rstH);
+  xSemaphoreGive(cameraMutex);
+  char b[160];
+  snprintf(b, sizeof(b),
+           "{\"ok\":true,\"camera\":false,\"pwdn_high\":%s,\"rst_high\":%s}",
+           pwdnH ? "true" : "false", rstH ? "true" : "false");
+  return sendJson(req, 200, b);
+}
+
+static esp_err_t handleCameraCapture(httpd_req_t *req) {
+  auto a = loadArgs(req);
+  if (argsHasKey(a, "res")) {
+    const std::string res = argStr(a, "res", "qvga");
+    if (!cameraSetFramesizeName(res.c_str()))
+      return sendJson(req, 400, "{\"ok\":false,\"error\":\"bad or unsupported res\"}");
+  }
+  if (!cameraMutex || xSemaphoreTake(cameraMutex, pdMS_TO_TICKS(1000)) != pdTRUE)
+    return sendJson(req, 503, "{\"ok\":false,\"error\":\"camera busy\"}");
+  if (!cameraOk() && !cameraBegin(xl)) {
+    xSemaphoreGive(cameraMutex);
+    return sendJson(req, 500, "{\"ok\":false,\"error\":\"camera not ready\"}");
+  }
+  // 开着时再套一次，保证本次抓拍用所选分辨率
+  if (argsHasKey(a, "res")) cameraSetFramesizeName(argStr(a, "res", "qvga").c_str());
+  uint8_t *buf = nullptr;
+  size_t len = 0;
+  if (!cameraCaptureJpeg(buf, len) || !buf || len == 0) {
+    xSemaphoreGive(cameraMutex);
+    return sendJson(req, 500, "{\"ok\":false,\"error\":\"capture failed\"}");
+  }
+  addCors(req);
+  httpd_resp_set_type(req, "image/jpeg");
+  esp_err_t err = httpd_resp_send(req, (const char *)buf, len);
+  cameraReleaseFrame();
+  xSemaphoreGive(cameraMutex);
+  return err;
+}
+
+static esp_err_t streamAsync(httpd_req_t *req) {
+  if (!cameraMutex || xSemaphoreTake(cameraMutex, pdMS_TO_TICKS(1000)) != pdTRUE)
+    return sendJson(req, 503, "{\"ok\":false,\"error\":\"camera busy\"}");
+  const bool cameraReady = cameraOk() || cameraBegin(xl);
+  xSemaphoreGive(cameraMutex);
+  if (!cameraReady) return sendJson(req, 500, "{\"ok\":false,\"error\":\"camera not ready\"}");
+
+  addCors(req);
+  httpd_resp_set_type(req, "multipart/x-mixed-replace; boundary=frame");
+  httpd_resp_set_hdr(req, "Connection", "close");
+
+  int64_t t0 = esp_timer_get_time();
+  while ((esp_timer_get_time() - t0) < 120000000LL) {
+    if (xSemaphoreTake(cameraMutex, pdMS_TO_TICKS(1000)) != pdTRUE) continue;
+    if (!cameraOk() && !cameraBegin(xl)) {
+      xSemaphoreGive(cameraMutex);
+      vTaskDelay(pdMS_TO_TICKS(50));
+      continue;
+    }
+    uint8_t *buf = nullptr;
+    size_t len = 0;
+    if (!cameraCaptureJpeg(buf, len)) {
+      xSemaphoreGive(cameraMutex);
+      vTaskDelay(pdMS_TO_TICKS(10));
+      continue;
+    }
+    char hdr[128];
+    int hlen = snprintf(hdr, sizeof(hdr),
+                        "--frame\r\nContent-Type: image/jpeg\r\nContent-Length: %u\r\n\r\n",
+                        (unsigned)len);
+    if (httpd_resp_send_chunk(req, hdr, hlen) != ESP_OK ||
+        httpd_resp_send_chunk(req, (const char *)buf, len) != ESP_OK ||
+        httpd_resp_send_chunk(req, "\r\n", 2) != ESP_OK) {
+      cameraReleaseFrame();
+      xSemaphoreGive(cameraMutex);
+      break;
+    }
+    cameraReleaseFrame();
+    xSemaphoreGive(cameraMutex);
+    vTaskDelay(pdMS_TO_TICKS(30));
+  }
+  httpd_resp_send_chunk(req, nullptr, 0);
+  return ESP_OK;
+}
+
+static void streamTask(void *arg) {
+  httpd_req_t *req = static_cast<httpd_req_t *>(arg);
+  streamAsync(req);
+  httpd_req_async_handler_complete(req);
+  xSemaphoreGive(streamSlot);
+  vTaskDelete(nullptr);
+}
+
+static esp_err_t handleStream(httpd_req_t *req) {
+  if (!streamSlot || xSemaphoreTake(streamSlot, 0) != pdTRUE)
+    return sendJson(req, 503, "{\"ok\":false,\"error\":\"stream already active\"}");
+  httpd_req_t *copy = nullptr;
+  if (httpd_req_async_handler_begin(req, &copy) != ESP_OK) {
+    xSemaphoreGive(streamSlot);
+    return sendJson(req, 500, "{\"ok\":false,\"error\":\"stream async setup failed\"}");
+  }
+  if (xTaskCreate(streamTask, "camera_stream", 6144, copy, 4, nullptr) != pdPASS) {
+    sendJson(copy, 500, "{\"ok\":false,\"error\":\"stream task start failed\"}");
+    httpd_req_async_handler_complete(copy);
+    xSemaphoreGive(streamSlot);
+  }
+  return ESP_OK;
+}
+
+static uint16_t parseColor(const std::string &s, uint16_t defVal) {
+  if (s.empty()) return defVal;
+  const char *p = s.c_str();
+  if (s.size() > 2 && (s[0] == '0') && (s[1] == 'x' || s[1] == 'X')) p += 2;
+  char *end = nullptr;
+  unsigned long v = strtoul(p, &end, 16);
+  if (end == p) return defVal;
+  return (uint16_t)v;
+}
+
+static esp_err_t handleLcd(httpd_req_t *req) {
+  auto a = loadArgs(req);
+  std::string cmd = argStr(a, "cmd", "status");
+  if (cmd == "init" || (cmd == "status" && !lcdOk && argBool(a, "on", false))) {
+    lcdOk = lcd.begin(xl);
+    touchOk = touch.begin(xl);
+    if (!lcdOk) return sendJson(req, 500, "{\"ok\":false,\"error\":\"lcd init failed\"}");
+    return sendJson(req, 200, "{\"ok\":true,\"lcd\":true,\"w\":320,\"h\":480}");
+  }
+  if (cmd == "status") {
+    char b[64];
+    snprintf(b, sizeof(b), "{\"ok\":true,\"lcd\":%s}", lcdOk ? "true" : "false");
+    return sendJson(req, 200, b);
+  }
+  if (!lcdOk) {
+    lcdOk = lcd.begin(xl);
+    touchOk = touch.begin(xl);
+  }
+  if (!lcdOk) return sendJson(req, 500, "{\"ok\":false,\"error\":\"lcd not ready\"}");
+  if (cmd == "on") {
+    lcd.backlight(true);
+    lcdOk = lcd.present();
+    if (!lcdOk) return sendJson(req, 500, "{\"ok\":false,\"error\":\"lcd backlight write failed\"}");
+    return sendJson(req, 200, "{\"ok\":true,\"backlight\":true}");
+  }
+  if (cmd == "off") {
+    lcd.backlight(false);
+    lcdOk = lcd.present();
+    if (!lcdOk) return sendJson(req, 500, "{\"ok\":false,\"error\":\"lcd backlight write failed\"}");
+    return sendJson(req, 200, "{\"ok\":true,\"backlight\":false}");
+  }
+  if (cmd == "fill" || cmd == "color") {
+    uint16_t c = parseColor(argStr(a, "color", "001F"), 0x001F);
+    lcd.fillScreen(c);
+    lcdOk = lcd.present();
+    if (!lcdOk) return sendJson(req, 500, "{\"ok\":false,\"error\":\"lcd fill failed\"}");
+    char b[64];
+    snprintf(b, sizeof(b), "{\"ok\":true,\"color\":%u}", c);
+    return sendJson(req, 200, b);
+  }
+  if (cmd == "rect") {
+    int x = argInt(a, "x", 0);
+    int y = argInt(a, "y", 0);
+    int w = argInt(a, "w", 40);
+    int h = argInt(a, "h", 40);
+    uint16_t c = parseColor(argStr(a, "color", "FFFF"), 0xFFFF);
+    lcd.fillRect((int16_t)x, (int16_t)y, (int16_t)w, (int16_t)h, c);
+    lcdOk = lcd.present();
+    if (!lcdOk) return sendJson(req, 500, "{\"ok\":false,\"error\":\"lcd rect failed\"}");
+    return sendJson(req, 200, "{\"ok\":true}");
+  }
+  if (cmd == "text") {
+    std::string text = argStr(a, "text", "EDA Robot");
+    if (text.size() > 240) text.resize(240);
+    int x = argInt(a, "x", 8);
+    int y = argInt(a, "y", 8);
+    int scale = argInt(a, "scale", 2);
+    if (scale < 1) scale = 1;
+    if (scale > 6) scale = 6;
+    uint16_t fg = parseColor(argStr(a, "color", "FFFF"), 0xFFFF);
+    uint16_t bg = parseColor(argStr(a, "bg", "0000"), 0x0000);
+    if (argBool(a, "clear", false)) lcd.fillScreen(bg);
+    lcd.drawText((int16_t)x, (int16_t)y, text.c_str(), fg, bg, (uint8_t)scale);
+    lcd.backlight(true);
+    lcdOk = lcd.present();
+    if (!lcdOk) return sendJson(req, 500, "{\"ok\":false,\"error\":\"lcd text failed\"}");
+    char b[96];
+    snprintf(b, sizeof(b), "{\"ok\":true,\"x\":%d,\"y\":%d,\"scale\":%d,\"len\":%u}", x, y, scale,
+             (unsigned)text.size());
+    return sendJson(req, 200, b);
+  }
+  if (cmd == "demo") {
+    lcd.fillScreen(0x0000);
+    lcd.fillRect(0, 0, (int16_t)lcd.width(), 48, 0x001F);
+    lcd.drawText(8, 12, "EDA-RobotPro", 0xFFFF, 0x001F, 2);
+    char line[48];
+    snprintf(line, sizeof(line), "FW %s", FW_VERSION);
+    lcd.drawText(8, 64, line, 0x07FF, 0x0000, 2);
+    snprintf(line, sizeof(line), "IP %s", ipStr[0] ? ipStr : "no-ip");
+    lcd.drawText(8, 96, line, 0x07E0, 0x0000, 2);
+    snprintf(line, sizeof(line), "LCD %ux%u", lcd.width(), lcd.height());
+    lcd.drawText(8, 128, line, 0xFFE0, 0x0000, 2);
+    lcd.drawText(8, 176, "Web Debug -> LCD text", 0xFFFF, 0x0000, 2);
+    lcd.drawText(8, 208, "ASCII only (5x7)", 0xC618, 0x0000, 2);
+    lcd.backlight(true);
+    lcdOk = lcd.present();
+    if (!lcdOk) return sendJson(req, 500, "{\"ok\":false,\"error\":\"lcd demo failed\"}");
+    return sendJson(req, 200, "{\"ok\":true,\"demo\":true}");
+  }
+  if (cmd == "rotate") {
+    int r = argInt(a, "r", 0);
+    lcd.setRotation((uint8_t)r);
+    lcdOk = lcd.present();
+    if (!lcdOk) return sendJson(req, 500, "{\"ok\":false,\"error\":\"lcd rotation failed\"}");
+    char b[96];
+    snprintf(b, sizeof(b), "{\"ok\":true,\"rotation\":%d,\"w\":%u,\"h\":%u}", r, lcd.width(),
+             lcd.height());
+    return sendJson(req, 200, b);
+  }
+  return sendJson(req, 400,
+                  "{\"ok\":false,\"error\":\"cmd=init|on|off|fill|rect|text|demo|rotate\"}");
+}
+
+static esp_err_t handleTouch(httpd_req_t *req) {
+  if ((!touchOk || !touch.present()) && xl.present()) touchOk = touch.begin(xl);
+  if (!touchOk || !touch.present())
+    return sendJson(req, 503, "{\"ok\":false,\"error\":\"touch not ready\"}");
+  uint16_t x = 0, y = 0, z = 0;
+  bool pressed = touch.touched();
+  bool ok = touch.read(x, y, z);
+  char b[128];
+  snprintf(b, sizeof(b),
+           "{\"ok\":true,\"irq\":%s,\"valid\":%s,\"x\":%u,\"y\":%u,\"z\":%u}",
+           pressed ? "true" : "false", ok ? "true" : "false", x, y, z);
+  return sendJson(req, 200, b);
+}
+
 static esp_err_t handleApiIndex(httpd_req_t *req) {
   std::string body = "{";
   body += "\"ok\":true,\"fw\":\"";
   body += FW_VERSION;
   body += "\",\"framework\":\"esp-idf\",";
-  body += "\"board\":\"AI通用机器人_v6-1 / V1.0.0\",";
+  body += "\"board\":\"AI通用机器人_v5 / V1.0.0\",";
   body += "\"endpoints\":[";
   body += "{\"path\":\"/api/status\"},{\"path\":\"/api/estop\",\"note\":\"POST {on:true|false} 关闭/恢复所有外设\"},";
   body += "{\"path\":\"/api/shutdown\",\"note\":\"deep sleep; wake by power cycle or reset\"},";
@@ -1769,8 +2297,10 @@ static void cfgSave() {
   nvs_set_u8(h, "led0", clampU8(cfgSnapLed[0]));
   nvs_set_u8(h, "led1", clampU8(cfgSnapLed[1]));
   nvs_set_u8(h, "led2", clampU8(cfgSnapLed[2]));
-  nvs_set_u8(h, "srv0", clampU8(cfgSnapSrv[0]));
-  nvs_set_u8(h, "srv1", clampU8(cfgSnapSrv[1]));
+  for (uint8_t i = 0; i < SERVO_COUNT; i++) {
+    char key[8]; snprintf(key, sizeof(key), "srv%u", (unsigned)i);
+    nvs_set_u8(h, key, clampU8(cfgSnapSrv[i]));
+  }
   nvs_set_u8(h, "rsch_en", radarScheduleEnable ? 1 : 0);
   nvs_set_u16(h, "rsch_on", radarSchedOnMin < 0 ? 65535 : (uint16_t)radarSchedOnMin);
   nvs_set_u16(h, "rsch_off", radarSchedOffMin < 0 ? 65535 : (uint16_t)radarSchedOffMin);
@@ -1818,13 +2348,12 @@ static void cfgLoad() {
   if (nvs_get_u8(h, "led0", &v) == ESP_OK) cfgSnapLed[0] = v > 100 ? 100 : (int)v;
   if (nvs_get_u8(h, "led1", &v) == ESP_OK) cfgSnapLed[1] = v > 100 ? 100 : (int)v;
   if (nvs_get_u8(h, "led2", &v) == ESP_OK) cfgSnapLed[2] = v > 100 ? 100 : (int)v;
-  if (nvs_get_u8(h, "srv0", &v) == ESP_OK) {
-    cfgSnapSrv[0] = v > 180 ? 180 : (int)v;
-    servoAngleDeg[0] = cfgSnapSrv[0];
-  }
-  if (nvs_get_u8(h, "srv1", &v) == ESP_OK) {
-    cfgSnapSrv[1] = v > 180 ? 180 : (int)v;
-    servoAngleDeg[1] = cfgSnapSrv[1];
+  for (uint8_t i = 0; i < SERVO_COUNT; i++) {
+    char key[8]; snprintf(key, sizeof(key), "srv%u", (unsigned)i);
+    if (nvs_get_u8(h, key, &v) == ESP_OK) {
+      cfgSnapSrv[i] = v > 180 ? 180 : (int)v;
+      servoAngleDeg[i] = cfgSnapSrv[i];
+    }
   }
   if (nvs_get_u8(h, "rsch_en", &v) == ESP_OK) radarScheduleEnable = v != 0;
   uint16_t u16 = 65535;
@@ -1882,7 +2411,7 @@ static void cfgLoad() {
 
 /** 按 snap 写回 LED/舵机（调用方已保证 PWM/OE 已开）。 */
 static bool cfgRestoreOutputs() {
-  if (!pca.present()) return false;
+  if (!pcaMotor.present()) return false;
   bool ok = true;
   if (!actuatorLock()) return false;
   for (uint8_t i = 0; i < SPOT_COUNT; i++) {
@@ -1913,13 +2442,13 @@ static void cfgApplyBoot() {
 
   const bool anyLed = cfgSnapLed[0] > 0 || cfgSnapLed[1] > 0 || cfgSnapLed[2] > 0;
   const bool needPwm = cfgWantPwm || anyLed;
-  if (needPwm && pca.present()) {
+  if (needPwm && (pcaServo.present() || pcaMotor.present())) {
     if (!setPwmEnable(true)) {
       ESP_LOGW(TAG, "cfg restore: PWM enable failed");
     } else if (!cfgRestoreOutputs()) {
       ESP_LOGW(TAG, "cfg restore: LED/servo write failed");
     }
-  } else if (cfgWantPwm && !pca.present()) {
+  } else if (cfgWantPwm && !pcaServo.present() && !pcaMotor.present()) {
     ESP_LOGW(TAG, "cfg restore: PWM wanted but PCA absent");
   }
 
@@ -1968,18 +2497,22 @@ static esp_err_t handleStatus(httpd_req_t *req) {
   voiceJsonInto(voice, sizeof(voice));
   char localTime[16];
   localTimeStr(localTime, sizeof(localTime));
-  char buf[1700];
+  char buf[2200];
   snprintf(buf, sizeof(buf),
-           "{\"ok\":true,\"fw\":\"%s\",\"board\":\"v6-1\",\"ip\":\"%s\",\"rssi\":%d,"
+           "{\"ok\":true,\"fw\":\"%s\",\"board\":\"v5\",\"ip\":\"%s\",\"rssi\":%d,"
            "\"timeSynced\":%s,\"localTime\":\"%s\","
            "\"psram\":%s,\"psramBytes\":%u,"
-           "\"xl9555\":%s,\"oled\":%s,\"pca9685\":%s,\"i2s\":%s,"
+           "\"xl9555\":%s,\"oled\":%s,\"pcaServo\":%s,\"pcaMotor\":%s,\"i2s\":%s,"
+           "\"lcd\":%s,\"touch\":%s,\"stby\":%s,\"camera\":%s,\"camRes\":\"%s\",\"streaming\":%s,"
            "\"pwmEnable\":%s,\"ampEnable\":%s,\"volume\":%u,\"radarPower\":%s,\"peripheralsOff\":%s,\"otaBusy\":%s,"
            "\"leds\":[%d,%d,%d],\"fan\":%s,\"voice\":%s,\"i2c\":%s}",
            FW_VERSION, ipStr, rssi, timeSynced ? "true" : "false", localTime,
            psramOk ? "true" : "false", (unsigned)psramBytes,
            xl.present() ? "true" : "false", oled.present() ? "true" : "false",
-           pca.present() ? "true" : "false", i2sReady ? "true" : "false",
+           pcaServo.present() ? "true" : "false", pcaMotor.present() ? "true" : "false", i2sReady ? "true" : "false",
+           lcdOk ? "true" : "false", touchOk ? "true" : "false", flagStby ? "true" : "false",
+           cameraOk() ? "true" : "false", cameraFramesizeName(),
+           (streamSlot && uxSemaphoreGetCount(streamSlot) == 0) ? "true" : "false",
            flagPwm ? "true" : "false", flagAmp ? "true" : "false",
            (unsigned)board_i2s_get_volume(),
            flagRadarPwr ? "true" : "false", flagPeriphOff ? "true" : "false",
@@ -2557,7 +3090,8 @@ static bool registerUri(httpd_handle_t s, const char *path, httpd_method_t metho
 static void setupHttp() {
   httpRegistrationOk = true;
   httpd_config_t config = HTTPD_DEFAULT_CONFIG();
-  config.max_uri_handlers = 64;
+  // FAN+v5 并集约 75 条 URI（含 OPTIONS）；留余量避免 HANDLERS_FULL 整站停服
+  config.max_uri_handlers = 128;
   config.stack_size = 10240;
   config.uri_match_fn = httpd_uri_match_wildcard;
   config.recv_wait_timeout = 120;
@@ -2606,6 +3140,28 @@ static void setupHttp() {
   registerUri(server, "/api/ota", HTTP_OPTIONS, handleOptions);
   registerUri(server, "/api/rescue", HTTP_POST, handleRescue);
   registerUri(server, "/api/rescue", HTTP_OPTIONS, handleOptions);
+
+  registerUri(server, "/api/stby", HTTP_POST, handleStby);
+  registerUri(server, "/api/stby", HTTP_OPTIONS, handleOptions);
+  registerUri(server, "/api/motor", HTTP_POST, handleMotor);
+  registerUri(server, "/api/motor", HTTP_OPTIONS, handleOptions);
+  registerUri(server, "/api/motor/stop_all", HTTP_POST, handleMotorStopAll);
+  registerUri(server, "/api/motor/stop_all", HTTP_OPTIONS, handleOptions);
+  registerUri(server, "/api/encoders", HTTP_GET, handleEncoders);
+  registerUri(server, "/api/encoders", HTTP_OPTIONS, handleOptions);
+  registerUri(server, "/api/encoders/reset", HTTP_POST, handleEncReset);
+  registerUri(server, "/api/encoders/reset", HTTP_OPTIONS, handleOptions);
+  registerUri(server, "/api/camera", HTTP_GET, handleCamera);
+  registerUri(server, "/api/camera", HTTP_POST, handleCamera);
+  registerUri(server, "/api/camera", HTTP_OPTIONS, handleOptions);
+  registerUri(server, "/api/camera/capture", HTTP_GET, handleCameraCapture);
+  registerUri(server, "/api/camera/capture", HTTP_OPTIONS, handleOptions);
+  registerUri(server, "/stream", HTTP_GET, handleStream);
+  registerUri(server, "/api/lcd", HTTP_POST, handleLcd);
+  registerUri(server, "/api/lcd", HTTP_OPTIONS, handleOptions);
+  registerUri(server, "/api/touch", HTTP_GET, handleTouch);
+  registerUri(server, "/api/touch", HTTP_OPTIONS, handleOptions);
+
 
   const char *mutating[] = {"/api/estop", "/api/shutdown", "/api/pwm", "/api/amp",
                             "/api/servo", "/api/servos", "/api/led", "/api/beep", "/api/oled"};
@@ -2686,8 +3242,9 @@ static void background_task(void *) {
     if (flagRadarPwr) radar_poll();
     RadarSnapshot rs;
     radar_get_snapshot(rs);
-    if (fanGestureEnable && pca.present()) updateFanGesture(rs);
-    if (fanAutoEnable && pca.present()) updateRadarFan(rs);
+    updateEnc34();
+    if (fanGestureEnable && pcaMotor.present()) updateFanGesture(rs);
+    if (fanAutoEnable && pcaMotor.present()) updateRadarFan(rs);
     radarScheduleTick();
     if (oled.present()) oledShowHome(false);
     const int64_t now = esp_timer_get_time();
@@ -2710,20 +3267,23 @@ extern "C" void app_main(void) {
   esp_ota_mark_app_valid_cancel_rollback();
 
   ESP_LOGI(TAG, "=== EDA Robot LAN API (ESP-IDF) ===");
-  ESP_LOGI(TAG, "FW %s  board AI通用机器人_v6-1", FW_VERSION);
+  ESP_LOGI(TAG, "FW %s  board AI通用机器人_v5", FW_VERSION);
   const esp_partition_t *run = esp_ota_get_running_partition();
   if (run) ESP_LOGI(TAG, "running partition %s @0x%x", run->label, (unsigned)run->address);
 
   actuatorMutex = xSemaphoreCreateRecursiveMutex();
+  cameraMutex = xSemaphoreCreateMutex();
+  streamSlot = xSemaphoreCreateCounting(1, 1);
   oledMutex = xSemaphoreCreateMutex();
   audioMutex = xSemaphoreCreateMutex();
   cfgMutex = xSemaphoreCreateMutex();
-  if (!actuatorMutex || !oledMutex || !cfgMutex) {
+  if (!actuatorMutex || !cameraMutex || !streamSlot || !oledMutex || !cfgMutex) {
     ESP_LOGE(TAG, "failed to create synchronization primitives");
     return;
   }
 
   radar_init();
+  encoders_init();
   const bool radarBootUart = radar_start();
   ESP_LOGI(TAG, "radar UART=%d (power still off until /api/radar power=1)", radarBootUart);
   board_i2c_init();
@@ -2735,15 +3295,31 @@ extern "C" void app_main(void) {
     okOled = oled.begin(ADDR_OLED, 100000);
   else if (board_i2c_probe(0x3D))
     okOled = oled.begin(0x3D, 100000);
-  bool okPca = board_i2c_probe(ADDR_PCA9685) && pca.begin(ADDR_PCA9685, 50.0f);
+  bool okPcaS = board_i2c_probe(ADDR_PCA_SERVO) && pcaServo.begin(ADDR_PCA_SERVO, 50.0f);
+  bool okPcaM = board_i2c_probe(ADDR_PCA_MOTOR) && pcaMotor.begin(ADDR_PCA_MOTOR, 1000.0f);
+  bool okPca = okPcaS || okPcaM;
 
-  ESP_LOGI(TAG, "XL9555=%d OLED=%d PCA9685=%d CJK=%u (bare-board safe)", okXl, okOled, okPca,
-           (unsigned)font_cjk_count());
+  if (okXl) {
+    lcdOk = lcd.begin(xl);
+    touchOk = touch.begin(xl);
+    if (lcdOk) {
+      lcd.fillScreen(0x0000);
+      lcd.fillRect(0, 0, 320, 48, 0x001F);
+      lcd.drawText(8, 12, "EDA-RobotPro", 0xFFFF, 0x001F, 2);
+      lcd.drawText(8, 64, "boot OK", 0x07E0, 0x0000, 2);
+      lcdOk = lcd.present();
+    }
+    cameraPower(xl, false);
+  }
+
+  ESP_LOGI(TAG, "XL9555=%d OLED=%d PCA_S=%d PCA_M=%d LCD=%d TOUCH=%d CJK=%u", okXl, okOled,
+           okPcaS, okPcaM, lcdOk, touchOk, (unsigned)font_cjk_count());
   if (okOled && oledMutex && xSemaphoreTake(oledMutex, pdMS_TO_TICKS(100)) == pdTRUE) {
     oled.printfLines("EDA Robot", "汉字字库就绪", "等待 WiFi...", FW_VERSION);
     xSemaphoreGive(oledMutex);
   }
   flagPwm = flagAmp = flagRadarPwr = flagPeriphOff = false;
+  (void)okPca;
   cfgLoad();
 
   i2sReady = board_i2s_init();

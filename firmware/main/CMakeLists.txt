@@ -18,7 +18,11 @@ idf_component_register(
         "pca9685.cpp"
         "ssd1306.cpp"
         "font_cjk.cpp"
+        "st7796.cpp"
+        "xpt2046.cpp"
+        "camera_board.cpp"
         "board_i2c.cpp"
+        "board_spi.cpp"
         "board_i2s.cpp"
         "radar_at6010.cpp"
         "voice_sr.cpp"
@@ -44,10 +48,13 @@ idf_component_register(
         esp_app_format
         driver
         esp_driver_i2c
+        esp_driver_spi
         esp_driver_gpio
         esp_driver_i2s
+        esp_driver_ledc
         esp_driver_uart
         espressif__esp-sr
+        espressif__esp32-camera
 )
 
 # 早期展开阶段不能 GLOB / target_add_binary_data

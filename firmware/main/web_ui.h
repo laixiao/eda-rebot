@@ -5,7 +5,7 @@ static const char INDEX_HTML[] = R"HTML(<!DOCTYPE html>
 <head>
 <meta charset="utf-8"/>
 <meta name="viewport" content="width=device-width,initial-scale=1"/>
-<title>EDA Robot v6-1</title>
+<title>EDA Robot v5</title>
 <style>
 :root{--bg:#121418;--card:#1c2128;--fg:#e6edf3;--muted:#8b949e;--acc:#3fb950;--warn:#d29922;--bad:#f85149;--line:#30363d}
 *{box-sizing:border-box}
@@ -27,7 +27,8 @@ button.primary{background:#238636;border-color:#2ea043}
 button.danger{background:#da3633;border-color:#f85149}
 button:disabled{opacity:.45;cursor:not-allowed}
 input[type=range]{width:140px;accent-color:var(--acc)}
-input[type=number],input[type=text]{width:72px;background:#0d1117;color:var(--fg);border:1px solid var(--line);border-radius:6px;padding:6px}
+input[type=number],input[type=text],select{width:72px;background:#0d1117;color:var(--fg);border:1px solid var(--line);border-radius:6px;padding:6px}
+select{width:auto;min-width:110px}
 .led-row{display:grid;grid-template-columns:72px 1fr 40px;gap:8px;align-items:center;margin:8px 0}
 .led-row input[type=range]{width:100%;min-width:0}
 .led-pct{font-variant-numeric:tabular-nums;color:var(--muted);text-align:right}
@@ -128,6 +129,13 @@ label{color:var(--muted)}
 header .switch-periph{padding:6px 10px;border-radius:8px;border:1px solid var(--line);background:#21262d;color:var(--muted);gap:8px}
 header .switch-periph input:checked+.track{background:#da3633}
 header .switch-periph.on{border-color:#f85149;background:#3b1212;color:#ff7b72}
+img.cam{max-width:100%;width:100%;max-height:200px;aspect-ratio:4/3;object-fit:contain;background:#0d1117;border:1px solid var(--line);border-radius:6px;display:block}
+.cam-wrap{position:relative;max-width:280px;background:#0d1117;border:1px solid var(--line);border-radius:6px;overflow:hidden;aspect-ratio:4/3}
+.cam-wrap:not(.has-img) img.cam{visibility:hidden;border:0}
+.cam-ph{position:absolute;inset:0;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:6px;color:var(--muted);pointer-events:none}
+.cam-ph svg{opacity:.55}
+.cam-ph span{font-size:12px}
+.cam-wrap.has-img .cam-ph{display:none}
 </style>
 </head>
 <body>
@@ -263,6 +271,75 @@ header .switch-periph.on{border-color:#f85149;background:#3b1212;color:#ff7b72}
     <button onclick="oled('clear')">清空</button>
   </div>
 </section>
+<section>
+  <h2>摄像头 OV5640</h2>
+  <p class="action-note">拍照 JPEG；拍视频为面板内预览。</p>
+  <div class="row">
+    <label>分辨率</label>
+    <select id="camRes" onchange="camSetRes()">
+      <option value="qqvga">160×120</option>
+      <option value="qvga" selected>320×240</option>
+      <option value="vga">640×480</option>
+      <option value="svga">800×600</option>
+      <option value="hd">1280×720</option>
+      <option value="sxga">1280×1024</option>
+    </select>
+    <button class="primary" id="btnCamPhoto" onclick="camPhoto()">拍照</button>
+    <button id="btnCamVideo" onclick="camVideoToggle()">拍视频</button>
+    <label class="switch" title="摄像头电源 · XL9555 PWDN">
+      <input id="swCam" type="checkbox" onchange="camPower(this.checked)"/>
+      <span class="track"></span>
+      <span id="labCam">电源</span>
+    </label>
+  </div>
+  <div id="camWrap" class="cam-wrap">
+    <img id="camImg" class="cam" alt="camera" onload="camShow(true)" onerror="camOnImgError()"/>
+    <div class="cam-ph" aria-hidden="true">
+      <svg width="48" height="48" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5">
+        <path d="M4 7h3l2-2h6l2 2h3a2 2 0 0 1 2 2v9a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V9a2 2 0 0 1 2-2z"/>
+        <circle cx="12" cy="13" r="3.5"/>
+      </svg>
+      <span>选择分辨率后拍照或拍视频</span>
+    </div>
+  </div>
+  <pre id="camStatus" class="action-note" style="margin-top:8px">待机</pre>
+</section>
+<section>
+  <h2>SPI 屏 ST7796 + 触摸</h2>
+  <div class="row">
+    <button onclick="api('POST','/api/lcd',{cmd:'init'})">初始化</button>
+    <button onclick="api('POST','/api/lcd',{cmd:'on'})">背光开</button>
+    <button onclick="api('POST','/api/lcd',{cmd:'off'})">背光关</button>
+    <button class="primary" onclick="api('POST','/api/lcd',{cmd:'demo'})">演示画面</button>
+  </div>
+  <div class="row">
+    <button onclick="api('POST','/api/lcd',{cmd:'fill',color:'F800'})">红</button>
+    <button onclick="api('POST','/api/lcd',{cmd:'fill',color:'07E0'})">绿</button>
+    <button onclick="api('POST','/api/lcd',{cmd:'fill',color:'001F'})">蓝</button>
+    <button onclick="api('POST','/api/lcd',{cmd:'fill',color:'0000'})">黑</button>
+  </div>
+  <label>屏上文字（ASCII，用 \n 换行）</label>
+  <div class="row">
+    <input id="lcdText" type="text" style="width:100%;max-width:280px" value="Hello EDA Robot"/>
+  </div>
+  <div class="row">
+    <label>x</label><input id="lcdX" type="number" value="8"/>
+    <label>y</label><input id="lcdY" type="number" value="80"/>
+    <label>scale</label><input id="lcdScale" type="number" min="1" max="6" value="2"/>
+  </div>
+  <div class="row">
+    <label>fg</label><input id="lcdFg" type="text" value="FFFF" style="width:64px"/>
+    <label>bg</label><input id="lcdBg" type="text" value="0000" style="width:64px"/>
+  </div>
+  <div class="row">
+    <button class="primary" onclick="lcdDrawText(false)">显示文字</button>
+    <button onclick="lcdDrawText(true)">清屏后显示</button>
+    <button onclick="lcdShowStatus()">显示状态信息</button>
+  </div>
+  <pre id="touch">-</pre>
+  <div class="row"><button onclick="readTouch()">读触摸</button></div>
+</section>
+
 <section class="span-all radar-card" id="radarPanel">
   <div class="radar-head">
     <h2>60G 雷达</h2>
@@ -396,6 +473,10 @@ function renderFlags(s){
   if(po && document.activeElement!==po) po.checked=!!s.peripheralsOff;
   if(labPo) labPo.textContent=s.peripheralsOff?'已关闭所有外设':'关闭所有外设';
   if(wrapPo) wrapPo.classList.toggle('on',!!s.peripheralsOff);
+  const cam=document.getElementById('swCam');
+  const labCam=document.getElementById('labCam');
+  if(cam && document.activeElement!==cam) cam.checked=!!s.camera;
+  if(labCam) labCam.textContent=s.camera?'电源 开':'电源';
 }
 async function setPeriphOff(on){
   const sw=document.getElementById('swPeriphOff');
@@ -1076,6 +1157,111 @@ if(window.ResizeObserver){
 }else{
   window.addEventListener('resize',()=>{if(lastRadar)drawRadar(lastRadar)});
 }
+let camMode='idle'; // idle | photo | video
+function camResVal(){return document.getElementById('camRes').value||'qvga'}
+function camSetStatus(t){const el=document.getElementById('camStatus');if(el)el.textContent=t}
+function camShow(ok){
+  document.getElementById('camWrap').classList.toggle('has-img',!!ok);
+}
+function camOnImgError(){
+  if(camMode==='video'){
+    camSetStatus('视频流中断，可重试「拍视频」');
+    camMode='idle';
+    const b=document.getElementById('btnCamVideo');
+    if(b){b.textContent='拍视频';b.classList.remove('danger')}
+  }
+  camShow(false);
+}
+function camStopVideo(){
+  const img=document.getElementById('camImg');
+  img.removeAttribute('src');
+  camMode='idle';
+  const b=document.getElementById('btnCamVideo');
+  if(b){b.textContent='拍视频';b.classList.remove('danger')}
+  camShow(false);
+}
+async function camPower(on){
+  const sw=document.getElementById('swCam');
+  if(sw) sw.disabled=true;
+  try{
+    if(!on) camStopVideo();
+    const j=await api('POST','/api/camera',{on:!!on,res:camResVal()});
+    if(!j||j.ok===false){if(sw) sw.checked=!on}
+    camSetStatus(on?(j&&j.ok?'电源已开':'开启失败'):'已关电源');
+  }finally{if(sw) sw.disabled=false}
+  refresh();
+}
+async function camSetRes(){
+  const res=camResVal();
+  if(camMode==='video'){
+    camStopVideo();
+    await api('POST','/api/camera',{res});
+    camSetStatus('分辨率已改为 '+res+'，请重新拍视频');
+    return;
+  }
+  const j=await api('POST','/api/camera',{res});
+  camSetStatus(j&&j.ok?('分辨率 '+res):'分辨率设置失败');
+}
+function camMarkPower(on){
+  const sw=document.getElementById('swCam');
+  const lab=document.getElementById('labCam');
+  if(sw) sw.checked=!!on;
+  if(lab) lab.textContent=on?'电源 开':'电源';
+}
+async function camPhoto(){
+  camStopVideo();
+  camSetStatus('拍照中…');
+  camShow(false);
+  const res=camResVal();
+  const j=await api('POST','/api/camera',{on:true,res});
+  if(j&&j.ok) camMarkPower(true);
+  const img=document.getElementById('camImg');
+  camMode='photo';
+  img.onload=()=>{camShow(true);camSetStatus('已拍照 · '+res);img.onload=()=>camShow(true)};
+  img.src='/api/camera/capture?res='+encodeURIComponent(res)+'&t='+Date.now();
+}
+async function camVideoToggle(){
+  if(camMode==='video'){
+    camStopVideo();
+    camSetStatus('已停止预览');
+    return;
+  }
+  const res=camResVal();
+  camSetStatus('启动预览…');
+  const j=await api('POST','/api/camera',{on:true,res});
+  if(!j||!j.ok){camSetStatus('摄像头开启失败');return}
+  camMarkPower(true);
+  const img=document.getElementById('camImg');
+  camMode='video';
+  const b=document.getElementById('btnCamVideo');
+  if(b){b.textContent='停止';b.classList.add('danger')}
+  img.onload=()=>{camShow(true);camSetStatus('预览中 · '+res+'（面板内 MJPEG）')};
+  img.src='/stream?t='+Date.now();
+}
+async function lcdDrawText(clear){
+  await api('POST','/api/lcd',{
+    cmd:'text',
+    text:document.getElementById('lcdText').value,
+    x:+document.getElementById('lcdX').value,
+    y:+document.getElementById('lcdY').value,
+    scale:+document.getElementById('lcdScale').value||2,
+    color:document.getElementById('lcdFg').value||'FFFF',
+    bg:document.getElementById('lcdBg').value||'0000',
+    clear:!!clear
+  });
+}
+async function lcdShowStatus(){
+  const s=await api('GET','/api/status');
+  if(!s)return;
+  const t=
+    'EDA-RobotPro\n'+
+    'FW '+s.fw+'\n'+
+    'IP '+(s.ip||'no-ip')+'\n'+
+    'RSSI '+(s.rssi??'?')+'\n'+
+    'LCD '+(s.lcd?'OK':'OFF')+' CAM '+(s.camera?'ON':'OFF');
+  await api('POST','/api/lcd',{cmd:'text',text:t,x:8,y:8,scale:2,color:'FFFF',bg:'0000',clear:true});
+}
+async function readTouch(){const t=await api('GET','/api/touch');if(t)touch.textContent=`irq=${t.irq} valid=${t.valid}\nx=${t.x} y=${t.y} z=${t.z}`}
 </script>
 </body>
 </html>)HTML";
