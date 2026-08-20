@@ -4,7 +4,7 @@ docs/MS60-1211S80M/ATRadarSettingTool_V1.2
 *.py[cod]
 .playwright-mcp
 .vscode/settings.json
-bridge_*.log
+*.log
 firmware/build/
 firmware_recovery/build/
 *.bin
