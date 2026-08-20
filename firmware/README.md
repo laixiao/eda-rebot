@@ -27,7 +27,7 @@ python scripts/pack_font_cjk.py
 | 模块 | 说明 | API |
 |---|---|---|
 | I2C | XL9555 `0x20`、OLED `0x3C`、PCA9685 `0x40` | `/api/status` |
-| 舵机 T3/T4 | U16 LED11/12；先 `/api/pwm?on=1` | `/api/servo` |
+| 舵机 T3–T7 | U16 LED11–15；先 `/api/pwm?on=1`；id `0..4` | `/api/servo` `/api/servos` |
 | 探照灯 | U16 LED1/2/0 → MOSFET；LED_ALL 为公共地 | `/api/led` |
 | 雷达 MS60 | UART IO9/10 飞线；OUT→XL IO0_0；power 软开关 | `/api/radar` |
 | 录音/扬声器 | I2S；功放 SD→XL IO1_6；数字音量 0..100 | `/api/rec` `/api/play` `/api/play/upload` `/api/amp` `/api/beep` |

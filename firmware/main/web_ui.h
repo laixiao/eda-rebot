@@ -158,8 +158,18 @@ img.cam{max-width:100%;width:100%;max-height:200px;aspect-ratio:4/3;object-fit:c
 <section>
   <h2>安全使能</h2>
   <div class="row">
-    <button id="btnPwm" class="primary" onclick="togglePwm()">使能 PWM (OE#)</button>
+    <label class="switch" title="XL9555 IO0_6 → U16/U23 OE#：开=允许 PWM，关=强制禁输出">
+      <input id="swPwm" type="checkbox" onchange="setPwm(this.checked)"/>
+      <span class="track"></span>
+      <span id="labPwm">PWM 输出</span>
+    </label>
+    <label class="switch" title="XL9555 IO0_5 → U19/U22 TB6612 STBY：开=电机驱动可工作，关=待机">
+      <input id="swStby" type="checkbox" onchange="setStby(this.checked)"/>
+      <span class="track"></span>
+      <span id="labStby">电机 STBY</span>
+    </label>
   </div>
+  <p class="action-note">PWM=PCA9685 输出（舵机/电机方向/探照灯）；STBY=TB6612 总使能（N20 电机）。两者都开才能转电机。上电默认关。</p>
   <pre id="flags"></pre>
 </section>
 <section class="ota-card">
@@ -172,7 +182,7 @@ img.cam{max-width:100%;width:100%;max-height:200px;aspect-ratio:4/3;object-fit:c
   <pre id="otaLog">屏幕会显示步骤与 IP</pre>
 </section>
 <section>
-  <h2>舵机 T3 / T4 (U16)</h2>
+  <h2>舵机 T3–T7 (U16)</h2>
   <div class="led-row">
     <label for="servo0">T3</label>
     <input id="servo0" type="range" min="0" max="180" value="90" oninput="onServoSlide(0,this)"/>
@@ -183,11 +193,66 @@ img.cam{max-width:100%;width:100%;max-height:200px;aspect-ratio:4/3;object-fit:c
     <input id="servo1" type="range" min="0" max="180" value="90" oninput="onServoSlide(1,this)"/>
     <span id="servoV1" class="led-pct">90°</span>
   </div>
+  <div class="led-row">
+    <label for="servo2">T5</label>
+    <input id="servo2" type="range" min="0" max="180" value="90" oninput="onServoSlide(2,this)"/>
+    <span id="servoV2" class="led-pct">90°</span>
+  </div>
+  <div class="led-row">
+    <label for="servo3">T6</label>
+    <input id="servo3" type="range" min="0" max="180" value="90" oninput="onServoSlide(3,this)"/>
+    <span id="servoV3" class="led-pct">90°</span>
+  </div>
+  <div class="led-row">
+    <label for="servo4">T7</label>
+    <input id="servo4" type="range" min="0" max="180" value="90" oninput="onServoSlide(4,this)"/>
+    <span id="servoV4" class="led-pct">90°</span>
+  </div>
   <div class="row">
     <button onclick="setAllServo(0)">全 0°</button>
     <button onclick="setAllServo(90)">全 90°</button>
     <button onclick="setAllServo(180)">全 180°</button>
   </div>
+</section>
+<section>
+  <h2>N20 电机 MOT1–4 (U17–U22)</h2>
+  <p class="action-note">U17/U18/U20/U21=电机座；U19/U22=TB6612；方向 PWM 经 U23。按住正/反转，松开即停（约 1.5s 无刷新也自动停）。</p>
+  <div class="led-row">
+    <label for="motorDuty">占空</label>
+    <input id="motorDuty" type="range" min="5" max="100" value="40" oninput="document.getElementById('motorDutyV').textContent=this.value+'%'"/>
+    <span id="motorDutyV" class="led-pct">40%</span>
+  </div>
+  <div class="row">
+    <label style="min-width:88px">MOT1 · U17</label>
+    <button onpointerdown="startMotor(0,1)" onpointerup="releaseMotor(0)" onpointerleave="releaseMotor(0)" onpointercancel="releaseMotor(0)">正转</button>
+    <button onpointerdown="startMotor(0,-1)" onpointerup="releaseMotor(0)" onpointerleave="releaseMotor(0)" onpointercancel="releaseMotor(0)">反转</button>
+    <button onclick="stopMotor(0)">停</button>
+  </div>
+  <div class="row">
+    <label style="min-width:88px">MOT2 · U18</label>
+    <button onpointerdown="startMotor(1,1)" onpointerup="releaseMotor(1)" onpointerleave="releaseMotor(1)" onpointercancel="releaseMotor(1)">正转</button>
+    <button onpointerdown="startMotor(1,-1)" onpointerup="releaseMotor(1)" onpointerleave="releaseMotor(1)" onpointercancel="releaseMotor(1)">反转</button>
+    <button onclick="stopMotor(1)">停</button>
+  </div>
+  <div class="row">
+    <label style="min-width:88px">MOT3 · U20</label>
+    <button onpointerdown="startMotor(2,1)" onpointerup="releaseMotor(2)" onpointerleave="releaseMotor(2)" onpointercancel="releaseMotor(2)">正转</button>
+    <button onpointerdown="startMotor(2,-1)" onpointerup="releaseMotor(2)" onpointerleave="releaseMotor(2)" onpointercancel="releaseMotor(2)">反转</button>
+    <button onclick="stopMotor(2)">停</button>
+  </div>
+  <div class="row">
+    <label style="min-width:88px">MOT4 · U21</label>
+    <button onpointerdown="startMotor(3,1)" onpointerup="releaseMotor(3)" onpointerleave="releaseMotor(3)" onpointercancel="releaseMotor(3)">正转</button>
+    <button onpointerdown="startMotor(3,-1)" onpointerup="releaseMotor(3)" onpointerleave="releaseMotor(3)" onpointercancel="releaseMotor(3)">反转</button>
+    <button onclick="stopMotor(3)">停</button>
+  </div>
+  <div class="row">
+    <button class="danger" onclick="stopAllMotors()">四路全停</button>
+  </div>
+  <h2 style="margin-top:14px">编码器 ENC1–4</h2>
+  <pre id="enc">-</pre>
+  <p class="action-note">ENC1=U17 / ENC2=U18（ESP GPIO）；ENC3=U20 / ENC4=U21（经 XL9555）。雷达占用 ENC1 串口时 ENC1 计数不可靠。</p>
+  <div class="row"><button onclick="resetEncoders()">清零</button></div>
 </section>
 <section>
   <h2>探照灯 (U16→MOSFET)</h2>
@@ -454,8 +519,15 @@ async function api(method,url,body){
 }
 function renderFlags(s){
   document.getElementById('flags').textContent=
-    `pwm=${s.pwmEnable}\namp=${s.ampEnable}\nvol=${s.volume??100}\nradarPower=${s.radarPower}\nperipheralsOff=${!!s.peripheralsOff}`;
-  document.getElementById('btnPwm').textContent=s.pwmEnable?'PWM 已开':'使能 PWM (OE#)';
+    `pwm=${s.pwmEnable}\nstby=${s.stby}\namp=${s.ampEnable}\nvol=${s.volume??100}\nradarPower=${s.radarPower}\nperipheralsOff=${!!s.peripheralsOff}`;
+  const pwm=document.getElementById('swPwm');
+  const labPwm=document.getElementById('labPwm');
+  if(pwm && document.activeElement!==pwm) pwm.checked=!!s.pwmEnable;
+  if(labPwm) labPwm.textContent=s.pwmEnable?'PWM 输出 开':'PWM 输出';
+  const stby=document.getElementById('swStby');
+  const labStby=document.getElementById('labStby');
+  if(stby && document.activeElement!==stby) stby.checked=!!s.stby;
+  if(labStby) labStby.textContent=s.stby?'电机 STBY 开':'电机 STBY';
   const amp=document.getElementById('swAmp');
   const lab=document.getElementById('labAmp');
   if(amp) amp.checked=!!s.ampEnable;
@@ -601,14 +673,16 @@ async function refresh(){
     `FW ${s.fw}  ${s.board||''}\nIP ${s.ip}\nRSSI ${s.rssi}\n`+
     `XL9555 ${s.xl9555?'<span class=ok>OK</span>':'<span class=bad>—</span>'}  `+
     `OLED ${s.oled?'<span class=ok>OK</span>':'<span class=bad>—</span>'}\n`+
-    `PCA9685 ${s.pca9685?'<span class=ok>OK</span>':'<span class=bad>—</span>'}  `+
-    `I2S ${s.i2s?'<span class=ok>OK</span>':'<span class=warn>—</span>'}\n`+
+    `PCA U16 ${s.pcaServo?'<span class=ok>OK</span>':'<span class=bad>—</span>'}  `+
+    `U23 ${s.pcaMotor?'<span class=ok>OK</span>':'<span class=bad>—</span>'}\n`+
+    `I2S ${s.i2s?'<span class=ok>OK</span>':'<span class=warn>—</span>'}  `+
     `PSRAM ${s.psram?'<span class=ok>'+Math.round((s.psramBytes||0)/1048576)+'MB</span>':'<span class=warn>—</span>'}\n`+
     `I2C: ${(s.i2c||[]).map(x=>'0x'+Number(x).toString(16)).join(', ')||'无（模块未焊/未上电）'}`;
   renderFlags(s);
   renderFan(s.fan);
   renderVoice(s.voice);
   syncLedsFromStatus(s);
+  refreshEncoders();
   const rd=await api('GET','/api/radar');
   if(rd){
     const pwr=document.getElementById('swRadarPwr');
@@ -757,7 +831,24 @@ async function shutdownDevice(){
   document.getElementById('wifi').textContent='已关机';
   document.getElementById('wifi').className='badge off';
 }
-async function togglePwm(){const s=await api('GET','/api/status');await api('POST','/api/pwm',{on:!s.pwmEnable});refresh()}
+async function setPwm(on){
+  const sw=document.getElementById('swPwm');
+  if(sw) sw.disabled=true;
+  try{
+    const j=await api('POST','/api/pwm',{on:!!on});
+    if(!j||j.ok===false){if(sw) sw.checked=!on}
+  }finally{if(sw) sw.disabled=false}
+  refresh();
+}
+async function setStby(on){
+  const sw=document.getElementById('swStby');
+  if(sw) sw.disabled=true;
+  try{
+    const j=await api('POST','/api/stby',{on:!!on});
+    if(!j||j.ok===false){if(sw) sw.checked=!on}
+  }finally{if(sw) sw.disabled=false}
+  refresh();
+}
 async function setAmp(on){
   const sw=document.getElementById('swAmp');
   if(sw) sw.disabled=true;
@@ -777,12 +868,13 @@ function onVolSlide(el){
     refresh();
   },120);
 }
-const servoTimers=[0,0];
+const SERVO_COUNT=5;
+const servoTimers=[0,0,0,0,0];
 function onServoSlide(id,el){
   const angle=Math.max(0,Math.min(180,+el.value||0));
   document.getElementById('servoV'+id).textContent=angle+'°';
   if(servoTimers[id]) clearTimeout(servoTimers[id]);
-  servoTimers[id]=setTimeout(()=>setServo(id,angle),40);
+  servoTimers[id]=setTimeout(()=>{servoTimers[id]=0;setServo(id,angle)},40);
 }
 async function setServo(id,angle){
   angle=Math.max(0,Math.min(180,+angle||0));
@@ -793,11 +885,59 @@ async function setServo(id,angle){
   return api('POST','/api/servo',{id,angle});
 }
 async function setAllServo(angle){
-  for(let i=0;i<2;i++){
+  for(let i=0;i<SERVO_COUNT;i++){
     if(servoTimers[i]){clearTimeout(servoTimers[i]);servoTimers[i]=0}
     const j=await setServo(i,angle);
     if(!j||j.ok===false) break;
   }
+}
+function motorDuty(){
+  const el=document.getElementById('motorDuty');
+  return Math.max(0,Math.min(100,+(el&&el.value)||40));
+}
+async function setMotor(id,dir){
+  return api('POST','/api/motor',{id,dir,duty:motorDuty()});
+}
+const motorTimers=[0,0,0,0], motorGen=[0,0,0,0], motorHeld=[false,false,false,false];
+function stopMotorTimer(id){if(motorTimers[id]){clearInterval(motorTimers[id]);motorTimers[id]=0}}
+async function startMotor(id,dir){
+  id=+id; if(id<0||id>3) return;
+  motorHeld[id]=true;
+  const gen=++motorGen[id];
+  stopMotorTimer(id);
+  await setMotor(id,dir);
+  if(motorHeld[id]&&gen===motorGen[id]) motorTimers[id]=setInterval(()=>setMotor(id,dir),500);
+}
+async function releaseMotor(id){
+  id=+id; if(id<0||id>3) return;
+  if(!motorHeld[id]) return;
+  motorHeld[id]=false;
+  await stopMotor(id);
+}
+async function stopMotor(id){
+  id=+id; if(id<0||id>3) return;
+  motorHeld[id]=false;
+  motorGen[id]++;
+  stopMotorTimer(id);
+  await setMotor(id,0);
+}
+async function stopAllMotors(){
+  for(let i=0;i<4;i++){motorHeld[i]=false;motorGen[i]++;stopMotorTimer(i)}
+  await api('POST','/api/motor/stop_all');
+}
+async function refreshEncoders(){
+  const el=document.getElementById('enc');
+  if(!el) return;
+  try{
+    const e=await api('GET','/api/encoders');
+    if(!e||e.ok===false) return;
+    el.textContent=
+      `ENC1 ${e.enc1}  ENC2 ${e.enc2}\nENC3 ${e.enc3}  ENC4 ${e.enc4}\nXL IO0 0x${(e.xlPort0||0).toString(16)}`;
+  }catch(_){}
+}
+async function resetEncoders(){
+  await api('POST','/api/encoders/reset');
+  refreshEncoders();
 }
 function onLedSlide(id,el){
   const duty=Math.max(0,Math.min(100,+el.value||0));
@@ -816,7 +956,12 @@ async function setLed(id,duty,quiet){
   const r=await fetch('/api/led',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({id,duty})});
   const t=await r.text();
   let j; try{j=JSON.parse(t)}catch(e){j={ok:false,raw:t}}
-  if(j&&j.pwmEnable){const btn=document.getElementById('btnPwm');if(btn) btn.textContent='PWM 已开'}
+  if(j&&j.pwmEnable){
+    const sw=document.getElementById('swPwm');
+    const lab=document.getElementById('labPwm');
+    if(sw) sw.checked=true;
+    if(lab) lab.textContent='PWM 输出 开';
+  }
   if(!quiet && (!r.ok||j.ok===false)) alert((j&&j.error)||t||('HTTP '+r.status));
   return j;
 }

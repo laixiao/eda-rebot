@@ -46,7 +46,7 @@
 #include "wake_reply.h"
 
 static const char *TAG = "eda_robot";
-static const char *FW_VERSION = "3.7.4-v5";
+static const char *FW_VERSION = "3.7.8-v5";
 static volatile bool otaBusy = false;
 static volatile bool shutdownPending = false;
 static volatile bool cfgDirty = false;
@@ -430,22 +430,34 @@ static void encoders_init() {
 
 static bool setStby(bool on) {
   if (!actuatorLock()) return false;
+  // 与 setPwmEnable 一致：无 XL 时只能关成功；U23 未焊/未上电时 allOff 视为成功
+  if (!xl.present()) {
+    if (!on) {
+      flagStby = false;
+      motorActiveMask = 0;
+    }
+    actuatorUnlock();
+    return !on;
+  }
+  const bool motorSafe = !pcaMotor.present() || pcaMotor.allOff();
   bool ok = true;
   if (on) {
-    ok = pcaMotor.allOff();
+    ok = motorSafe;
     if (ok) {
       motorActiveMask = 0;
       ok = xl.setPin(XL_STBY, true);
     }
   } else {
     const bool stbyOk = xl.setPin(XL_STBY, false);
-    const bool pwmOk = pcaMotor.allOff();
-    if (stbyOk || pwmOk) motorActiveMask = 0;
-    ok = stbyOk && pwmOk;
+    if (stbyOk || motorSafe) motorActiveMask = 0;
+    ok = stbyOk && motorSafe;
   }
   if (on) {
-    if (ok) flagStby = true;
-  } else if (xl.present()) {
+    if (ok) {
+      flagStby = true;
+      flagPeriphOff = false;
+    }
+  } else {
     flagStby = false;
   }
   actuatorUnlock();
@@ -1759,7 +1771,15 @@ static esp_err_t handleRadarPost(httpd_req_t *req) {
 static esp_err_t handleStby(httpd_req_t *req) {
   auto a = loadArgs(req);
   bool on = argBool(a, "on", true);
-  if (!setStby(on)) return sendJson(req, 500, "{\"ok\":false,\"error\":\"xl9555 STBY write failed\"}");
+  if (!setStby(on)) {
+    const char *err = !xl.present()
+                          ? "XL9555 missing"
+                          : (pcaMotor.present() ? "STBY/U23 write failed" : "STBY write failed");
+    char b[96];
+    snprintf(b, sizeof(b), "{\"ok\":false,\"error\":\"%s\",\"xl9555\":%s,\"pcaMotor\":%s}", err,
+             xl.present() ? "true" : "false", pcaMotor.present() ? "true" : "false");
+    return sendJson(req, 500, b);
+  }
   char b[64];
   snprintf(b, sizeof(b), "{\"ok\":true,\"motorStby\":%s}", on ? "true" : "false");
   return sendJson(req, 200, b);
@@ -2129,8 +2149,8 @@ static esp_err_t handleApiIndex(httpd_req_t *req) {
   body += "{\"path\":\"/api/shutdown\",\"note\":\"deep sleep; wake by power cycle or reset\"},";
   body += "{\"path\":\"/api/pwm\"},";
   body += "{\"path\":\"/api/amp\",\"note\":\"on bool; volume 0..100 digital gain\"},";
-  body += "{\"path\":\"/api/servo\",\"note\":\"id 0..1 = T3/T4\"},";
-  body += "{\"path\":\"/api/servos\"},";
+  body += "{\"path\":\"/api/servo\",\"note\":\"id 0..4 = T3..T7 (U16 LED11..15)\"},";
+  body += "{\"path\":\"/api/servos\",\"note\":\"angles[5] or a0..a4\"},";
   body += "{\"path\":\"/api/led\",\"note\":\"id 0=LED_1 1=LED_2 2=LED_ALL; need LED_ALL for 1/2\"},";
   body += "{\"path\":\"/api/fan\",\"note\":\"auto / gesture / power; gesture: near palm hold 2s cycles 0→50→100\"},";
   body += "{\"path\":\"/api/voice\",\"note\":\"GET status; POST {on:true|false}; all UI settings persist in NVS\"},";
@@ -2591,7 +2611,7 @@ static esp_err_t handleServo(httpd_req_t *req) {
   int id = argInt(a, "id", -1);
   int angle = argInt(a, "angle", 90);
   if (id < 0 || id >= (int)SERVO_COUNT)
-    return sendJson(req, 400, "{\"ok\":false,\"error\":\"id 0..1 (T3/T4)\"}");
+    return sendJson(req, 400, "{\"ok\":false,\"error\":\"id 0..4 (T3..T7)\"}");
   if (angle < 0) angle = 0;
   if (angle > 180) angle = 180;
   if (!flagPwm) return sendJson(req, 400, "{\"ok\":false,\"error\":\"enable PWM first with POST /api/pwm\"}");
@@ -2606,8 +2626,12 @@ static esp_err_t handleServo(httpd_req_t *req) {
 static esp_err_t handleServos(httpd_req_t *req) {
   auto a = loadArgs(req);
   if (!flagPwm) return sendJson(req, 400, "{\"ok\":false,\"error\":\"enable PWM first with POST /api/pwm\"}");
-  int angles[2] = {90, 90};
-  bool provided[2] = {false, false};
+  int angles[SERVO_COUNT];
+  bool provided[SERVO_COUNT];
+  for (int i = 0; i < (int)SERVO_COUNT; i++) {
+    angles[i] = 90;
+    provided[i] = false;
+  }
   size_t arr = a.body.find("\"angles\"");
   if (arr != std::string::npos) {
     size_t lb = a.body.find('[', arr);
@@ -2615,7 +2639,7 @@ static esp_err_t handleServos(httpd_req_t *req) {
     if (lb != std::string::npos && rb != std::string::npos && rb > lb) {
       std::string inner = a.body.substr(lb + 1, rb - lb - 1);
       size_t start = 0;
-      for (int i = 0; i < 2; i++) {
+      for (int i = 0; i < (int)SERVO_COUNT; i++) {
         size_t comma = inner.find(',', start);
         std::string tok =
             (comma == std::string::npos) ? inner.substr(start) : inner.substr(start, comma - start);
@@ -2629,7 +2653,7 @@ static esp_err_t handleServos(httpd_req_t *req) {
       }
     }
   }
-  for (int i = 0; i < 2; i++) {
+  for (int i = 0; i < (int)SERVO_COUNT; i++) {
     char key[4] = {'a', (char)('0' + i), 0, 0};
     char v[16];
     if (queryGet(a.q, key, v, sizeof(v))) {
@@ -2639,9 +2663,9 @@ static esp_err_t handleServos(httpd_req_t *req) {
   }
   for (bool valueProvided : provided) {
     if (!valueProvided)
-      return sendJson(req, 400, "{\"ok\":false,\"error\":\"both servo angles required\"}");
+      return sendJson(req, 400, "{\"ok\":false,\"error\":\"all 5 servo angles required (T3..T7)\"}");
   }
-  for (int i = 0; i < 2; i++) {
+  for (int i = 0; i < (int)SERVO_COUNT; i++) {
     if (angles[i] < 0) angles[i] = 0;
     if (angles[i] > 180) angles[i] = 180;
     if (!servoAngle((uint8_t)i, angles[i])) {
@@ -2651,8 +2675,9 @@ static esp_err_t handleServos(httpd_req_t *req) {
     }
   }
   cfgSave();
-  char out[64];
-  snprintf(out, sizeof(out), "{\"ok\":true,\"angles\":[%d,%d]}", angles[0], angles[1]);
+  char out[96];
+  snprintf(out, sizeof(out), "{\"ok\":true,\"angles\":[%d,%d,%d,%d,%d]}", angles[0], angles[1],
+           angles[2], angles[3], angles[4]);
   return sendJson(req, 200, out);
 }
 
