@@ -164,14 +164,15 @@ header .switch-periph.on{border-color:#f85149;background:#3b1212;color:#ff7b72}
   <pre id="otaLog">屏幕会显示步骤与 IP</pre>
 </section>
 <section>
-  <h2>舵机 T3 / T4 (U16)</h2>
+  <h2>舵机云台 T3 / T4 (U16)</h2>
+  <p class="action-note">T3=仰角 0–180°（顶部）；T4=水平底座（行星齿轮 2:1：舵机 180°→云台 360°；追踪时雷达方位÷2 写舵机）。雷达页开「自动追踪」后跟随人体。</p>
   <div class="led-row">
-    <label for="servo0">T3</label>
+    <label for="servo0">T3 仰角</label>
     <input id="servo0" type="range" min="0" max="180" value="90" oninput="onServoSlide(0,this)"/>
     <span id="servoV0" class="led-pct">90°</span>
   </div>
   <div class="led-row">
-    <label for="servo1">T4</label>
+    <label for="servo1">T4 水平</label>
     <input id="servo1" type="range" min="0" max="180" value="90" oninput="onServoSlide(1,this)"/>
     <span id="servoV1" class="led-pct">90°</span>
   </div>
@@ -304,9 +305,14 @@ header .switch-periph.on{border-color:#f85149;background:#3b1212;color:#ff7b72}
             <span class="track"></span>
             <span id="labFanGest">手势切档</span>
           </label>
+          <label class="switch switch-track" title="雷达方位→T4（2:1 齿轮，舵机=90+方位/2），距离估仰角→T3；尊重忽略扇区；需雷达供电+PWM">
+            <input id="swFanTrack" type="checkbox" onchange="setFanTrack(this.checked)"/>
+            <span class="track"></span>
+            <span id="labFanTrack">自动追踪</span>
+          </label>
         </div>
         <div class="ctl-row">
-          <label class="switch switch-ign" title="开：列表中的扇区目标不参与控风扇/手势切档；画布仍显示。可添加多段。">
+          <label class="switch switch-ign" title="开：列表中的扇区目标不参与控风扇/手势切档/自动追踪；画布仍显示。可添加多段。">
             <input id="swIgnoreAng" type="checkbox" onchange="setIgnoreEnable()"/>
             <span class="track"></span>
             <span id="labIgnoreAng">忽略扇区</span>
@@ -448,6 +454,10 @@ function renderFan(f){
   const labG=document.getElementById('labFanGest');
   if(swG && document.activeElement!==swG) swG.checked=!!f.gesture;
   if(labG) labG.textContent='手势切档';
+  const swT=document.getElementById('swFanTrack');
+  const labT=document.getElementById('labFanTrack');
+  if(swT && document.activeElement!==swT) swT.checked=!!f.track;
+  if(labT) labT.textContent='自动追踪';
   let prog='';
   const needOn=f.need||1;
   const needOff=f.offNeed||f.confirm||3;
@@ -469,10 +479,18 @@ function renderFan(f){
     const rng=f.gestRangeMm?((f.gestRangeMm/1000).toFixed(2)+' m'):'—';
     gest=`手势档 <b>${f.gear??0}%</b>（${lv}）· <b>${gestPhaseLabel(f.gestPhase)}</b> · ${hold}/${need} ms · 距 ${rng}<br>`;
   }
+  let track='';
+  if(f.track){
+    const tp={disabled:'关',no_power:'雷达未供电',idle:'待命',aim:'瞄准中',pwm_fail:'PWM失败',no_pca:'无PCA'}[f.trackPhase]||(f.trackPhase||'—');
+    const ang=(f.trackAng!=null)?(f.trackAng+'°'):'—';
+    const rng=f.trackRangeMm?((f.trackRangeMm/1000).toFixed(2)+' m'):'—';
+    track=`追踪 <b>${tp}</b> · 目标 ${ang} / ${rng} · 舵机 T3=${f.trackElev??'—'}° T4=${f.trackPan??'—'}°`;
+  }
   box.innerHTML=
     `<div class="fan-kv"><span>状态</span><b>${phaseLabel(f.phase)}</b><span>LED_1</span><b class="${f.on?'ok':''}">${f.on?'开':'关'}</b></div>`+
     `<div class="fan-kv" style="margin-top:6px"><span>进度</span><b>${prog}</b><span>强度</span><b>${f.intensity??0}%</b></div>`+
     (gest?`<div class="fan-note">${gest.replace(/<br>/g,' · ')}</div>`:'')+
+    (track?`<div class="fan-note">${track}</div>`:'')+
     `<div class="fan-note dim">记忆 ${f.savedIntensity??'—'}% · ${f.reason||'—'}</div>`+
     `<div class="fan-note dim">上次 ${f.lastAction||'—'}</div>`;
 }
@@ -511,6 +529,17 @@ function syncLedsFromStatus(s){
     if(lab) lab.textContent=leds[i]+'%';
   }
 }
+function syncServosFromStatus(s){
+  const sv=s.servos||(s.fan&&s.fan.servos)||[];
+  for(let i=0;i<2;i++){
+    if(servoTimers[i]) continue;
+    if(typeof sv[i]!=='number') continue;
+    const el=document.getElementById('servo'+i);
+    const lab=document.getElementById('servoV'+i);
+    if(el && document.activeElement!==el) el.value=String(sv[i]);
+    if(lab) lab.textContent=sv[i]+'°';
+  }
+}
 async function refresh(){
   const s=await api('GET','/api/status');
   if(!s)return;
@@ -528,6 +557,7 @@ async function refresh(){
   renderFan(s.fan);
   renderVoice(s.voice);
   syncLedsFromStatus(s);
+  syncServosFromStatus(s);
   const rd=await api('GET','/api/radar');
   if(rd){
     const pwr=document.getElementById('swRadarPwr');
@@ -568,6 +598,15 @@ async function setFanGesture(on){
   if(sw) sw.disabled=true;
   try{
     const j=await api('POST','/api/fan',{gesture:!!on});
+    if(!j||j.ok===false){if(sw) sw.checked=!on}
+  }finally{if(sw) sw.disabled=false}
+  refresh();
+}
+async function setFanTrack(on){
+  const sw=document.getElementById('swFanTrack');
+  if(sw) sw.disabled=true;
+  try{
+    const j=await api('POST','/api/fan',{track:!!on});
     if(!j||j.ok===false){if(sw) sw.checked=!on}
   }finally{if(sw) sw.disabled=false}
   refresh();
