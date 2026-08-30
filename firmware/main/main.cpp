@@ -41,7 +41,7 @@
 #include "wake_reply.h"
 
 static const char *TAG = "eda_robot";
-static const char *FW_VERSION = "3.6.26";
+static const char *FW_VERSION = "3.6.27";
 static volatile bool otaBusy = false;
 static volatile bool shutdownPending = false;
 static volatile bool cfgDirty = false;

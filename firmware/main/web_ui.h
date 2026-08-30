@@ -339,11 +339,11 @@ header .switch-periph.on{border-color:#f85149;background:#3b1212;color:#ff7b72}
           <tbody id="objs"><tr><td colspan="4" style="color:var(--muted)">等待数据…</td></tr></tbody>
         </table>
       </div>
-      <details class="radar-more">
+      <details class="radar-more" open>
         <summary>检测摘要</summary>
         <pre id="detLine" style="margin-top:8px">—</pre>
       </details>
-      <details class="radar-more">
+      <details class="radar-more" open>
         <summary>模块 / 诊断</summary>
         <div class="row" style="margin-top:8px">
           <button onclick="radarCmd('version')" title="向 MS60 发 0xFE 读 SDK/硬件版本">读模块版本</button>
