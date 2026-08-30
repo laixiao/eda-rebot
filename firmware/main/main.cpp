@@ -41,7 +41,7 @@
 #include "wake_reply.h"
 
 static const char *TAG = "eda_robot";
-static const char *FW_VERSION = "3.6.27";
+static const char *FW_VERSION = "3.6.30";
 static volatile bool otaBusy = false;
 static volatile bool shutdownPending = false;
 static volatile bool cfgDirty = false;
@@ -79,10 +79,17 @@ static SSD1306 oled;
 static bool flagPwm = false;
 static bool flagAmp = false;
 static bool flagRadarPwr = false;
-/** 每日时刻表（SNTP 校时后生效；分钟 0..1439，-1=未设） */
+/** 雷达定时开关（SNTP 校时后生效；分钟 0..1439，-1=未设；未配置时段默认关雷达） */
+static constexpr int RADAR_SCHED_MAX = 8;
+struct RadarSchedSec {
+  int onMin;
+  int offMin;
+  int fanPct;  // 时段内控风扇开时使用的 LED_1 强度，默认 100
+};
 static bool radarScheduleEnable = false;
-static int radarSchedOnMin = -1;
-static int radarSchedOffMin = -1;
+static RadarSchedSec radarSchedSec[RADAR_SCHED_MAX] = {};
+static int radarSchedCount = 0;
+static int schedActiveSeg = -1;
 /** 忽略扇区：可多段，默认一段 0°～-60°（开关默认关） */
 static constexpr int RADAR_IGN_MAX = 8;
 struct RadarIgnSec {
@@ -101,6 +108,7 @@ static bool savedAmp = false;
 static bool savedRadarPwr = false;
 static bool savedFanAuto = false;
 static bool savedFanGesture = false;
+static bool savedFanTrack = false;
 static int spotDutyPct[SPOT_COUNT] = {0, 0, 0};
 static bool i2sReady = false;
 static bool wifiOk = false;
@@ -569,6 +577,7 @@ static bool parseWavPcm16(uint8_t *buf, size_t len, int16_t **pcm, size_t *nSamp
 }
 
 static bool setRadarPower(bool on);
+static void radarScheduleApply();
 
 static int localTimeMinute() {
   if (!timeSynced) return -1;
@@ -579,11 +588,10 @@ static int localTimeMinute() {
   return lt.tm_hour * 60 + lt.tm_min;
 }
 
-/** 当前是否落在 [开, 关) 窗口；跨日（如 22:00→08:00）时窗外为关。关时刻起即关。 */
-static bool radarScheduleWantOn(int curMin) {
-  if (curMin < 0) return false;
-  const int on = radarSchedOnMin;
-  const int off = radarSchedOffMin;
+/** 段内 [开, 关) 判定；跨日（如 22:00→08:00）时窗外为关。关时刻起即关。 */
+static bool radarScheduleSegHit(const RadarSchedSec &s, int curMin) {
+  const int on = s.onMin;
+  const int off = s.offMin;
   if (on < 0 && off < 0) return false;
   if (on < 0) return curMin < off;
   if (off < 0) return curMin >= on;
@@ -592,20 +600,13 @@ static bool radarScheduleWantOn(int curMin) {
   return curMin >= on || curMin < off;
 }
 
-static void radarScheduleApply() {
-  if (!radarScheduleEnable || !timeSynced || flagPeriphOff) return;
-  if (radarSchedOnMin < 0 && radarSchedOffMin < 0) return;
-  const int curMin = localTimeMinute();
-  if (curMin < 0) return;
-  const bool want = radarScheduleWantOn(curMin);
-  if (want == flagRadarPwr) return;
-  if (setRadarPower(want)) {
-    ESP_LOGI(TAG, "radar schedule: %s at %02d:%02d (window %d-%d)", want ? "ON" : "OFF",
-             curMin / 60, curMin % 60, radarSchedOnMin, radarSchedOffMin);
-    cfgSave();
-  } else {
-    ESP_LOGW(TAG, "radar schedule: %s failed", want ? "ON" : "OFF");
+/** 当前命中的时刻段索引；-1 表示窗外。多段重叠时取列表靠前的一段。 */
+static int radarScheduleActiveSegment(int curMin) {
+  if (curMin < 0) return -1;
+  for (int i = 0; i < radarSchedCount; i++) {
+    if (radarScheduleSegHit(radarSchedSec[i], curMin)) return i;
   }
+  return -1;
 }
 
 static void localTimeStr(char *buf, size_t n) {
@@ -663,20 +664,52 @@ static void timeSyncOnGotIp() {
   }
 }
 
-static void radarScheduleJsonInto(char *buf, size_t buflen) {
+static std::string radarScheduleJson() {
   char onHm[8], offHm[8], localTime[16];
-  formatHm(radarSchedOnMin, onHm, sizeof(onHm));
-  formatHm(radarSchedOffMin, offHm, sizeof(offHm));
+  const int f0 = radarSchedCount > 0 ? radarSchedSec[0].onMin : -1;
+  const int t0 = radarSchedCount > 0 ? radarSchedSec[0].offMin : -1;
+  formatHm(f0, onHm, sizeof(onHm));
+  formatHm(t0, offHm, sizeof(offHm));
   localTimeStr(localTime, sizeof(localTime));
-  const bool active = radarScheduleEnable && timeSynced && !flagPeriphOff &&
-                      (radarSchedOnMin >= 0 || radarSchedOffMin >= 0);
+  const bool active =
+      radarScheduleEnable && timeSynced && !flagPeriphOff && radarSchedCount > 0;
   const int curMin = localTimeMinute();
-  const bool wantOn = active && radarScheduleWantOn(curMin);
-  snprintf(buf, buflen,
-           ",\"timeSynced\":%s,\"localTime\":\"%s\""
-           ",\"schedule\":{\"enable\":%s,\"on\":\"%s\",\"off\":\"%s\",\"active\":%s,\"wantOn\":%s}",
-           timeSynced ? "true" : "false", localTime, radarScheduleEnable ? "true" : "false", onHm,
-           offHm, active ? "true" : "false", wantOn ? "true" : "false");
+  const int activeId = active ? radarScheduleActiveSegment(curMin) : -1;
+  const bool wantOn = activeId >= 0;
+  std::string s = ",\"timeSynced\":";
+  s += timeSynced ? "true" : "false";
+  s += ",\"localTime\":\"";
+  s += localTime;
+  s += "\",\"schedule\":{\"enable\":";
+  s += radarScheduleEnable ? "true" : "false";
+  s += ",\"on\":\"";
+  s += onHm;
+  s += "\",\"off\":\"";
+  s += offHm;
+  s += "\",\"active\":";
+  s += active ? "true" : "false";
+  s += ",\"wantOn\":";
+  s += wantOn ? "true" : "false";
+  s += ",\"activeId\":";
+  s += std::to_string(activeId);
+  s += ",\"count\":";
+  s += std::to_string(radarSchedCount);
+  s += ",\"segments\":[";
+  for (int i = 0; i < radarSchedCount; i++) {
+    char sh[8], eh[8];
+    formatHm(radarSchedSec[i].onMin, sh, sizeof(sh));
+    formatHm(radarSchedSec[i].offMin, eh, sizeof(eh));
+    if (i) s += ',';
+    s += "{\"on\":\"";
+    s += sh;
+    s += "\",\"off\":\"";
+    s += eh;
+    s += "\",\"fan\":";
+    s += std::to_string(radarSchedSec[i].fanPct);
+    s += '}';
+  }
+  s += "]}";
+  return s;
 }
 
 static std::string radarIgnoreJson() {
@@ -702,9 +735,7 @@ static void radarAppendPowerAndTimer(std::string &body) {
   body.pop_back();
   body += ",\"power\":";
   body += flagRadarPwr ? "true" : "false";
-  char sbuf[200];
-  radarScheduleJsonInto(sbuf, sizeof(sbuf));
-  body += sbuf;
+  body += radarScheduleJson();
   body += radarIgnoreJson();
   body += '}';
 }
@@ -811,6 +842,7 @@ static bool setSpotDuty(uint8_t id, int dutyPct) {
 static bool fanAutoEnable = false;  // Web「控风扇」，默认关
 static bool fanAutoOn = false;
 static bool fanGestureEnable = false;  // Web「手势切档」，可与控风扇同时开
+static bool fanTrackEnable = false;    // Web「自动追踪」：雷达→T3 仰角 / T4 水平
 static int fanGearPct = 100;           // 手势档位 50/75/100；控风扇开时按此强度
 static bool fanSuppressAutoOn = false; // 历史：切到关时抑制；手势循环已不含关
 static const int64_t FAN_SAMPLE_US = 2000000;  // 每 2s 取样
@@ -822,6 +854,15 @@ static bool fanSamplePresent = false;
 static char fanReason[64] = "未启用";
 static char fanPhase[24] = "disabled";  // disabled/idle/arming/on/holdoff
 static char fanLastAction[96] = "—";
+static const int64_t TRACK_SAMPLE_US = 150000;  // ~6.7Hz 舵机跟随
+static const int TRACK_MAX_STEP = 8;            // 每拍最大转角，抑抖
+static const int TRACK_FOV_HALF = 60;           // 雷达水平 FOV ±60°
+static int64_t trackLastUs = 0;
+static char trackPhase[24] = "disabled";  // disabled/no_power/idle/aim/pwm_fail
+static int16_t trackLastAng = 0;
+static uint16_t trackLastRangeMm = 0;
+static int trackWantElev = 90;
+static int trackWantPan = 90;
 
 static void fanSetPhase(const char *phase) { snprintf(fanPhase, sizeof(fanPhase), "%s", phase); }
 
@@ -830,6 +871,40 @@ static void syncFanGearFromIntensity(int pct) {
   if (pct < 0) pct = 0;
   if (pct > 100) pct = 100;
   fanGearPct = pct;
+}
+
+static void radarScheduleApplySegmentFan(int seg) {
+  if (seg < 0 || seg >= radarSchedCount) return;
+  const int pct = radarSchedSec[seg].fanPct;
+  fanSavedLed1 = pct > 0 ? pct : 100;
+  fanSavedLedAll = 100;
+  fanGearPct = pct > 0 ? pct : 100;
+}
+
+static void radarScheduleApply() {
+  if (!radarScheduleEnable || !timeSynced || flagPeriphOff) return;
+  const int curMin = localTimeMinute();
+  if (curMin < 0) return;
+  const int prevSeg = schedActiveSeg;
+  const int seg = radarSchedCount > 0 ? radarScheduleActiveSegment(curMin) : -1;
+  const bool inWindow = seg >= 0;
+  const bool wantRadar = inWindow;
+
+  if (inWindow && (seg != prevSeg || radarSchedSec[seg].fanPct != fanSavedLed1))
+    radarScheduleApplySegmentFan(seg);
+  schedActiveSeg = seg;
+
+  if (wantRadar != flagRadarPwr) {
+    if (setRadarPower(wantRadar)) {
+      ESP_LOGI(TAG, "radar schedule: %s at %02d:%02d seg=%d", wantRadar ? "ON" : "OFF", curMin / 60,
+               curMin % 60, seg);
+      cfgSave();
+    } else {
+      ESP_LOGW(TAG, "radar schedule: %s failed", wantRadar ? "ON" : "OFF");
+    }
+  } else if (inWindow && seg != prevSeg) {
+    cfgSave();
+  }
 }
 
 /** 网页/API 改 LED_1 或 LED_ALL 后：同步档位，并与控风扇状态对齐（不关联动）。 */
@@ -979,6 +1054,36 @@ static bool radarIgnoreSet(int idx, int from, int to) {
   if (idx < 0 || idx >= radarIgnoreCount) return false;
   radarIgnoreSec[idx].from = clampRadarAng(from);
   radarIgnoreSec[idx].to = clampRadarAng(to);
+  return true;
+}
+
+static int clampSchedFan(int pct) {
+  if (pct < 0) return 0;
+  if (pct > 100) return 100;
+  return pct;
+}
+
+static bool radarScheduleAdd(int onMin, int offMin, int fanPct) {
+  if (radarSchedCount >= RADAR_SCHED_MAX) return false;
+  radarSchedSec[radarSchedCount].onMin = onMin;
+  radarSchedSec[radarSchedCount].offMin = offMin;
+  radarSchedSec[radarSchedCount].fanPct = clampSchedFan(fanPct);
+  radarSchedCount++;
+  return true;
+}
+
+static bool radarScheduleDel(int idx) {
+  if (idx < 0 || idx >= radarSchedCount) return false;
+  for (int i = idx; i < radarSchedCount - 1; i++) radarSchedSec[i] = radarSchedSec[i + 1];
+  radarSchedCount--;
+  return true;
+}
+
+static bool radarScheduleSet(int idx, int onMin, int offMin, int fanPct) {
+  if (idx < 0 || idx >= radarSchedCount) return false;
+  radarSchedSec[idx].onMin = onMin;
+  radarSchedSec[idx].offMin = offMin;
+  radarSchedSec[idx].fanPct = clampSchedFan(fanPct);
   return true;
 }
 
@@ -1332,6 +1437,85 @@ static void updateFanGesture(const RadarSnapshot &rs) {
   }
 }
 
+/** T4 水平：底座行星齿轮 2:1（舵机 180° → 云台 360°）。
+ *  机械角 = 舵机角 × 2；雷达方位 1° 对准 → 舵机转 0.5°。
+ *  中心：雷达 0° ↔ 舵机 90° ↔ 底座 180°。 */
+static int trackPanFromAzimuth(int16_t ang) {
+  int a = ang;
+  if (a < -TRACK_FOV_HALF) a = -TRACK_FOV_HALF;
+  if (a > TRACK_FOV_HALF) a = TRACK_FOV_HALF;
+  // 1:1 世界角瞄准：servo = 90 + az/2（减速比 2）
+  int pan = 90 + a / 2;
+  if (pan < 0) pan = 0;
+  if (pan > 180) pan = 180;
+  return pan;
+}
+
+/**
+ * T3 仰角：雷达无俯仰角，用距离估。近→低头，远→略抬。
+ * 0.4m→55° … 5m→115°（桌面/云台风扇经验曲线，可再调）。
+ */
+static int trackElevFromRange(uint16_t range_mm) {
+  if (range_mm == 0) return 90;
+  if (range_mm <= 400) return 55;
+  if (range_mm >= 5000) return 115;
+  return 55 + (int)((range_mm - 400) * 60 / 4600);
+}
+
+static int trackStepToward(int cur, int tgt, int maxStep) {
+  int d = tgt - cur;
+  if (d > maxStep) d = maxStep;
+  if (d < -maxStep) d = -maxStep;
+  return cur + d;
+}
+
+/** 雷达目标 → T3 仰角 / T4 水平；尊重忽略扇区；无人则停在当前位置。
+ *  雷达墙装固定、不随云台转：方位角直接当房间绝对角写 T4（经 2:1 齿轮换算）。 */
+static void updateRadarTrack(const RadarSnapshot &rs) {
+  if (!fanTrackEnable) {
+    snprintf(trackPhase, sizeof(trackPhase), "disabled");
+    return;
+  }
+  if (!flagRadarPwr) {
+    snprintf(trackPhase, sizeof(trackPhase), "no_power");
+    return;
+  }
+  if (!pca.present()) {
+    snprintf(trackPhase, sizeof(trackPhase), "no_pca");
+    return;
+  }
+
+  const int64_t now = esp_timer_get_time();
+  if (trackLastUs != 0 && (now - trackLastUs) < TRACK_SAMPLE_US) return;
+  trackLastUs = now;
+
+  uint16_t range = 0;
+  int16_t ang = 0;
+  if (!radarPickUsable(rs, &range, &ang)) {
+    snprintf(trackPhase, sizeof(trackPhase), "idle");
+    return;
+  }
+
+  trackLastAng = ang;
+  trackLastRangeMm = range;
+  trackWantPan = trackPanFromAzimuth(ang);
+  trackWantElev = trackElevFromRange(range);
+
+  if (!flagPwm && !setPwmEnable(true)) {
+    snprintf(trackPhase, sizeof(trackPhase), "pwm_fail");
+    return;
+  }
+  if (!actuatorLock()) return;
+  const int elev = trackStepToward(servoAngleDeg[0], trackWantElev, TRACK_MAX_STEP);
+  const int pan = trackStepToward(servoAngleDeg[1], trackWantPan, TRACK_MAX_STEP);
+  bool ok = servoAngle(0, elev);
+  if (ok) ok = servoAngle(1, pan);
+  actuatorUnlock();
+  if (ok) {
+    snprintf(trackPhase, sizeof(trackPhase), "aim");
+  }
+}
+
 static bool emergencyStop() {
   if (!flagPeriphOff) {
     savedPwm = flagPwm;
@@ -1339,6 +1523,7 @@ static bool emergencyStop() {
     savedRadarPwr = flagRadarPwr;
     savedFanAuto = fanAutoEnable;
     savedFanGesture = fanGestureEnable;
+    savedFanTrack = fanTrackEnable;
   }
   recStop();
   if (!actuatorLock()) return false;
@@ -1361,9 +1546,11 @@ static bool emergencyStop() {
   fanLastSampleUs = 0;
   fanSetPhase("disabled");
   fanGestureEnable = false;
+  fanTrackEnable = false;
   fanSuppressAutoOn = false;
   gestResetTracking();
   snprintf(gestPhase, sizeof(gestPhase), "disabled");
+  snprintf(trackPhase, sizeof(trackPhase), "disabled");
   snprintf(fanReason, sizeof(fanReason), "关闭所有外设");
   snprintf(fanLastAction, sizeof(fanLastAction), "关 LED_1：关闭所有外设");
   spotDutyPct[0] = spotDutyPct[1] = spotDutyPct[2] = 0;
@@ -1397,6 +1584,11 @@ static bool releasePeripherals() {
     fanGestureEnable = true;
     gestResetTracking();
     snprintf(gestPhase, sizeof(gestPhase), flagRadarPwr ? "idle" : "no_power");
+  }
+  if (savedFanTrack) {
+    fanTrackEnable = true;
+    trackLastUs = 0;
+    snprintf(trackPhase, sizeof(trackPhase), flagRadarPwr ? "idle" : "no_power");
   }
   if (fanIsOn()) fanAutoOn = fanAutoEnable;
   oledShowHome(true);
@@ -1477,18 +1669,70 @@ static esp_err_t handleRadarPost(httpd_req_t *req) {
     radarScheduleEnable = argBool(a, "scheduleEnable", false);
     changed = true;
   }
-  if (argsHasKey(a, "scheduleOn")) {
+  if (argsHasKey(a, "scheduleClear") && argBool(a, "scheduleClear", false)) {
+    radarSchedCount = 0;
+    schedActiveSeg = -1;
+    changed = true;
+  }
+  if (argsHasKey(a, "scheduleAdd") && argBool(a, "scheduleAdd", false)) {
+    int onM = 480, offM = 1320;
+    if (argsHasKey(a, "scheduleOn")) {
+      if (!parseHm(argStr(a, "scheduleOn", "").c_str(), onM))
+        return sendJson(req, 400, "{\"ok\":false,\"error\":\"scheduleOn use HH:MM or empty\"}");
+    }
+    if (argsHasKey(a, "scheduleOff")) {
+      if (!parseHm(argStr(a, "scheduleOff", "").c_str(), offM))
+        return sendJson(req, 400, "{\"ok\":false,\"error\":\"scheduleOff use HH:MM or empty\"}");
+    }
+    const int fanPct =
+        argsHasKey(a, "scheduleFan") ? argInt(a, "scheduleFan", 100) : 100;
+    if (!radarScheduleAdd(onM, offM, fanPct))
+      return sendJson(req, 400, "{\"ok\":false,\"error\":\"schedule segments full (max 8)\"}");
+    changed = true;
+  } else if (argsHasKey(a, "scheduleDel")) {
+    if (!radarScheduleDel(argInt(a, "scheduleDel", -1)))
+      return sendJson(req, 400, "{\"ok\":false,\"error\":\"scheduleDel index out of range\"}");
+    schedActiveSeg = -1;
+    changed = true;
+  } else if (argsHasKey(a, "scheduleId")) {
+    const int idx = argInt(a, "scheduleId", -1);
+    if (idx < 0 || idx >= radarSchedCount)
+      return sendJson(req, 400, "{\"ok\":false,\"error\":\"scheduleId out of range\"}");
+    int onM = radarSchedSec[idx].onMin;
+    int offM = radarSchedSec[idx].offMin;
+    int fanPct = radarSchedSec[idx].fanPct;
+    if (argsHasKey(a, "scheduleOn")) {
+      if (!parseHm(argStr(a, "scheduleOn", "").c_str(), onM))
+        return sendJson(req, 400, "{\"ok\":false,\"error\":\"scheduleOn use HH:MM or empty\"}");
+    }
+    if (argsHasKey(a, "scheduleOff")) {
+      if (!parseHm(argStr(a, "scheduleOff", "").c_str(), offM))
+        return sendJson(req, 400, "{\"ok\":false,\"error\":\"scheduleOff use HH:MM or empty\"}");
+    }
+    if (argsHasKey(a, "scheduleFan")) fanPct = argInt(a, "scheduleFan", fanPct);
+    radarScheduleSet(idx, onM, offM, fanPct);
+    changed = true;
+  } else if (argsHasKey(a, "scheduleOn")) {
     int m = 0;
     if (!parseHm(argStr(a, "scheduleOn", "").c_str(), m))
       return sendJson(req, 400, "{\"ok\":false,\"error\":\"scheduleOn use HH:MM or empty\"}");
-    radarSchedOnMin = m;
+    if (radarSchedCount <= 0) {
+      if (!radarScheduleAdd(m, 1320, 100))
+        return sendJson(req, 400, "{\"ok\":false,\"error\":\"schedule segments full (max 8)\"}");
+    } else {
+      radarSchedSec[0].onMin = m;
+    }
     changed = true;
-  }
-  if (argsHasKey(a, "scheduleOff")) {
+  } else if (argsHasKey(a, "scheduleOff")) {
     int m = 0;
     if (!parseHm(argStr(a, "scheduleOff", "").c_str(), m))
       return sendJson(req, 400, "{\"ok\":false,\"error\":\"scheduleOff use HH:MM or empty\"}");
-    radarSchedOffMin = m;
+    if (radarSchedCount <= 0) {
+      if (!radarScheduleAdd(480, m, 100))
+        return sendJson(req, 400, "{\"ok\":false,\"error\":\"schedule segments full (max 8)\"}");
+    } else {
+      radarSchedSec[0].offMin = m;
+    }
     changed = true;
   }
   if (argsHasKey(a, "power")) {
@@ -1550,7 +1794,9 @@ static esp_err_t handleRadarPost(httpd_req_t *req) {
   }
   if (changed) {
     if (argsHasKey(a, "scheduleEnable") || argsHasKey(a, "scheduleOn") ||
-        argsHasKey(a, "scheduleOff")) {
+        argsHasKey(a, "scheduleOff") || argsHasKey(a, "scheduleFan") ||
+        argsHasKey(a, "scheduleAdd") || argsHasKey(a, "scheduleDel") ||
+        argsHasKey(a, "scheduleId") || argsHasKey(a, "scheduleClear")) {
       cfgSave();
       radarScheduleApply();
     }
@@ -1579,7 +1825,7 @@ static esp_err_t handleRadarPost(httpd_req_t *req) {
   if (cmd == "version") commandOk = radar_cmd_get_version();
   else if (cmd == "poll") commandOk = radar_cmd_get_det();
   else return sendJson(req, 400,
-                       "{\"ok\":false,\"error\":\"use power, scheduleEnable/On/Off, ignoreEnable/Add/Del/Id/From/To, or cmd=version|poll\"}");
+                       "{\"ok\":false,\"error\":\"use power, scheduleEnable/Add/Del/Id/On/Off/Fan, ignoreEnable/Add/Del/Id/From/To, or cmd=version|poll\"}");
   if (!commandOk) {
     if (cmd == "poll" && !flagRadarPwr)
       return sendJson(req, 409, "{\"ok\":false,\"error\":\"radar power is off\"}");
@@ -1604,7 +1850,7 @@ static esp_err_t handleApiIndex(httpd_req_t *req) {
   body += "{\"path\":\"/api/servo\",\"note\":\"id 0..1 = T3/T4\"},";
   body += "{\"path\":\"/api/servos\"},";
   body += "{\"path\":\"/api/led\",\"note\":\"id 0=LED_1 1=LED_2 2=LED_ALL; need LED_ALL for 1/2\"},";
-  body += "{\"path\":\"/api/fan\",\"note\":\"auto / gesture / power; gesture: near palm hold 2s cycles 0→50→100\"},";
+  body += "{\"path\":\"/api/fan\",\"note\":\"auto / gesture / track / power; track: radar→T3 elev + T4 pan\"},";
   body += "{\"path\":\"/api/voice\",\"note\":\"GET status; POST {on:true|false}; all UI settings persist in NVS\"},";
   body += "{\"path\":\"/api/i2c\",\"note\":\"?full=1 for bus scan\"},";
   body += "{\"path\":\"/api/mic\",\"note\":\"RMS sample\"},";
@@ -1614,7 +1860,7 @@ static esp_err_t handleApiIndex(httpd_req_t *req) {
   body += "{\"path\":\"/api/beep\"},{\"path\":\"/api/oled\"},";
   body += "{\"path\":\"/api/ota\",\"methods\":[\"GET\",\"POST\"]},";
   body += "{\"path\":\"/api/logs\"},";
-  body += "{\"path\":\"/api/radar\",\"note\":\"power; scheduleOn/Off HH:MM + scheduleEnable; ignoreEnable + ignoreAdd/Del/Id/From/To\"},";
+  body += "{\"path\":\"/api/radar\",\"note\":\"power; scheduleEnable + scheduleAdd/Del/Id/On/Off/Fan; ignoreEnable + ignoreAdd/Del/Id/From/To\"},";
   body += "{\"path\":\"/api/radar/live\"},{\"path\":\"/radar\"}";
   body += "]}";
   return sendJson(req, 200, body);
@@ -1637,30 +1883,35 @@ static void jsonEscLite(const char *in, char *out, size_t n) {
 }
 
 static void fanJsonInto(char *buf, size_t buflen) {
-  char r[72], a[112], gp[28];
+  char r[72], a[112], gp[28], tp[28];
   jsonEscLite(fanReason, r, sizeof(r));
   jsonEscLite(fanLastAction, a, sizeof(a));
   jsonEscLite(gestPhase, gp, sizeof(gp));
+  jsonEscLite(trackPhase, tp, sizeof(tp));
   snprintf(buf, buflen,
            "{\"auto\":%s,\"on\":%s,\"phase\":\"%s\",\"reason\":\"%s\",\"lastAction\":\"%s\","
            "\"progress\":%u,\"need\":%u,\"offNeed\":%u,\"sampleMs\":2000,\"confirm\":%u,"
            "\"samplePresent\":%s,\"led1\":%d,\"ledAll\":%d,\"intensity\":%d,"
            "\"savedLed1\":%d,\"savedLedAll\":%d,\"savedIntensity\":%d,"
            "\"gesture\":%s,\"gestPhase\":\"%s\",\"gestProgressMs\":%lld,\"gestNeedMs\":2000,"
-           "\"gestNearMm\":%u,\"gestExitMm\":%u,\"gestRangeMm\":%u,\"gestLevel\":%d,\"gear\":%d}",
+           "\"gestNearMm\":%u,\"gestExitMm\":%u,\"gestRangeMm\":%u,\"gestLevel\":%d,\"gear\":%d,"
+           "\"track\":%s,\"trackPhase\":\"%s\",\"trackAng\":%d,\"trackRangeMm\":%u,"
+           "\"trackElev\":%d,\"trackPan\":%d,\"servos\":[%d,%d]}",
            fanAutoEnable ? "true" : "false", fanAutoOn ? "true" : "false", fanPhase, r, a,
            (unsigned)fanConfirmCount, (unsigned)FAN_CONFIRM_ON, (unsigned)FAN_CONFIRM_OFF,
            (unsigned)FAN_CONFIRM_OFF, fanSamplePresent ? "true" : "false", spotDutyPct[0],
            spotDutyPct[2], fanIntensityPct(), fanSavedLed1, fanSavedLedAll,
            (fanSavedLed1 * fanSavedLedAll) / 100, fanGestureEnable ? "true" : "false", gp,
            (long long)gestHoldElapsedMs, (unsigned)GEST_NEAR_ENTER_MM, (unsigned)GEST_NEAR_EXIT_MM,
-           (unsigned)gestLastRangeMm, fanLevelIndex(), fanGearPct);
+           (unsigned)gestLastRangeMm, fanLevelIndex(), fanGearPct,
+           fanTrackEnable ? "true" : "false", tp, (int)trackLastAng, (unsigned)trackLastRangeMm,
+           trackWantElev, trackWantPan, servoAngleDeg[0], servoAngleDeg[1]);
 }
 
 static esp_err_t handleFanGet(httpd_req_t *req) {
-  char fan[760];
+  char fan[960];
   fanJsonInto(fan, sizeof(fan));
-  char buf[800];
+  char buf[1000];
   snprintf(buf, sizeof(buf), "{\"ok\":true,\"fan\":%s}", fan);
   return sendJson(req, 200, buf);
 }
@@ -1669,10 +1920,11 @@ static esp_err_t handleFanPost(httpd_req_t *req) {
   auto a = loadArgs(req);
   const bool hasPower = argsHasKey(a, "power");
   const bool hasGesture = argsHasKey(a, "gesture");
+  const bool hasTrack = argsHasKey(a, "track");
   const bool hasAuto =
-      argsHasKey(a, "auto") || (!hasPower && !hasGesture && argsHasKey(a, "on"));
-  if (!hasPower && !hasAuto && !hasGesture)
-    return sendJson(req, 400, "{\"ok\":false,\"error\":\"need auto, gesture or power bool\"}");
+      argsHasKey(a, "auto") || (!hasPower && !hasGesture && !hasTrack && argsHasKey(a, "on"));
+  if (!hasPower && !hasAuto && !hasGesture && !hasTrack)
+    return sendJson(req, 400, "{\"ok\":false,\"error\":\"need auto, gesture, track or power bool\"}");
 
   if (hasPower) {
     const bool on = argBool(a, "power", false);
@@ -1722,10 +1974,23 @@ static esp_err_t handleFanPost(httpd_req_t *req) {
     snprintf(gestPhase, sizeof(gestPhase), en ? (flagRadarPwr ? "idle" : "no_power") : "disabled");
     ESP_LOGI(TAG, "fan: gesture=%d gear=%d", en ? 1 : 0, fanGearPct);
   }
+  if (hasTrack) {
+    const bool en = argBool(a, "track", false);
+    fanTrackEnable = en;
+    trackLastUs = 0;
+    if (en) {
+      flagPeriphOff = false;
+      if (!flagPwm) setPwmEnable(true);
+      snprintf(trackPhase, sizeof(trackPhase), flagRadarPwr ? "idle" : "no_power");
+    } else {
+      snprintf(trackPhase, sizeof(trackPhase), "disabled");
+    }
+    ESP_LOGI(TAG, "fan: track=%d", en ? 1 : 0);
+  }
   cfgSave();
-  char fan[760];
+  char fan[960];
   fanJsonInto(fan, sizeof(fan));
-  char buf[800];
+  char buf[1000];
   snprintf(buf, sizeof(buf), "{\"ok\":true,\"fan\":%s}", fan);
   return sendJson(req, 200, buf);
 }
@@ -1755,6 +2020,7 @@ static void cfgSave() {
   const bool radar = flagPeriphOff ? savedRadarPwr : flagRadarPwr;
   const bool fauto = flagPeriphOff ? savedFanAuto : fanAutoEnable;
   const bool fgest = flagPeriphOff ? savedFanGesture : fanGestureEnable;
+  const bool ftrack = flagPeriphOff ? savedFanTrack : fanTrackEnable;
   nvs_set_u8(h, "voice", flagVoice ? 1 : 0);
   nvs_set_u8(h, "vol", board_i2s_get_volume());
   nvs_set_u8(h, "pwm", pwm ? 1 : 0);
@@ -1762,6 +2028,7 @@ static void cfgSave() {
   nvs_set_u8(h, "radar", radar ? 1 : 0);
   nvs_set_u8(h, "fauto", fauto ? 1 : 0);
   nvs_set_u8(h, "fgest", fgest ? 1 : 0);
+  nvs_set_u8(h, "ftrack", ftrack ? 1 : 0);
   nvs_set_u8(h, "fgear", clampU8(fanGearPct));
   nvs_set_u8(h, "fs1", clampU8(fanSavedLed1));
   nvs_set_u8(h, "fsa", clampU8(fanSavedLedAll));
@@ -1772,8 +2039,27 @@ static void cfgSave() {
   nvs_set_u8(h, "srv0", clampU8(cfgSnapSrv[0]));
   nvs_set_u8(h, "srv1", clampU8(cfgSnapSrv[1]));
   nvs_set_u8(h, "rsch_en", radarScheduleEnable ? 1 : 0);
-  nvs_set_u16(h, "rsch_on", radarSchedOnMin < 0 ? 65535 : (uint16_t)radarSchedOnMin);
-  nvs_set_u16(h, "rsch_off", radarSchedOffMin < 0 ? 65535 : (uint16_t)radarSchedOffMin);
+  nvs_set_u8(h, "rsch_n", (uint8_t)radarSchedCount);
+  {
+    uint8_t packed[RADAR_SCHED_MAX * 5] = {0};
+    for (int i = 0; i < radarSchedCount; i++) {
+      const uint16_t on =
+          radarSchedSec[i].onMin < 0 ? 65535 : (uint16_t)radarSchedSec[i].onMin;
+      const uint16_t off =
+          radarSchedSec[i].offMin < 0 ? 65535 : (uint16_t)radarSchedSec[i].offMin;
+      packed[i * 5] = (uint8_t)(on & 0xff);
+      packed[i * 5 + 1] = (uint8_t)(on >> 8);
+      packed[i * 5 + 2] = (uint8_t)(off & 0xff);
+      packed[i * 5 + 3] = (uint8_t)(off >> 8);
+      packed[i * 5 + 4] = clampU8(radarSchedSec[i].fanPct);
+    }
+    if (radarSchedCount > 0)
+      nvs_set_blob(h, "rschs", packed, (size_t)radarSchedCount * 5);
+    const int on0 = radarSchedCount > 0 ? radarSchedSec[0].onMin : -1;
+    const int off0 = radarSchedCount > 0 ? radarSchedSec[0].offMin : -1;
+    nvs_set_u16(h, "rsch_on", on0 < 0 ? 65535 : (uint16_t)on0);
+    nvs_set_u16(h, "rsch_off", off0 < 0 ? 65535 : (uint16_t)off0);
+  }
   nvs_set_u8(h, "rign_en", radarIgnoreEnable ? 1 : 0);
   nvs_set_u8(h, "rign_n", (uint8_t)radarIgnoreCount);
   {
@@ -1812,6 +2098,7 @@ static void cfgLoad() {
   if (nvs_get_u8(h, "radar", &v) == ESP_OK) cfgWantRadar = v != 0;
   if (nvs_get_u8(h, "fauto", &v) == ESP_OK) fanAutoEnable = v != 0;
   if (nvs_get_u8(h, "fgest", &v) == ESP_OK) fanGestureEnable = v != 0;
+  if (nvs_get_u8(h, "ftrack", &v) == ESP_OK) fanTrackEnable = v != 0;
   if (nvs_get_u8(h, "fgear", &v) == ESP_OK) fanGearPct = v > 100 ? 100 : (int)v;
   if (nvs_get_u8(h, "fs1", &v) == ESP_OK) fanSavedLed1 = v > 100 ? 100 : (int)v;
   if (nvs_get_u8(h, "fsa", &v) == ESP_OK) fanSavedLedAll = v > 100 ? 100 : (int)v;
@@ -1827,12 +2114,37 @@ static void cfgLoad() {
     servoAngleDeg[1] = cfgSnapSrv[1];
   }
   if (nvs_get_u8(h, "rsch_en", &v) == ESP_OK) radarScheduleEnable = v != 0;
-  uint16_t u16 = 65535;
-  if (nvs_get_u16(h, "rsch_on", &u16) == ESP_OK)
-    radarSchedOnMin = u16 >= 1440 ? -1 : (int)u16;
-  u16 = 65535;
-  if (nvs_get_u16(h, "rsch_off", &u16) == ESP_OK)
-    radarSchedOffMin = u16 >= 1440 ? -1 : (int)u16;
+  {
+    uint8_t packed[RADAR_SCHED_MAX * 5] = {0};
+    size_t blobLen = sizeof(packed);
+    uint8_t n = 0;
+    const bool hasN = nvs_get_u8(h, "rsch_n", &n) == ESP_OK;
+    const bool hasBlob = nvs_get_blob(h, "rschs", packed, &blobLen) == ESP_OK && blobLen >= 5;
+    if (hasN && hasBlob) {
+      radarSchedCount = n > RADAR_SCHED_MAX ? RADAR_SCHED_MAX : (int)n;
+      const int fromBlob = (int)(blobLen / 5);
+      if (radarSchedCount > fromBlob) radarSchedCount = fromBlob;
+      for (int i = 0; i < radarSchedCount; i++) {
+        const uint16_t on = (uint16_t)packed[i * 5] | ((uint16_t)packed[i * 5 + 1] << 8);
+        const uint16_t off = (uint16_t)packed[i * 5 + 2] | ((uint16_t)packed[i * 5 + 3] << 8);
+        radarSchedSec[i].onMin = on >= 1440 ? -1 : (int)on;
+        radarSchedSec[i].offMin = off >= 1440 ? -1 : (int)off;
+        radarSchedSec[i].fanPct = packed[i * 5 + 4] > 100 ? 100 : (int)packed[i * 5 + 4];
+      }
+    } else {
+      uint16_t u16 = 65535;
+      int onM = -1, offM = -1;
+      if (nvs_get_u16(h, "rsch_on", &u16) == ESP_OK) onM = u16 >= 1440 ? -1 : (int)u16;
+      u16 = 65535;
+      if (nvs_get_u16(h, "rsch_off", &u16) == ESP_OK) offM = u16 >= 1440 ? -1 : (int)u16;
+      if (onM >= 0 || offM >= 0) {
+        radarSchedCount = 1;
+        radarSchedSec[0].onMin = onM;
+        radarSchedSec[0].offMin = offM;
+        radarSchedSec[0].fanPct = 100;
+      }
+    }
+  }
   if (nvs_get_u8(h, "rign_en", &v) == ESP_OK)
     radarIgnoreEnable = v != 0;
   else if (nvs_get_u8(h, "rign60", &v) == ESP_OK)
@@ -1871,12 +2183,13 @@ static void cfgLoad() {
     const int a0 = radarIgnoreCount > 0 ? radarIgnoreSec[0].from : 0;
     const int b0 = radarIgnoreCount > 0 ? radarIgnoreSec[0].to : -60;
     ESP_LOGI(TAG,
-             "cfg NVS: voice=%d vol=%u pwm=%d amp=%d radar=%d fauto=%d fgest=%d gear=%d "
+             "cfg NVS: voice=%d vol=%u pwm=%d amp=%d radar=%d fauto=%d fgest=%d ftrack=%d gear=%d "
              "ign=%d n=%d(%d~%d) led=[%d,%d,%d] srv=[%d,%d]",
              flagVoice ? 1 : 0, (unsigned)board_i2s_get_volume(), cfgWantPwm ? 1 : 0,
              cfgWantAmp ? 1 : 0, cfgWantRadar ? 1 : 0, fanAutoEnable ? 1 : 0,
-             fanGestureEnable ? 1 : 0, fanGearPct, radarIgnoreEnable ? 1 : 0, radarIgnoreCount, a0,
-             b0, cfgSnapLed[0], cfgSnapLed[1], cfgSnapLed[2], cfgSnapSrv[0], cfgSnapSrv[1]);
+             fanGestureEnable ? 1 : 0, fanTrackEnable ? 1 : 0, fanGearPct,
+             radarIgnoreEnable ? 1 : 0, radarIgnoreCount, a0, b0, cfgSnapLed[0], cfgSnapLed[1],
+             cfgSnapLed[2], cfgSnapSrv[0], cfgSnapSrv[1]);
   }
 }
 
@@ -1909,6 +2222,10 @@ static void cfgApplyBoot() {
   if (fanGestureEnable) {
     gestResetTracking();
     snprintf(gestPhase, sizeof(gestPhase), cfgWantRadar ? "idle" : "no_power");
+  }
+  if (fanTrackEnable) {
+    trackLastUs = 0;
+    snprintf(trackPhase, sizeof(trackPhase), cfgWantRadar ? "idle" : "no_power");
   }
 
   const bool anyLed = cfgSnapLed[0] > 0 || cfgSnapLed[1] > 0 || cfgSnapLed[2] > 0;
@@ -1962,20 +2279,20 @@ static esp_err_t handleStatus(httpd_req_t *req) {
   const size_t psramBytes = 0;
 #endif
 
-  char fan[760];
+  char fan[960];
   fanJsonInto(fan, sizeof(fan));
   char voice[280];
   voiceJsonInto(voice, sizeof(voice));
   char localTime[16];
   localTimeStr(localTime, sizeof(localTime));
-  char buf[1700];
+  char buf[1900];
   snprintf(buf, sizeof(buf),
            "{\"ok\":true,\"fw\":\"%s\",\"board\":\"v6-1\",\"ip\":\"%s\",\"rssi\":%d,"
            "\"timeSynced\":%s,\"localTime\":\"%s\","
            "\"psram\":%s,\"psramBytes\":%u,"
            "\"xl9555\":%s,\"oled\":%s,\"pca9685\":%s,\"i2s\":%s,"
            "\"pwmEnable\":%s,\"ampEnable\":%s,\"volume\":%u,\"radarPower\":%s,\"peripheralsOff\":%s,\"otaBusy\":%s,"
-           "\"leds\":[%d,%d,%d],\"fan\":%s,\"voice\":%s,\"i2c\":%s}",
+           "\"leds\":[%d,%d,%d],\"servos\":[%d,%d],\"fan\":%s,\"voice\":%s,\"i2c\":%s}",
            FW_VERSION, ipStr, rssi, timeSynced ? "true" : "false", localTime,
            psramOk ? "true" : "false", (unsigned)psramBytes,
            xl.present() ? "true" : "false", oled.present() ? "true" : "false",
@@ -1984,7 +2301,8 @@ static esp_err_t handleStatus(httpd_req_t *req) {
            (unsigned)board_i2s_get_volume(),
            flagRadarPwr ? "true" : "false", flagPeriphOff ? "true" : "false",
            otaBusy ? "true" : "false", spotDutyPct[0],
-           spotDutyPct[1], spotDutyPct[2], fan, voice, i2cKnownJson().c_str());
+           spotDutyPct[1], spotDutyPct[2], servoAngleDeg[0], servoAngleDeg[1], fan, voice,
+           i2cKnownJson().c_str());
   return sendJson(req, 200, buf);
 }
 
@@ -2688,6 +3006,7 @@ static void background_task(void *) {
     radar_get_snapshot(rs);
     if (fanGestureEnable && pca.present()) updateFanGesture(rs);
     if (fanAutoEnable && pca.present()) updateRadarFan(rs);
+    if (fanTrackEnable && pca.present()) updateRadarTrack(rs);
     radarScheduleTick();
     if (oled.present()) oledShowHome(false);
     const int64_t now = esp_timer_get_time();

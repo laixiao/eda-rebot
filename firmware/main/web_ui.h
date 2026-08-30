@@ -53,7 +53,11 @@ pre{margin:0;white-space:pre-wrap;word-break:break-all;font:12px/1.4 ui-monospac
 .radar-side{min-width:0;display:flex;flex-direction:column;gap:12px}
 .radar-ctl{background:#0d1117;border:1px solid var(--line);border-radius:12px;padding:6px 4px}
 .ctl-row{display:flex;flex-wrap:wrap;gap:4px 4px;align-items:center;padding:10px 12px}
-.ctl-row+.ctl-row,.ctl-row+.ign-list,.ign-list+.ctl-row{border-top:1px solid #21262d}
+.ctl-row+.ctl-row,.ctl-row+.ign-list,.ign-list+.ctl-row,.sched-list+.ctl-row{border-top:1px solid #21262d}
+.sched-item{display:flex;flex-wrap:wrap;align-items:center;gap:6px}
+.sched-item input[type=range]{width:88px;min-width:60px}
+.sched-item .sched-fan{font-size:11px;color:var(--muted);min-width:34px;text-align:right;font-variant-numeric:tabular-nums}
+.sched-add{margin-left:auto}
 .radar-ctl .switch{padding:4px 8px;border-radius:8px;gap:8px;color:var(--fg);font-size:13px}
 .radar-ctl .switch .track{width:36px;height:20px}
 .radar-ctl .switch .track::after{width:16px;height:16px}
@@ -164,14 +168,15 @@ header .switch-periph.on{border-color:#f85149;background:#3b1212;color:#ff7b72}
   <pre id="otaLog">屏幕会显示步骤与 IP</pre>
 </section>
 <section>
-  <h2>舵机 T3 / T4 (U16)</h2>
+  <h2>舵机云台 T3 / T4 (U16)</h2>
+  <p class="action-note">T3=仰角 0–180°（顶部）；T4=水平底座（行星齿轮 2:1：舵机 180°→云台 360°；追踪时雷达方位÷2 写舵机）。雷达页开「自动追踪」后跟随人体。</p>
   <div class="led-row">
-    <label for="servo0">T3</label>
+    <label for="servo0">T3 仰角</label>
     <input id="servo0" type="range" min="0" max="180" value="90" oninput="onServoSlide(0,this)"/>
     <span id="servoV0" class="led-pct">90°</span>
   </div>
   <div class="led-row">
-    <label for="servo1">T4</label>
+    <label for="servo1">T4 水平</label>
     <input id="servo1" type="range" min="0" max="180" value="90" oninput="onServoSlide(1,this)"/>
     <span id="servoV1" class="led-pct">90°</span>
   </div>
@@ -304,9 +309,14 @@ header .switch-periph.on{border-color:#f85149;background:#3b1212;color:#ff7b72}
             <span class="track"></span>
             <span id="labFanGest">手势切档</span>
           </label>
+          <label class="switch switch-track" title="雷达方位→T4（2:1 齿轮，舵机=90+方位/2），距离估仰角→T3；尊重忽略扇区；需雷达供电+PWM">
+            <input id="swFanTrack" type="checkbox" onchange="setFanTrack(this.checked)"/>
+            <span class="track"></span>
+            <span id="labFanTrack">自动追踪</span>
+          </label>
         </div>
         <div class="ctl-row">
-          <label class="switch switch-ign" title="开：列表中的扇区目标不参与控风扇/手势切档；画布仍显示。可添加多段。">
+          <label class="switch switch-ign" title="开：列表中的扇区目标不参与控风扇/手势切档/自动追踪；画布仍显示。可添加多段。">
             <input id="swIgnoreAng" type="checkbox" onchange="setIgnoreEnable()"/>
             <span class="track"></span>
             <span id="labIgnoreAng">忽略扇区</span>
@@ -315,16 +325,15 @@ header .switch-periph.on{border-color:#f85149;background:#3b1212;color:#ff7b72}
         </div>
         <div class="ign-list" id="ignList"></div>
         <div class="ctl-row">
-          <label class="switch switch-acq" title="WiFi 校时后每天到点开/关雷达供电">
-            <input id="swRadarSched" type="checkbox" onchange="setRadarSchedule()"/>
+          <label class="switch switch-acq" title="WiFi 校时后按时段开关雷达；未配置时段默认关；时段内风扇由「控风扇」联动（非常开）">
+            <input id="swRadarSched" type="checkbox" onchange="setRadarScheduleEnable()"/>
             <span class="track"></span>
-            <span id="labRadarSched">每日时刻</span>
+            <span id="labRadarSched">雷达定时开关</span>
           </label>
-          <span class="time-pair">
-            <input id="rdSchedOn" type="time" value="08:00" onchange="setRadarSchedule()" title="开"/>
-            <span class="log-meta">→</span>
-            <input id="rdSchedOff" type="time" value="22:00" onchange="setRadarSchedule()" title="关"/>
-          </span>
+          <button type="button" class="ign-add sched-add" onclick="addSched()" title="添加时段">＋</button>
+        </div>
+        <div class="ign-list sched-list" id="schedList"></div>
+        <div class="ctl-row">
           <span id="rdSchedStatus" class="log-meta"></span>
         </div>
       </div>
@@ -412,29 +421,110 @@ function phaseLabel(p){
 function gestPhaseLabel(p){
   return ({disabled:'未启用',no_power:'雷达未供电',idle:'待命',holding:'近距停留中',wait_leave:'已切档·移开手'}[p])||p||'—';
 }
+function scheduleInfo(s){
+  const sch=(s&&s.schedule)||{};
+  const en=!!sch.enable;
+  let segments=[];
+  if(Array.isArray(sch.segments)&&sch.segments.length){
+    segments=sch.segments.map(x=>({
+      on:String(x.on||''),
+      off:String(x.off||''),
+      fan:Math.max(0,Math.min(100,+(x.fan??100)))
+    }));
+  }else if(sch.on||sch.off){
+    segments=[{on:String(sch.on||''), off:String(sch.off||''), fan:100}];
+  }
+  return {en, segments, activeId:sch.activeId??-1, wantOn:!!sch.wantOn, active:!!sch.active};
+}
 function renderRadarSchedule(rd,s){
   const st=document.getElementById('rdSchedStatus');
-  const sch=rd&&rd.schedule;
+  const info=scheduleInfo(rd);
   const synced=!!(rd&&rd.timeSynced)||!!(s&&s.timeSynced);
   const lt=(rd&&rd.localTime)||(s&&s.localTime)||'';
-  if(sch){
-    const sw=document.getElementById('swRadarSched');
-    const lab=document.getElementById('labRadarSched');
-    if(sw && document.activeElement!==sw) sw.checked=!!sch.enable;
-    if(lab) lab.textContent='每日时刻';
-    const onEl=document.getElementById('rdSchedOn');
-    const offEl=document.getElementById('rdSchedOff');
-    if(onEl && sch.on && document.activeElement!==onEl) onEl.value=sch.on;
-    if(offEl && sch.off && document.activeElement!==offEl) offEl.value=sch.off;
+  const sw=document.getElementById('swRadarSched');
+  const lab=document.getElementById('labRadarSched');
+  if(sw && document.activeElement!==sw) sw.checked=info.en;
+  if(lab) lab.textContent='雷达定时开关';
+  const list=document.getElementById('schedList');
+  const addBtn=document.querySelector('.sched-add');
+  if(addBtn){
+    addBtn.disabled=info.segments.length>=8;
+    addBtn.title=info.segments.length>=8?'最多 8 段':'添加时段';
+  }
+  if(list && !list.contains(document.activeElement)){
+    if(!info.segments.length){
+      list.innerHTML='<div class="ign-empty">无时段 · 默认关雷达，点 ＋ 添加</div>';
+    }else{
+      list.innerHTML=info.segments.map((seg,i)=>
+        `<div class="ign-item sched-item" data-i="${i}">`+
+        `<input type="time" value="${seg.on||'08:00'}" title="开" onchange="updSched(${i})"/>`+
+        `<span class="log-meta">→</span>`+
+        `<input type="time" value="${seg.off||'22:00'}" title="关" onchange="updSched(${i})"/>`+
+        `<span class="log-meta">联动</span>`+
+        `<input type="range" min="0" max="100" value="${seg.fan}" title="控风扇开时强度" oninput="onSchedFanSlide(${i},this)"/>`+
+        `<span class="sched-fan" id="schedFanV${i}">${seg.fan}%</span>`+
+        `<button type="button" class="ign-del" onclick="delSched(${i})" title="删除">×</button>`+
+        `</div>`).join('');
+    }
   }
   if(!st) return;
-  if(!sch||!sch.enable){st.textContent=synced&&lt?`校时 ${lt}`:'';return}
+  if(!info.en){st.textContent=synced&&lt?`校时 ${lt}`:'';return}
   let msg;
-  if(!synced) msg='已设时刻，等待 WiFi 校时…';
-  else if(!sch.active) msg='已设时刻，等待校时…';
-  else msg=(sch.wantOn?'窗口内 · 应供电':'窗口外 · 应关电')+` · ${sch.on||'—'}开/${sch.off||'—'}关`;
+  if(!synced) msg='已设时段，等待 WiFi 校时…';
+  else if(!info.segments.length) msg='无时段 · 默认关雷达';
+  else if(!info.active) msg='已设时段，等待校时…';
+  else if(info.wantOn){
+    const seg=info.segments[info.activeId]||{};
+    msg=`窗口内 · 雷达开 · 风扇随联动（${seg.fan??100}%）`;
+  }else msg='窗口外 · 雷达关';
   if(lt) msg+=` · ${lt}`;
   st.textContent=msg;
+}
+const schedFanTimers=[0,0,0,0,0,0,0,0];
+function onSchedFanSlide(i,el){
+  const v=Math.max(0,Math.min(100,+el.value||0));
+  const lab=document.getElementById('schedFanV'+i);
+  if(lab) lab.textContent=v+'%';
+  if(schedFanTimers[i]) clearTimeout(schedFanTimers[i]);
+  schedFanTimers[i]=setTimeout(()=>updSched(i,true),120);
+}
+async function setRadarScheduleEnable(){
+  const sw=document.getElementById('swRadarSched');
+  const body={scheduleEnable:!!(sw&&sw.checked)};
+  if(sw) sw.disabled=true;
+  try{
+    const j=await api('POST','/api/radar',body);
+    if(j&&j.ok===false && sw) sw.checked=!body.scheduleEnable;
+  }finally{if(sw) sw.disabled=false}
+  refresh();
+}
+async function addSched(){
+  const btn=document.querySelector('.sched-add');
+  if(btn) btn.disabled=true;
+  try{
+    const j=await api('POST','/api/radar',{scheduleAdd:true, scheduleOn:'08:00', scheduleOff:'22:00', scheduleFan:100});
+    if(j&&j.ok===false && btn) btn.title=j.error||'添加失败';
+  }finally{if(btn) btn.disabled=false}
+  refresh();
+}
+async function delSched(i){
+  await api('POST','/api/radar',{scheduleDel:i});
+  refresh();
+}
+async function updSched(i,quiet){
+  const row=document.querySelector('.sched-item[data-i="'+i+'"]');
+  if(!row) return;
+  const times=row.querySelectorAll('input[type=time]');
+  const range=row.querySelector('input[type=range]');
+  const on=(times[0]&&times[0].value)||'';
+  const off=(times[1]&&times[1].value)||'';
+  const fan=Math.max(0,Math.min(100,+(range&&range.value)||100));
+  if(range) range.value=String(fan);
+  const lab=document.getElementById('schedFanV'+i);
+  if(lab) lab.textContent=fan+'%';
+  const j=await api('POST','/api/radar',{scheduleId:i, scheduleOn:on, scheduleOff:off, scheduleFan:fan});
+  if(!quiet && j&&j.ok===false) alert(j.error||'保存失败');
+  if(!quiet) refresh();
 }
 const ledTimers=[0,0,0];
 function renderFan(f){
@@ -448,6 +538,10 @@ function renderFan(f){
   const labG=document.getElementById('labFanGest');
   if(swG && document.activeElement!==swG) swG.checked=!!f.gesture;
   if(labG) labG.textContent='手势切档';
+  const swT=document.getElementById('swFanTrack');
+  const labT=document.getElementById('labFanTrack');
+  if(swT && document.activeElement!==swT) swT.checked=!!f.track;
+  if(labT) labT.textContent='自动追踪';
   let prog='';
   const needOn=f.need||1;
   const needOff=f.offNeed||f.confirm||3;
@@ -469,10 +563,18 @@ function renderFan(f){
     const rng=f.gestRangeMm?((f.gestRangeMm/1000).toFixed(2)+' m'):'—';
     gest=`手势档 <b>${f.gear??0}%</b>（${lv}）· <b>${gestPhaseLabel(f.gestPhase)}</b> · ${hold}/${need} ms · 距 ${rng}<br>`;
   }
+  let track='';
+  if(f.track){
+    const tp={disabled:'关',no_power:'雷达未供电',idle:'待命',aim:'瞄准中',pwm_fail:'PWM失败',no_pca:'无PCA'}[f.trackPhase]||(f.trackPhase||'—');
+    const ang=(f.trackAng!=null)?(f.trackAng+'°'):'—';
+    const rng=f.trackRangeMm?((f.trackRangeMm/1000).toFixed(2)+' m'):'—';
+    track=`追踪 <b>${tp}</b> · 目标 ${ang} / ${rng} · 舵机 T3=${f.trackElev??'—'}° T4=${f.trackPan??'—'}°`;
+  }
   box.innerHTML=
     `<div class="fan-kv"><span>状态</span><b>${phaseLabel(f.phase)}</b><span>LED_1</span><b class="${f.on?'ok':''}">${f.on?'开':'关'}</b></div>`+
     `<div class="fan-kv" style="margin-top:6px"><span>进度</span><b>${prog}</b><span>强度</span><b>${f.intensity??0}%</b></div>`+
     (gest?`<div class="fan-note">${gest.replace(/<br>/g,' · ')}</div>`:'')+
+    (track?`<div class="fan-note">${track}</div>`:'')+
     `<div class="fan-note dim">记忆 ${f.savedIntensity??'—'}% · ${f.reason||'—'}</div>`+
     `<div class="fan-note dim">上次 ${f.lastAction||'—'}</div>`;
 }
@@ -511,6 +613,17 @@ function syncLedsFromStatus(s){
     if(lab) lab.textContent=leds[i]+'%';
   }
 }
+function syncServosFromStatus(s){
+  const sv=s.servos||(s.fan&&s.fan.servos)||[];
+  for(let i=0;i<2;i++){
+    if(servoTimers[i]) continue;
+    if(typeof sv[i]!=='number') continue;
+    const el=document.getElementById('servo'+i);
+    const lab=document.getElementById('servoV'+i);
+    if(el && document.activeElement!==el) el.value=String(sv[i]);
+    if(lab) lab.textContent=sv[i]+'°';
+  }
+}
 async function refresh(){
   const s=await api('GET','/api/status');
   if(!s)return;
@@ -528,6 +641,7 @@ async function refresh(){
   renderFan(s.fan);
   renderVoice(s.voice);
   syncLedsFromStatus(s);
+  syncServosFromStatus(s);
   const rd=await api('GET','/api/radar');
   if(rd){
     const pwr=document.getElementById('swRadarPwr');
@@ -537,22 +651,6 @@ async function refresh(){
     renderIgnore(rd);
     renderRadarSchedule(rd,s);
   }
-}
-async function setRadarSchedule(){
-  const sw=document.getElementById('swRadarSched');
-  const onEl=document.getElementById('rdSchedOn');
-  const offEl=document.getElementById('rdSchedOff');
-  const body={
-    scheduleEnable:!!(sw&&sw.checked),
-    scheduleOn:(onEl&&onEl.value)||'',
-    scheduleOff:(offEl&&offEl.value)||''
-  };
-  if(sw) sw.disabled=true;
-  try{
-    const j=await api('POST','/api/radar',body);
-    if(j&&j.ok===false && sw) sw.checked=!body.scheduleEnable;
-  }finally{if(sw) sw.disabled=false}
-  refresh();
 }
 async function setFanAuto(on){
   const sw=document.getElementById('swFanAuto');
@@ -568,6 +666,15 @@ async function setFanGesture(on){
   if(sw) sw.disabled=true;
   try{
     const j=await api('POST','/api/fan',{gesture:!!on});
+    if(!j||j.ok===false){if(sw) sw.checked=!on}
+  }finally{if(sw) sw.disabled=false}
+  refresh();
+}
+async function setFanTrack(on){
+  const sw=document.getElementById('swFanTrack');
+  if(sw) sw.disabled=true;
+  try{
+    const j=await api('POST','/api/fan',{track:!!on});
     if(!j||j.ok===false){if(sw) sw.checked=!on}
   }finally{if(sw) sw.disabled=false}
   refresh();
